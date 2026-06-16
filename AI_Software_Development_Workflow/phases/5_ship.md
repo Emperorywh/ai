@@ -37,6 +37,7 @@
 1. 更新 `docs/changelog.md`：本 Milestone 做了什么、破坏性变更、已知问题。
 2. 必要时更新 `docs/spec.md`（需求有调整时）。
 3. 在 `docs/milestones/M01-*.md` 标记「已完成」。
+4. 更新 `docs/progress.md`：「Milestone 完成度」表把该 MS 标 ✅，当前指针指向下一个 Milestone 的第一个 Task。
 
 ## 完成自检
 - [ ] 分支 / commit 规范遵守

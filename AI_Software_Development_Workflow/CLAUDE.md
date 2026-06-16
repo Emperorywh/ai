@@ -11,6 +11,7 @@
 
 - 项目的工作节奏：**5 个阶段 + 1 条回路**
 - 产物如何**落盘**到 `docs/`（agent 跨会话的"记忆"）
+- **进度驱动 + 一句提示词推进**：靠 `docs/progress.md` 串起全流程，粘贴一段 bootstrap 就自动往前走
 - 开发的**风险分级**（哪些 agent 自主做、哪些要人确认）
 - **测试内建**与**自测循环**的硬性要求
 - **版本控制**约定（分支 / commit / PR）
@@ -38,6 +39,16 @@ understand    plan      build      verify     ship
 - 任何阶段发现**需求本身有问题** → 回 `1 理解`，更新 spec。
 
 每个阶段不是"说一段话"，而是"**产出一份落盘文件 + 通过自检 checklist**"。
+
+### 进度驱动 + 一句提示词推进（日常怎么往前走）
+
+阶段流程靠 `docs/progress.md` 这条**主线**串起来，而不是靠人手动切 prompt：
+
+- **`progress.md` 是开发驱动器**：它带「当前指针」，记录"当前 Milestone / 当前 Task（表中第一个非 ✅）/ 总体进度"。任何阶段开工前，先读它定位下一步。
+- **`context-bootstrap.md` 是「一句提示词」入口**：新会话或首次接入时，粘贴它的极简全文（见 `templates/`），agent 就自动跑这条闭环：
+  `读 progress → 定位当前 Task → 读 roadmap 拿边界/验收 → 实现+自测循环到绿 → 更新 progress(✅+commit) → 报告下一个 Task`。
+- **推进协议（Advance）**：用户粘贴 bootstrap、或直接说「继续 / 推进 / next / 接着做」时，执行上面这条闭环，做完一个 Task 就停、报告，等下一个指令。发现 P0 / 验收 FAIL → 回阶段 3 修复（回路），不重走全流程。
+- 这让 agent 从"一条要手动切 prompt 的流水线"，变成"有记忆、能自己往前走的工程师"。
 
 ---
 
@@ -68,6 +79,7 @@ understand    plan      build      verify     ship
 
 ### 2.6 不随意改已验收模块
 - 可以改，但改 `docs/` 标记为"已验收"的模块时，必须在实现方案里说明**理由**并更新对应测试。
+- 同理：改 `progress.md` 是为了**如实记录进度**，不是用来"绕过"依赖或跳过 Task。
 - 是"留痕"，不是"禁止"。
 
 ---
@@ -78,6 +90,8 @@ understand    plan      build      verify     ship
 docs/
 ├── spec.md                  # 【阶段1】需求与规格（单一事实源）
 ├── roadmap.md               # 【阶段2】Milestone 路线图
+├── progress.md              # 【阶段2起维护】进度单一可信源 = 开发驱动器 ⭐
+├── context-bootstrap.md     # 【会话恢复】新会话粘贴的「一句提示词」 ⭐
 ├── milestones/
 │   └── M01-<slug>.md        # 【阶段2】每个 Milestone 的定义
 ├── tasks/
@@ -88,7 +102,7 @@ docs/
 └── changelog.md             # 【阶段5】每个 Milestone 的发布说明
 ```
 
-模板见 `templates/`。新项目时 `cp -r templates/ docs/` 起步。
+⭐ `progress.md` / `context-bootstrap.md` 用**固定文件名、不带日期版本**——被 agent 按固定路径反复读写（区别于 spec / roadmap 可带日期版本号）。模板见 `templates/`，新项目 `cp -r templates/ docs/` 起步。
 
 ---
 
@@ -119,8 +133,14 @@ docs/
 2. 把对现状的理解写进 `docs/spec.md` 的「现状」章节，再谈新需求。
 3. 其余同上。
 
+### 日常推进（最常用）
+- **首次接入**：把 `templates/context-bootstrap.template.md` 复制到 `docs/context-bootstrap.md`，填好占位符。
+- **开新会话**：粘贴 `docs/context-bootstrap.md`「👇 复制这段」框内的全文作为第一条消息；或项目已配置时直接说「继续 / 推进」。
+- agent 会读 `docs/progress.md` 定位当前 Task → 执行 → 自测 → 更新 progress → 报告下一个 Task。
+
 ### 给 agent 的入口指令
-> "按 CLAUDE.md 的工作流推进。当前在 [阶段]，先读 `docs/` 下相关产物。"
+> 规划期："按 CLAUDE.md 的工作流推进。当前在 [阶段]，先读 `docs/` 下相关产物。"
+> 推进期："继续 / 推进。"（触发推进协议，见 §1）
 
 ---
 
@@ -129,10 +149,10 @@ docs/
 | 阶段 | 输入（读） | 输出（写） | prompt |
 |---|---|---|---|
 | 1 理解 | 对话 / 现有代码 | `docs/spec.md` | `phases/1_understand.md` |
-| 2 规划 | `docs/spec.md` | `docs/roadmap.md`、`docs/milestones/`、`docs/tasks/` | `phases/2_plan.md` |
-| 3 执行 | Task 文件 + spec | 代码 + 测试 + Task 完成记录 | `phases/3_build.md` |
-| 4 验证 | 代码 + 验收标准 | 验证记录（写回 Task 文件） | `phases/4_verify.md` |
-| 5 集成 | 已验证的 Task | PR / 发布 + `docs/changelog.md` | `phases/5_ship.md` |
+| 2 规划 | `docs/spec.md` | `docs/roadmap.md`、`docs/milestones/`、`docs/tasks/`、**`docs/progress.md`（初始化）** | `phases/2_plan.md` |
+| 3 执行 | **`docs/progress.md`（定位当前 Task）** + Task 文件 + spec | 代码 + 测试 + Task 完成记录 + **`docs/progress.md` 标 ✅ + commit hash + 移指针** | `phases/3_build.md` |
+| 4 验证 | 代码 + 验收标准 | 验证记录（写回 Task 文件）+ 复核 `docs/progress.md`（P0 则回退 🔄） | `phases/4_verify.md` |
+| 5 集成 | 已验证的 Task | PR / 发布 + `docs/changelog.md` + **`docs/progress.md` 更新 Milestone 完成度** | `phases/5_ship.md` |
 
 ---
 
@@ -142,4 +162,5 @@ docs/
 - ❌ 不要在 build 阶段重新设计架构 —— 架构问题记到 `docs/decisions/`，回到规划。
 - ❌ 不要写"后续考虑 / 可以扩展 / 视情况而定" —— SPEC 要明确，模糊就是阶段 1 没做完。
 - ❌ 不要跳过测试 —— 没有通过的测试，build 就没完成。
+- ❌ 不要跳过未 ✅ 的前置 Task，也不要改 `progress.md` 来"绕过"依赖。
 - ❌ 不要未经确认 push / 开 PR / 删除文件。

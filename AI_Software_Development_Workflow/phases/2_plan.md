@@ -11,6 +11,7 @@
 - `docs/milestones/M01-<slug>.md`：每个 Milestone 定义
 - `docs/tasks/backlog.md`：Task 清单（带状态/优先级/风险）
 - `docs/tasks/M01-T01-<slug>.md`：单个 Task 定义（按需建）
+- **`docs/progress.md`：初始化进度表（Task 状态全 ⬜、「当前指针」指向第一个 Task）—— 后续开发的驱动器**
 
 ## Milestone 拆分原则
 - **按用户价值拆，不按技术层拆。**
@@ -41,6 +42,7 @@
 - [ ] `backlog.md` 的 Task 粒度合适（能一轮做完 + 自测）
 - [ ] Task 依赖关系清晰（DAG，无环）
 - [ ] 每个 Task 标了风险等级
+- [ ] `docs/progress.md` 已初始化（Task 状态表 + 当前指针指向 T01）
 
 ## 完成后
 输出「推荐开发顺序」，告诉用户："阶段 2 完成，规划已落盘。是否进入阶段 3，从 Task X 开始？"
