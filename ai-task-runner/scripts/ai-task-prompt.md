@@ -12,15 +12,15 @@
 3. 不要主动格式化无关代码。
 4. 新增、修改代码必须写多行简体中文注释。
 5. 不启动浏览器测试。
-6. 不要修改 task 状态。
+6. 不要修改 docs/tasks 下的任何任务文件，也不要修改 task 状态、verify、agent_allowed_paths。
 7. 不要提交 git commit，提交由 runner 处理。
 8. 如果当前架构不适合实现，请停止实现，并在最后单独输出：AI_TASK_BLOCKED: 原因。
 9. 如果需求不明确但可以合理默认，请写出默认假设并继续。
 10. 如果必须用户确认才能继续，请停止实现，并在最后单独输出：AI_TASK_BLOCKED: 原因。
 
-允许修改路径：
+AI 允许修改代码路径：
 
-{allowedPaths}
+{agentAllowedPaths}
 
 验证命令：
 

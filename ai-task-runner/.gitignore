@@ -1,0 +1,3 @@
+node_modules/
+.ai-task-runner.lock
+docs/ai-runner-logs/
