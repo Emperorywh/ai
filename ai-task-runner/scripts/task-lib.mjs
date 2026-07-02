@@ -2,6 +2,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync, appendFileSync, unlinkSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
 
 /*
@@ -20,10 +21,17 @@ export const TASK_STATUS = Object.freeze({
 });
 
 const RUNNABLE_STATUS = TASK_STATUS.ready;
+/*
+ * Runner 自身目录和目标项目目录必须分离。
+ * 这样工具可以作为独立包跨项目复用，目标项目只需要保存 SPEC/PLAN/tasks，
+ * 不需要复制 Runner 的执行 prompt 或脚本实现。
+ */
+const RUNNER_ROOT = path.resolve(path.join(path.dirname(fileURLToPath(import.meta.url)), '..'));
 const RUNNER_IGNORED_CHANGED_PATHS = ['.ai-task-runner.lock', 'docs/ai-runner-logs'];
 const REQUIRED_TASK_FIELDS = ['id', 'status', 'branch', 'spec', 'plan', 'commit', 'depends_on', 'agent_allowed_paths', 'verify'];
 const DEFAULT_CLAUDE_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_VERIFY_TIMEOUT_MS = 10 * 60 * 1000;
+const DEFAULT_CONFIG_PATH = '.ai-runner/config.yml';
 
 /*
  * 这些路径过宽或会破坏 Runner 自己的调度数据。
@@ -48,17 +56,37 @@ const FORBIDDEN_AGENT_PATHS = new Set([
 ]);
 
 /*
+ * 这些是跨项目通用的受保护文件模式。
+ * 它们表达的是 Runner 的分层边界：实现阶段可以改业务代码和测试，
+ * 但不能反向修改已经确认的规格、计划、任务状态或 git 元数据。
+ */
+const DEFAULT_FORBIDDEN_AGENT_PATH_PATTERNS = [
+  'docs/tasks/**',
+  'docs/SPEC_*',
+  'docs/PLAN_*',
+  '.git/**',
+  '.ai-runner/**',
+  '.ai-task-runner.lock',
+  'scripts/ai-task-*'
+];
+
+/*
  * verify 只应该做可结束的检查。
  * 这里拦截会改变 git 历史、删除文件或启动长期服务的命令，
  * 避免验证阶段把工作区推进到 Runner 无法推导的状态。
  */
 const DISALLOWED_VERIFY_COMMANDS = [
   { pattern: /\bgit\s+(add|commit|push|reset|checkout|switch|merge|rebase)\b/i, reason: 'verify 不能执行 git 变更命令' },
+  { pattern: /\bgit\s+(clean|restore|rm|stash)\b/i, reason: 'verify 不能执行 git 工作区破坏命令' },
   { pattern: /\brm\s+-rf\b/i, reason: 'verify 不能执行递归删除' },
+  { pattern: /\brm\s+-fr\b/i, reason: 'verify 不能执行递归删除' },
+  { pattern: /\brimraf\b/i, reason: 'verify 不能执行递归删除' },
   { pattern: /\bRemove-Item\b[\s\S]*\b-Recurse\b/i, reason: 'verify 不能执行递归删除' },
   { pattern: /\bdel\s+\/s\b/i, reason: 'verify 不能执行递归删除' },
+  { pattern: /\brd\s+\/s\b/i, reason: 'verify 不能执行递归删除' },
+  { pattern: /\brmdir\s+\/s\b/i, reason: 'verify 不能执行递归删除' },
   { pattern: /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:dev|start|serve)\b/i, reason: 'verify 不能启动长期运行的开发服务' },
-  { pattern: /\b(?:vite|next|nuxt|astro)\s+dev\b/i, reason: 'verify 不能启动长期运行的开发服务' }
+  { pattern: /\b(?:vite|next|nuxt|astro)\s+(?:dev|start|serve)\b/i, reason: 'verify 不能启动长期运行的开发服务' }
 ];
 
 /*
@@ -73,6 +101,18 @@ export function parseRunnerCliArgs(argv) {
 
     if (arg === '--project-root') {
       options.projectRoot = requireNextArg(argv, index, arg);
+      index += 1;
+      continue;
+    }
+
+    if (arg === '--runner-root') {
+      options.runnerRoot = requireNextArg(argv, index, arg);
+      index += 1;
+      continue;
+    }
+
+    if (arg === '--config') {
+      options.configPath = requireNextArg(argv, index, arg);
       index += 1;
       continue;
     }
@@ -99,6 +139,11 @@ export function parseRunnerCliArgs(argv) {
       continue;
     }
 
+    if (arg === '--allow-empty') {
+      options.allowEmpty = true;
+      continue;
+    }
+
     throw new Error(`未知参数：${arg}`);
   }
 
@@ -107,17 +152,157 @@ export function parseRunnerCliArgs(argv) {
 
 export function createRunnerContext(options = {}) {
   const projectRoot = path.resolve(options.projectRoot || process.cwd());
+  const runnerRoot = path.resolve(options.runnerRoot || RUNNER_ROOT);
+  const config = readRunnerConfig(projectRoot, options.configPath);
+  const promptTemplatePath = resolveConfigPath(
+    projectRoot,
+    runnerRoot,
+    config.prompt_template_path,
+    path.join(runnerRoot, 'scripts', 'ai-task-prompt.md')
+  );
 
   return {
     projectRoot,
-    taskDir: path.join(projectRoot, 'docs', 'tasks'),
-    promptTemplatePath: path.join(projectRoot, 'scripts', 'ai-task-prompt.md'),
-    logDir: path.join(projectRoot, 'docs', 'ai-runner-logs'),
-    lockFile: path.join(projectRoot, '.ai-task-runner.lock'),
+    runnerRoot,
+    configPath: resolveOptionalConfigPath(projectRoot, options.configPath),
+    taskDir: resolveConfigPath(projectRoot, runnerRoot, config.task_dir, path.join(projectRoot, 'docs', 'tasks')),
+    promptTemplatePath,
+    logDir: resolveConfigPath(projectRoot, runnerRoot, config.log_dir, path.join(projectRoot, 'docs', 'ai-runner-logs')),
+    lockFile: resolveConfigPath(projectRoot, runnerRoot, config.lock_file, path.join(projectRoot, '.ai-task-runner.lock')),
     taskId: options.taskId ? String(options.taskId) : '',
     dryRun: Boolean(options.dryRun),
+    allowEmpty: Boolean(options.allowEmpty),
+    branchPolicy: normalizeBranchPolicy(config.branch_policy),
+    forbiddenAgentPathPatterns: normalizeForbiddenAgentPathPatterns(config.forbidden_agent_paths),
+    verifyPolicy: normalizeVerifyPolicy(config.verify_policy),
     claudeTimeoutMs: readTimeoutMs('AI_RUNNER_CLAUDE_TIMEOUT_MS', DEFAULT_CLAUDE_TIMEOUT_MS),
     verifyTimeoutMs: readTimeoutMs('AI_RUNNER_VERIFY_TIMEOUT_MS', DEFAULT_VERIFY_TIMEOUT_MS)
+  };
+}
+
+/*
+ * 项目配置是跨项目通用性的扩展点。
+ * 没有配置文件时使用 Runner 内置默认值；显式传入 --config 时文件必须存在，
+ * 避免用户以为某套项目策略已经生效，实际却被静默忽略。
+ */
+function readRunnerConfig(projectRoot, configPath) {
+  const resolvedConfigPath = resolveOptionalConfigPath(projectRoot, configPath);
+
+  if (!existsSync(resolvedConfigPath)) {
+    if (configPath) {
+      throw new Error(`指定的 Runner 配置文件不存在：${toPosix(resolvedConfigPath)}`);
+    }
+
+    return {};
+  }
+
+  const document = YAML.parseDocument(readFileSync(resolvedConfigPath, 'utf8'), {
+    prettyErrors: true,
+    strict: true
+  });
+
+  if (document.errors.length > 0) {
+    throw new Error(`Runner 配置文件不是合法 YAML：${document.errors[0].message}`);
+  }
+
+  const config = document.toJS() || {};
+
+  if (!config || Array.isArray(config) || typeof config !== 'object') {
+    throw new Error('Runner 配置文件必须是 YAML 对象。');
+  }
+
+  return config;
+}
+
+/*
+ * 配置里的路径默认相对目标项目解析。
+ * 只有 Runner 自带的默认 prompt 会落在 runnerRoot 下，这样既能跨项目复用，
+ * 又不会允许配置把关键路径指向项目和工具目录之外。
+ */
+function resolveConfigPath(projectRoot, runnerRoot, rawValue, defaultPath) {
+  const targetPath = rawValue
+    ? path.resolve(projectRoot, String(rawValue))
+    : path.resolve(defaultPath);
+
+  if (!isInsideRoot(projectRoot, targetPath) && !isInsideRoot(runnerRoot, targetPath)) {
+    throw new Error(`Runner 配置路径必须位于项目或 Runner 目录内：${rawValue || defaultPath}`);
+  }
+
+  return targetPath;
+}
+
+function resolveOptionalConfigPath(projectRoot, configPath = '') {
+  const rawPath = configPath || DEFAULT_CONFIG_PATH;
+  const targetPath = path.isAbsolute(rawPath)
+    ? path.resolve(rawPath)
+    : path.resolve(projectRoot, rawPath);
+
+  if (!isInsideRoot(projectRoot, targetPath)) {
+    throw new Error(`Runner 配置文件必须位于项目内：${rawPath}`);
+  }
+
+  return targetPath;
+}
+
+/*
+ * 项目可以追加更多受保护路径模式。
+ * 默认模式只保护 SPEC/PLAN/task/Runner 元数据，业务项目仍然可以按 task 需要
+ * 精确允许普通文档、测试夹具或其它非代码资产。
+ */
+function normalizeForbiddenAgentPathPatterns(value) {
+  return [
+    ...DEFAULT_FORBIDDEN_AGENT_PATH_PATTERNS,
+    ...normalizeArray(value)
+  ].map(normalizeAllowedPath);
+}
+
+/*
+ * verify 策略支持项目级 allowlist 和 denylist。
+ * denylist 用正则表达式表达高风险命令；allowlist 用前缀表达可接受命令族，
+ * 让不同技术栈可以复用 Runner，而不是把 pnpm/npm/vitest 等细节写死在核心里。
+ */
+function normalizeVerifyPolicy(value) {
+  const policy = value && typeof value === 'object' && !Array.isArray(value)
+    ? value
+    : {};
+  const allowPrefixes = normalizeArray(policy.allow_prefixes).map((item) => String(item).trim()).filter(Boolean);
+  const denyPatterns = normalizeArray(policy.deny_patterns)
+    .map((pattern) => {
+      try {
+        return new RegExp(pattern, 'i');
+      } catch (error) {
+        throw new Error(`verify_policy.deny_patterns 包含非法正则：${pattern}`);
+      }
+    });
+
+  return {
+    allowPrefixes,
+    denyPatterns
+  };
+}
+
+/*
+ * 分支策略必须显式表达，避免批量执行时分支来源依赖“当前所在分支”这种隐式状态。
+ * 默认 chained 保持现有串行累积行为；base 模式适合彼此独立的 task 分支。
+ */
+function normalizeBranchPolicy(value) {
+  const policy = value && typeof value === 'object' && !Array.isArray(value)
+    ? value
+    : {};
+  const mode = String(policy.mode || 'chained').trim();
+  const baseBranch = String(policy.base_branch || '').trim();
+
+  if (!['chained', 'base'].includes(mode)) {
+    throw new Error(`branch_policy.mode 只能是 chained 或 base：${mode}`);
+  }
+
+  if (mode === 'base' && !baseBranch) {
+    throw new Error('branch_policy.mode 为 base 时必须声明 branch_policy.base_branch。');
+  }
+
+  return {
+    mode,
+    baseBranch
   };
 }
 
@@ -162,7 +347,7 @@ export function validateTaskQueue(options = {}) {
   const context = resolveContext(options);
   const tasks = loadTasks(context);
 
-  validateTaskSet(context, tasks);
+  validateTaskSet(context, tasks, { allowEmpty: context.allowEmpty });
   console.log(`任务队列校验通过：${tasks.length} 个任务。`);
 
   return tasks;
@@ -175,7 +360,7 @@ export async function runNextTask(options = {}) {
     ensureGitRepository(context);
 
     const tasks = loadTasks(context);
-    validateTaskSet(context, tasks);
+    validateTaskSet(context, tasks, { allowEmpty: true });
     const task = selectRunnableTask(context, tasks);
 
     if (!task) {
@@ -240,11 +425,13 @@ async function runTask(context, task, tasks) {
     const blockedReason = extractBlockedReason(`${claudeResult.stdout}\n${claudeResult.stderr}`);
 
     if (blockedReason) {
+      assertPostRunSafety(context, runningTask, runnerOwnedSnapshots);
       markTaskStatus(context, runningTask, TASK_STATUS.blocked, blockedReason);
       throw new Error(`任务被标记为 blocked：${blockedReason}`);
     }
 
     if (claudeResult.exitCode !== 0) {
+      assertPostRunSafety(context, runningTask, runnerOwnedSnapshots);
       throw new Error(`Claude Code 执行失败，退出码：${claudeResult.exitCode}`);
     }
 
@@ -270,6 +457,10 @@ async function runTask(context, task, tasks) {
 }
 
 function validateTaskSet(context, tasks, options = {}) {
+  if (tasks.length === 0 && !options.allowEmpty) {
+    throw new Error('没有找到 docs/tasks/*.md 任务文件，无法校验可执行任务队列。');
+  }
+
   const seenIds = new Set();
 
   for (const task of tasks) {
@@ -285,6 +476,8 @@ function validateTaskSet(context, tasks, options = {}) {
   for (const task of tasks) {
     validateTaskDependencies(task, tasks);
   }
+
+  validateTaskDependencyGraph(tasks);
 }
 
 function validateTaskSchema(context, task, options = {}) {
@@ -310,8 +503,8 @@ function validateTaskSchema(context, task, options = {}) {
   validateStringField(task, 'branch');
   validateStringField(task, 'commit');
   validateTaskTitle(task);
-  validateAgentAllowedPaths(task);
-  validateVerifyCommands(task);
+  validateAgentAllowedPaths(context, task);
+  validateVerifyCommands(context, task);
 }
 
 function validateTaskDependencies(task, tasks) {
@@ -322,6 +515,46 @@ function validateTaskDependencies(task, tasks) {
       throw new Error(`${task.relativePath} 依赖了不存在的任务：${dependencyId}`);
     }
   }
+}
+
+/*
+ * Runner 只能执行有向无环任务图。
+ * 如果 PLAN 里出现循环依赖，所有相关 task 都永远无法进入 done，
+ * 因此必须在执行前审查阶段直接报出完整依赖链。
+ */
+function validateTaskDependencyGraph(tasks) {
+  const visiting = new Set();
+  const visited = new Set();
+  const stack = [];
+
+  for (const task of tasks) {
+    visitTaskDependencyNode(task, tasks, visiting, visited, stack);
+  }
+}
+
+function visitTaskDependencyNode(task, tasks, visiting, visited, stack) {
+  const taskId = String(task.meta.id);
+
+  if (visited.has(taskId)) {
+    return;
+  }
+
+  if (visiting.has(taskId)) {
+    const cycleStartIndex = stack.indexOf(taskId);
+    const cycle = [...stack.slice(cycleStartIndex), taskId].join(' -> ');
+    throw new Error(`任务依赖存在循环：${cycle}`);
+  }
+
+  visiting.add(taskId);
+  stack.push(taskId);
+
+  for (const dependencyId of normalizeArray(task.meta.depends_on)) {
+    visitTaskDependencyNode(findTaskById(tasks, dependencyId), tasks, visiting, visited, stack);
+  }
+
+  stack.pop();
+  visiting.delete(taskId);
+  visited.add(taskId);
 }
 
 function validateStringField(task, field) {
@@ -349,8 +582,13 @@ function ensureRelativeFileExists(context, task, field) {
   }
 }
 
-function validateAgentAllowedPaths(task) {
+function validateAgentAllowedPaths(context, task) {
   const allowedPaths = normalizeArray(task.meta.agent_allowed_paths);
+  const protectedFiles = [
+    task.relativePath,
+    task.meta.spec,
+    task.meta.plan
+  ].map(normalizeAllowedPath);
 
   if (allowedPaths.length === 0) {
     throw new Error(`${task.relativePath} 缺少 agent_allowed_paths。每个 task 必须限制 AI 可改范围。`);
@@ -367,13 +605,17 @@ function validateAgentAllowedPaths(task) {
       throw new Error(`${task.relativePath} 的 agent_allowed_paths 必须是项目内相对路径：${rawPath}`);
     }
 
-    if (normalizedPath === task.relativePath || normalizedPath.startsWith('docs/tasks/')) {
-      throw new Error(`${task.relativePath} 不能允许 AI 修改 task 状态文件：${rawPath}`);
+    if (isProtectedRunnerFile(normalizedPath, protectedFiles)) {
+      throw new Error(`${task.relativePath} 不能允许 AI 修改 SPEC/PLAN/task 状态文件：${rawPath}`);
+    }
+
+    if (matchesAnyPathPattern(normalizedPath, context.forbiddenAgentPathPatterns)) {
+      throw new Error(`${task.relativePath} 的 agent_allowed_paths 命中受保护路径：${rawPath}`);
     }
   }
 }
 
-function validateVerifyCommands(task) {
+function validateVerifyCommands(context, task) {
   const verifyCommands = normalizeArray(task.meta.verify);
 
   if (verifyCommands.length === 0) {
@@ -381,14 +623,26 @@ function validateVerifyCommands(task) {
   }
 
   for (const command of verifyCommands) {
-    if (!String(command).trim()) {
+    const normalizedCommand = String(command).trim();
+
+    if (!normalizedCommand) {
       throw new Error(`${task.relativePath} 存在空 verify 命令。`);
     }
 
     for (const rule of DISALLOWED_VERIFY_COMMANDS) {
-      if (rule.pattern.test(command)) {
-        throw new Error(`${task.relativePath} 的 verify 不合理：${rule.reason}：${command}`);
+      if (rule.pattern.test(normalizedCommand)) {
+        throw new Error(`${task.relativePath} 的 verify 不合理：${rule.reason}：${normalizedCommand}`);
       }
+    }
+
+    for (const pattern of context.verifyPolicy.denyPatterns) {
+      if (pattern.test(normalizedCommand)) {
+        throw new Error(`${task.relativePath} 的 verify 命中项目 denylist：${normalizedCommand}`);
+      }
+    }
+
+    if (context.verifyPolicy.allowPrefixes.length > 0 && !hasAllowedCommandPrefix(normalizedCommand, context.verifyPolicy.allowPrefixes)) {
+      throw new Error(`${task.relativePath} 的 verify 不在项目 allowlist 中：${normalizedCommand}`);
     }
   }
 }
@@ -603,6 +857,16 @@ function ensureBranch(context, branch) {
   if (branches) {
     runGit(context, ['switch', branch]);
   } else {
+    /*
+     * base 模式把新 task 分支固定创建在配置的 base_branch 上。
+     * chained 模式保留原先“从当前分支继续创建”的行为，适合一串强依赖任务
+     * 逐个落地并让后续 task 直接继承前序提交。
+     */
+    if (context.branchPolicy.mode === 'base') {
+      runGit(context, ['rev-parse', '--verify', context.branchPolicy.baseBranch], { capture: true });
+      runGit(context, ['switch', context.branchPolicy.baseBranch]);
+    }
+
     runGit(context, ['switch', '-c', branch]);
   }
 }
@@ -679,13 +943,32 @@ function ensureTaskChangedSomething(context, task, runnerOwnedSnapshots) {
 function validateAgentChangedPaths(context, task, runnerOwnedSnapshots) {
   ensureRunnerOwnedFilesUnchanged(context, runnerOwnedSnapshots);
 
-  const allowedPaths = normalizeArray(task.meta.agent_allowed_paths).map(normalizeAllowedPath);
-  const blockedFiles = getAgentChangedFiles(context, runnerOwnedSnapshots)
-    .filter((filePath) => !isAllowedFile(filePath, allowedPaths));
+  const blockedFiles = collectAgentPathViolations(context, task, runnerOwnedSnapshots);
 
   if (blockedFiles.length > 0) {
     throw new Error(`检测到超出 agent_allowed_paths 的改动：\n${blockedFiles.join('\n')}`);
   }
+}
+
+/*
+ * 即使 Claude 主动 blocked 或执行失败，也必须先确认它没有越界修改。
+ * 失败状态不能成为绕过路径边界的出口，否则下一轮 Runner 会在污染后的工作区上运行。
+ */
+function assertPostRunSafety(context, task, runnerOwnedSnapshots) {
+  ensureRunnerOwnedFilesUnchanged(context, runnerOwnedSnapshots);
+
+  const blockedFiles = collectAgentPathViolations(context, task, runnerOwnedSnapshots);
+
+  if (blockedFiles.length > 0) {
+    throw new Error(`任务停止前产生了超出 agent_allowed_paths 的改动：\n${blockedFiles.join('\n')}`);
+  }
+}
+
+function collectAgentPathViolations(context, task, runnerOwnedSnapshots) {
+  const allowedPaths = normalizeArray(task.meta.agent_allowed_paths).map(normalizeAllowedPath);
+
+  return getAgentChangedFiles(context, runnerOwnedSnapshots)
+    .filter((filePath) => !isAllowedFile(filePath, allowedPaths));
 }
 
 function getAgentChangedFiles(context, runnerOwnedSnapshots) {
@@ -696,10 +979,11 @@ function getAgentChangedFiles(context, runnerOwnedSnapshots) {
 
 async function runClaudeTask(context, task, logPath) {
   const prompt = buildPrompt(context, task);
-  const { command, args } = createClaudeCommand(prompt);
+  const claudeCommand = process.env.AI_RUNNER_CLAUDE_BIN || 'claude';
+  const { command, args } = createClaudeCommand(prompt, logPath);
 
-  appendLog(logPath, `启动 Claude Code：${command} -p <task-prompt>`);
-  console.log(`启动 Claude Code：${command} -p <task-prompt>`);
+  appendLog(logPath, `启动 Claude Code：${claudeCommand} -p <task-prompt>`);
+  console.log(`启动 Claude Code：${claudeCommand} -p <task-prompt>`);
 
   return runCommand(context, command, args, {
     shell: false,
@@ -710,11 +994,51 @@ async function runClaudeTask(context, task, logPath) {
   });
 }
 
-function createClaudeCommand(prompt) {
+function createClaudeCommand(prompt, logPath = '') {
   const command = process.env.AI_RUNNER_CLAUDE_BIN || 'claude';
+
+  if (process.platform === 'win32') {
+    return createWindowsClaudeCommand(command, prompt, logPath);
+  }
+
   const args = ['-p', prompt];
 
   return { command, args };
+}
+
+/*
+ * Windows 上的全局 CLI 经常是 .cmd 包装器，不能可靠地用 shell:false 直接启动。
+ * 这里把多行 prompt 写入日志目录旁的文件，再用 PowerShell 读取后作为参数传入，
+ * 避免把大段 prompt 拼进 cmd 命令行造成截断、转义错误或命令注入。
+ */
+function createWindowsClaudeCommand(command, prompt, logPath) {
+  if (!logPath) {
+    return { command, args: ['-p', prompt] };
+  }
+
+  const promptPath = `${logPath}.prompt.md`;
+  writeFileSync(promptPath, prompt, 'utf8');
+
+  const script = [
+    '$ErrorActionPreference = "Stop"',
+    '$ProgressPreference = "SilentlyContinue"',
+    `$prompt = Get-Content -Raw -LiteralPath ${toPowerShellSingleQuoted(promptPath)}`,
+    `& ${toPowerShellSingleQuoted(command)} -p $prompt`,
+    'exit $LASTEXITCODE'
+  ].join('\n');
+
+  return {
+    command: 'powershell.exe',
+    args: [
+      '-NoLogo',
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-EncodedCommand',
+      Buffer.from(script, 'utf16le').toString('base64')
+    ]
+  };
 }
 
 function buildPrompt(context, task) {
@@ -820,13 +1144,21 @@ function getChangedFiles(context) {
 
   return uniqueLines(`${unstaged}\n${staged}\n${untracked}`)
     .map(toPosix)
-    .filter((filePath) => !isRunnerIgnoredChangedPath(filePath));
+    .filter((filePath) => !isRunnerIgnoredChangedPath(context, filePath));
 }
 
-function isRunnerIgnoredChangedPath(filePath) {
+function isRunnerIgnoredChangedPath(context, filePath) {
   const normalizedPath = normalizeAllowedPath(filePath);
+  const configuredIgnoredPaths = [
+    toProjectRelativePath(context, context.lockFile),
+    toProjectRelativePath(context, context.logDir)
+  ].filter(Boolean);
+  const ignoredPaths = [
+    ...RUNNER_IGNORED_CHANGED_PATHS,
+    ...configuredIgnoredPaths
+  ].map(normalizeAllowedPath);
 
-  return RUNNER_IGNORED_CHANGED_PATHS.some((ignoredPath) => {
+  return ignoredPaths.some((ignoredPath) => {
     return normalizedPath === ignoredPath || normalizedPath.startsWith(`${ignoredPath}/`);
   });
 }
@@ -968,6 +1300,36 @@ function normalizeAllowedPath(filePath) {
   return toPosix(String(filePath || '')).replace(/^\.?\//, '').replace(/\/+$/, '');
 }
 
+function isProtectedRunnerFile(filePath, protectedFiles) {
+  const normalizedPath = normalizeAllowedPath(filePath);
+
+  return protectedFiles.some((protectedFile) => {
+    return normalizedPath === protectedFile || normalizedPath.startsWith(`${protectedFile}/`);
+  });
+}
+
+function matchesAnyPathPattern(filePath, patterns) {
+  const normalizedPath = normalizeAllowedPath(filePath);
+
+  return patterns.some((pattern) => pathPatternToRegExp(pattern).test(normalizedPath));
+}
+
+/*
+ * 这里只实现 Runner 需要的最小 glob 语义。
+ * 单星号匹配一个路径片段内的任意字符，双星号匹配跨目录内容，
+ * 避免为了受保护路径判断引入额外依赖和新的跨项目安装成本。
+ */
+function pathPatternToRegExp(pattern) {
+  const normalizedPattern = normalizeAllowedPath(pattern);
+  const escaped = normalizedPattern
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replaceAll('**', '__AI_RUNNER_DOUBLE_STAR__')
+    .replaceAll('*', '[^/]*')
+    .replaceAll('__AI_RUNNER_DOUBLE_STAR__', '.*');
+
+  return new RegExp(`^${escaped}$`);
+}
+
 function isAllowedFile(filePath, allowedPaths) {
   const normalizedFilePath = normalizeAllowedPath(filePath);
 
@@ -980,12 +1342,30 @@ function isAllowedFile(filePath, allowedPaths) {
   });
 }
 
+function hasAllowedCommandPrefix(command, allowPrefixes) {
+  return allowPrefixes.some((prefix) => command === prefix || command.startsWith(`${prefix} `));
+}
+
 function uniqueLines(text) {
   return [...new Set(text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean))];
 }
 
 function toPosix(filePath) {
   return String(filePath).split(path.sep).join('/');
+}
+
+function toProjectRelativePath(context, targetPath) {
+  if (!isInsideRoot(context.projectRoot, targetPath)) {
+    return '';
+  }
+
+  return toPosix(path.relative(context.projectRoot, targetPath));
+}
+
+function isInsideRoot(root, targetPath) {
+  const relativePath = path.relative(path.resolve(root), path.resolve(targetPath));
+
+  return !relativePath.startsWith('..') && !path.isAbsolute(relativePath);
 }
 
 function resolveProjectPath(context, relativePath) {
@@ -1039,4 +1419,12 @@ function shellQuote(value) {
    * 这里做最小 shell 转义，避免自定义命令路径中包含空格或引号时破坏检查命令。
    */
   return `'${String(value).replaceAll("'", "'\\''")}'`;
+}
+
+function toPowerShellSingleQuoted(value) {
+  /*
+   * PowerShell 单引号字符串用两个单引号表达字面量单引号。
+   * Claude 命令和 prompt 文件路径都通过这里进入脚本，避免破坏 EncodedCommand。
+   */
+  return `'${String(value).replaceAll("'", "''")}'`;
 }

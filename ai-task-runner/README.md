@@ -45,9 +45,46 @@ npm run ai:reset -- --task TASK_001 --status ready
 可选参数：
 
 - `--project-root <path>`：指定真实项目根目录。
+- `--runner-root <path>`：指定 Runner 工具根目录，默认自动使用当前脚本所在目录。
+- `--config <path>`：指定项目内 Runner 配置文件，默认读取 `.ai-runner/config.yml`。
 - `--task <id>`：只执行或恢复指定 task。
 - `--dry-run`：只预览下一个可执行 task，不调用 Claude、不切分支、不改状态。
 - `--status <status>`：配合 `ai:reset` 恢复任务状态。
+- `--allow-empty`：允许 `ai:validate` 在没有 task 文件时通过，通常只用于模板或初始化检查。
+
+## 跨项目配置
+
+Runner 可以作为独立工具目录复用到多个项目。`--project-root` 指向真实业务项目，Runner 自带的执行 prompt 默认从工具目录读取，不要求业务项目复制 `scripts/ai-task-prompt.md`。
+
+业务项目可以按需新增 `.ai-runner/config.yml`：
+
+```yaml
+task_dir: docs/tasks
+log_dir: docs/ai-runner-logs
+lock_file: .ai-task-runner.lock
+
+branch_policy:
+  mode: chained
+
+forbidden_agent_paths:
+  - docs/architecture/**
+
+verify_policy:
+  allow_prefixes:
+    - pnpm typecheck
+    - pnpm test
+    - npm run lint
+  deny_patterns:
+    - "\\bnode\\s+scripts/delete-"
+```
+
+配置说明：
+
+- `branch_policy.mode: chained`：默认行为，新 task 分支从当前分支继续创建，适合强依赖任务串行推进。
+- `branch_policy.mode: base`：新 task 分支固定从 `branch_policy.base_branch` 创建，适合彼此独立的任务。
+- `forbidden_agent_paths`：在默认保护 SPEC/PLAN/task/Runner 元数据的基础上，追加项目自定义受保护路径。
+- `verify_policy.allow_prefixes`：如果声明，所有 verify 命令必须匹配其中一个前缀。
+- `verify_policy.deny_patterns`：项目级 verify 正则黑名单。
 
 ## 任务状态流
 
@@ -88,18 +125,22 @@ verify:
 - `spec` 和 `plan` 必须指向存在的文件。
 - `depends_on` 必须显式声明；没有依赖时写 `[]`。
 - `agent_allowed_paths` 只能写项目内相对路径，不能写 `src`、`docs`、`scripts` 等过宽目录。
-- `agent_allowed_paths` 不能包含 `docs/tasks`，task 状态文件只归 Runner 修改。
+- `agent_allowed_paths` 不能包含 `docs/tasks`、`docs/SPEC_*`、`docs/PLAN_*`、`.git`、`.ai-runner` 或 Runner 脚本。
 - `verify` 必须是可结束的检查命令，不能启动 dev/start/serve 服务，不能执行 git 变更或删除命令。
+- 可选字段 `allow_empty_code_changes: true` 只用于纯验证类任务；普通开发任务不要使用。
 
 ## 安全闸门
 
 - 工作区不干净会停止。
 - 队列 schema 不合法会停止。
+- 队列为空时 `ai:validate` 会停止，除非显式传入 `--allow-empty`。
 - task 不是 `ready` 会停止。
 - depends_on 没有全部 done 会停止。
+- depends_on 存在循环依赖会停止。
 - 没有 `verify` 命令会停止。
 - `spec` 或 `plan` 文件不存在会停止。
 - Claude 修改 task 状态文件会停止。
+- Claude 在 blocked 或失败前留下越界改动会停止。
 - Claude 没有产生 `agent_allowed_paths` 内的代码改动会停止。
 - 改动超出 `agent_allowed_paths` 会停止。
 - 验证命令失败或超时会停止。
