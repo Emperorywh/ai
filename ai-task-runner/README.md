@@ -23,6 +23,8 @@
   -> npm run ai:next / npm run ai:all
 ```
 
+前三步（生成 SPEC / PLAN / 执行前审查）既可以用 `prompt/` 目录下的提示词手动执行，也可以用 Claude Code 的 slash 命令一键调用：`/spec <需求>`、`/plan [SPEC 标识]`、`/review`。
+
 ## 安装
 
 ```bash
@@ -118,6 +120,8 @@ agent_allowed_paths:
 verify:
   - pnpm typecheck
   - pnpm test filterState
+allowed_tools:
+  - Bash(pnpm test:*)
 ---
 ```
 
@@ -129,11 +133,13 @@ verify:
 - `agent_allowed_paths` 只能写项目内相对路径，不能写 `src`、`docs`、`scripts` 等过宽目录。
 - `agent_allowed_paths` 不能包含 `docs/tasks`、`docs/SPEC_*`、`docs/PLAN_*`、`.git`、`.ai-runner` 或 Runner 脚本。
 - `verify` 必须是可结束的检查命令，不能启动 dev/start/serve 服务，不能执行 git 变更或删除命令。
+- 可选字段 `allowed_tools` 声明实现阶段需要 Claude 自行执行的额外工具（如 `Bash(pnpm test:*)` 用于自测），按需精确放行，替代全开权限。
 - 可选字段 `allow_empty_code_changes: true` 只用于纯验证类任务；普通开发任务不要使用。
 
 ## 安全闸门
 
 - 工作区不干净会停止。
+- 越界编辑在 Claude 工具调用层即被 PreToolUse 钩子事前阻断，不仅靠事后 `git diff` 检查。
 - 队列 schema 不合法会停止。
 - 队列为空时 `ai:validate` 会停止，除非显式传入 `--allow-empty`。
 - task 不是 `ready` 会停止。
@@ -150,25 +156,38 @@ verify:
 
 ## 日志、锁和超时
 
-- Runner 执行时会创建 `.ai-task-runner.lock`，防止多个 Runner 同时修改状态。
+- Runner 执行时会创建 `.ai-task-runner.lock`，防止多个 Runner 同时修改状态；若上一次 Runner 崩溃留下残留锁，下次启动会校验锁中 PID 是否仍存活，确认已退出则自动回收，不会永久死锁。
 - 执行日志写入 `docs/ai-runner-logs/`，默认被 git 忽略。
 - 如果通过 `--project-root` 在业务项目中运行，请在业务项目 `.gitignore` 中加入 `docs/ai-runner-logs/` 和 `.ai-task-runner.lock`；Runner 内部也会在工作区检查和自动提交时忽略这些运行期产物。
 - Claude 默认超时是 30 分钟，可用 `AI_RUNNER_CLAUDE_TIMEOUT_MS` 调整。
 - verify 默认超时是 10 分钟，可用 `AI_RUNNER_VERIFY_TIMEOUT_MS` 调整。
+- Claude 默认回合上限 50，可用 `AI_RUNNER_CLAUDE_MAX_TURNS` 调整。
+- Claude 瞬态失败（超时或非零退出）默认重试 1 次，可用 `AI_RUNNER_CLAUDE_MAX_RETRIES` 调整。
 
 ## Claude 命令
 
-默认执行：
+Runner 用 headless 模式驱动 Claude，实际启动参数大致是：
 
 ```bash
-claude --permission-mode acceptEdits -p "<task prompt>"
+claude --permission-mode acceptEdits \
+       --settings <本次生成的 settings.json> \
+       --output-format stream-json \
+       --max-turns 50 \
+       [--allowedTools "<task 声明的工具>"]... \
+       -p "<task prompt>"
 ```
 
-`--permission-mode acceptEdits` 让文件编辑在 headless 模式下自动放行。Runner 已经用独立分支、事后路径校验和 verify 兜底，所以这一层放行不会破坏安全模型，但能保证 Claude 真正写得出代码。如果某个 task 需要让 Claude 自行执行 bash（如代码生成或自测），可以改用完全放行：
+要点：
 
-```bash
-AI_RUNNER_CLAUDE_PERMISSION_MODE=bypassPermissions
-```
+- `--permission-mode acceptEdits`：headless 下未预批工具会被直接拒绝，这里放行文件编辑，保证 Claude 写得出代码。
+- `--settings`：每次执行按当前 task 生成一份 settings，内含一个 PreToolUse 钩子（`scripts/ai-enforce-paths.mjs`），在工具调用层事前强制 `agent_allowed_paths`，越界编辑即时被拒。Runner 同时保留事后 `git diff` 校验作为二道防线。
+- `--output-format stream-json`：结果以结构化事件返回，Runner 从中解析最终结果文本并识别 `AI_TASK_BLOCKED` 信号，不再依赖脆弱的全文 grep。
+- `--max-turns`：回合上限，防止 Claude 死循环；默认 50，可用 `AI_RUNNER_CLAUDE_MAX_TURNS` 覆盖。
+- `--allowedTools`：task 可在 frontmatter 用可选字段 `allowed_tools`（如 `Bash(pnpm test:*)`）声明实现阶段需要的额外工具，按需精确放行。
+
+Runner 不再提供 `bypassPermissions` 全开模式：它会关闭所有权限检查，让实现期 bash 完全脱离 Runner 的路径闸门。需要让 Claude 跑 bash 自测时，请用 `allowed_tools` 声明最小工具规格。
+
+瞬态失败（Claude 超时或非零退出）默认重试 1 次，可用 `AI_RUNNER_CLAUDE_MAX_RETRIES` 调整；路径越界、blocked、verify 失败属于确定性失败，不会重试。
 
 如果你的 Claude Code 命令名不同，可以设置：
 

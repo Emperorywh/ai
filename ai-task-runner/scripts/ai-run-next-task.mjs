@@ -8,6 +8,6 @@ import { parseRunnerCliArgs, runNextTask } from './task-lib.mjs';
 try {
   await runNextTask(parseRunnerCliArgs(process.argv.slice(2)));
 } catch (error) {
-  console.error(error.message);
+  console.error(error.stack || error.message);
   process.exitCode = 1;
 }

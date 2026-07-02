@@ -28,7 +28,7 @@ try {
 
   console.log(`批量执行结束，本次完成 ${completedCount} 个任务。`);
 } catch (error) {
-  console.error(error.message);
+  console.error(error.stack || error.message);
   console.error(`批量执行中断，本次已完成 ${completedCount} 个任务。`);
   process.exitCode = 1;
 }

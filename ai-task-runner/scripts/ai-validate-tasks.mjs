@@ -8,6 +8,6 @@ import { parseRunnerCliArgs, validateTaskQueue } from './task-lib.mjs';
 try {
   validateTaskQueue(parseRunnerCliArgs(process.argv.slice(2)));
 } catch (error) {
-  console.error(error.message);
+  console.error(error.stack || error.message);
   process.exitCode = 1;
 }

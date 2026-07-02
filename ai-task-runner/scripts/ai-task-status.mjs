@@ -14,6 +14,6 @@ try {
 
   printTaskStatus(loadTasks(options));
 } catch (error) {
-  console.error(error.message);
+  console.error(error.stack || error.message);
   process.exitCode = 1;
 }

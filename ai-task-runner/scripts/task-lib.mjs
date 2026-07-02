@@ -32,6 +32,18 @@ const REQUIRED_TASK_FIELDS = ['id', 'status', 'branch', 'spec', 'plan', 'commit'
 const DEFAULT_CLAUDE_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_VERIFY_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_CONFIG_PATH = '.ai-runner/config.yml';
+/*
+ * headless 模式下给 Claude 一个回合上限，防止它在死循环里烧算力；
+ * 超时是时间维度兜底，max-turns 是 Claude 原生回合维度兜底，两者互补。
+ * 超时则用 AI_RUNNER_CLAUDE_MAX_TURNS 覆盖。
+ */
+const DEFAULT_CLAUDE_MAX_TURNS = 50;
+/*
+ * Claude 进程超时或非零退出属于瞬态失败，给一次重试机会避免整条 ai:all 链路被一次网络抖动打断。
+ * 路径越界/blocked/verify 失败是确定性失败，不重试。
+ * 覆盖用 AI_RUNNER_CLAUDE_MAX_RETRIES。
+ */
+const DEFAULT_CLAUDE_MAX_RETRIES = 1;
 
 /*
  * 这些路径过宽或会破坏 Runner 自己的调度数据。
@@ -99,6 +111,17 @@ const DISALLOWED_VERIFY_COMMANDS = [
   { pattern: /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:dev|start|serve)\b/i, reason: 'verify 不能启动长期运行的开发服务' },
   { pattern: /\b(?:vite|next|nuxt|astro)\s+(?:dev|start|serve)\b/i, reason: 'verify 不能启动长期运行的开发服务' }
 ];
+
+/*
+ * 仅这一类失败被视为“可重试”：Claude 进程本身超时或非零退出。
+ * 路径越界、blocked、verify 失败都是确定性失败，重试无意义，沿用普通 Error。
+ */
+class RetryableRunnerError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'RetryableRunnerError';
+  }
+}
 
 /*
  * CLI 参数在这里统一解析，保持各个入口脚本很薄。
@@ -192,7 +215,9 @@ export function createRunnerContext(options = {}) {
     forbiddenAgentPathPatterns: normalizeForbiddenAgentPathPatterns(config.forbidden_agent_paths),
     verifyPolicy: normalizeVerifyPolicy(config.verify_policy),
     claudeTimeoutMs: readTimeoutMs('AI_RUNNER_CLAUDE_TIMEOUT_MS', DEFAULT_CLAUDE_TIMEOUT_MS),
-    verifyTimeoutMs: readTimeoutMs('AI_RUNNER_VERIFY_TIMEOUT_MS', DEFAULT_VERIFY_TIMEOUT_MS)
+    verifyTimeoutMs: readTimeoutMs('AI_RUNNER_VERIFY_TIMEOUT_MS', DEFAULT_VERIFY_TIMEOUT_MS),
+    claudeMaxTurns: readPositiveInt('AI_RUNNER_CLAUDE_MAX_TURNS', DEFAULT_CLAUDE_MAX_TURNS),
+    claudeMaxRetries: readNonNegativeInt('AI_RUNNER_CLAUDE_MAX_RETRIES', DEFAULT_CLAUDE_MAX_RETRIES)
   };
 }
 
@@ -452,14 +477,18 @@ function discardTaskBranchChanges(context, task) {
   }
 
   runGit(context, ['switch', branch]);
-  /*
-   * tracked 文件还原到 HEAD（包含被 Claude 改动的代码和 task 状态文件），
-   * 再用 clean -fd 删除 Claude 新增的未跟踪文件。
-   * 不加 -x，node_modules、日志、锁文件等被忽略的产物不会被误删。
-   */
+  discardWorkingTreeChanges(context);
+  console.log(`已丢弃 task 分支上的未提交改动：${branch}`);
+}
+
+/*
+ * 把工作区恢复到 HEAD：tracked 文件还原，未跟踪文件删除。
+ * 不加 -x，node_modules、日志、锁文件、enforcement 产物等被忽略的内容不会被误删。
+ * --reset-branch 和瞬态失败重试都复用这套清理，保证每次尝试都从干净状态开始。
+ */
+function discardWorkingTreeChanges(context) {
   runGit(context, ['restore', '--staged', '--worktree', '--', '.']);
   runGit(context, ['clean', '-fd']);
-  console.log(`已丢弃 task 分支上的未提交改动：${branch}`);
 }
 
 function commitTaskStatusReset(context, task, nextStatus) {
@@ -490,44 +519,67 @@ async function runTask(context, task, tasks) {
   appendLog(logPath, `准备执行 ${task.meta.id}：${task.title}`);
 
   ensureBranch(context, String(task.meta.branch));
-  markTaskStatus(context, task, TASK_STATUS.running);
 
-  const runningTask = readTask(context, task.filePath);
-  const runnerOwnedSnapshots = snapshotRunnerOwnedFiles(context, runningTask);
+  /*
+   * 瞬态失败（Claude 超时或非零退出）最多重试 claudeMaxRetries 次。
+   * 每次重试前先丢弃上一轮残留改动，保证从干净工作区重新开始；
+   * 每次尝试都重新把状态置为 running 并重新快照，让 task 文件保护检查保持有效。
+   */
+  const maxAttempts = Math.max(1, context.claudeMaxRetries + 1);
 
-  try {
-    const claudeResult = await runClaudeTask(context, runningTask, logPath);
-    const blockedReason = extractBlockedReason(`${claudeResult.stdout}\n${claudeResult.stderr}`);
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    markTaskStatus(context, readTask(context, task.filePath), TASK_STATUS.running);
+    const runningTask = readTask(context, task.filePath);
+    const runnerOwnedSnapshots = snapshotRunnerOwnedFiles(context, runningTask);
 
-    if (blockedReason) {
-      assertPostRunSafety(context, runningTask, runnerOwnedSnapshots);
-      markTaskStatus(context, runningTask, TASK_STATUS.blocked, blockedReason);
-      throw new Error(`任务被标记为 blocked：${blockedReason}`);
+    try {
+      const claudeResult = await runClaudeTask(context, runningTask, logPath);
+      const blockedReason = extractBlockedReason(claudeResult.resultText, claudeResult.stdout);
+
+      if (blockedReason) {
+        assertPostRunSafety(context, runningTask, runnerOwnedSnapshots);
+        markTaskStatus(context, runningTask, TASK_STATUS.blocked, blockedReason);
+        throw new Error(`任务被标记为 blocked：${blockedReason}`);
+      }
+
+      const processFailed = claudeResult.exitCode !== 0 || claudeResult.timedOut || claudeResult.streamError;
+
+      if (processFailed) {
+        assertPostRunSafety(context, runningTask, runnerOwnedSnapshots);
+        const detail = claudeResult.timedOut
+          ? 'Claude Code 执行超时'
+          : `Claude Code 执行失败，退出码：${claudeResult.exitCode}`;
+        throw new RetryableRunnerError(detail);
+      }
+
+      ensureRunnerOwnedFilesUnchanged(context, runnerOwnedSnapshots);
+      ensureTaskChangedSomething(context, runningTask, runnerOwnedSnapshots);
+      validateAgentChangedPaths(context, runningTask, runnerOwnedSnapshots);
+      await runVerifyCommands(context, runningTask, logPath, runnerOwnedSnapshots);
+      validateAgentChangedPaths(context, runningTask, runnerOwnedSnapshots);
+
+      markTaskStatus(context, runningTask, TASK_STATUS.done);
+      commitTask(context, readTask(context, task.filePath));
+
+      appendLog(logPath, `任务完成并已提交：${task.meta.id}`);
+      console.log(`任务完成并已提交：${task.meta.id}`);
+      return;
+    } catch (error) {
+      const canRetry = error instanceof RetryableRunnerError && attempt < maxAttempts;
+
+      if (canRetry) {
+        appendLog(logPath, `第 ${attempt} 次尝试失败（${error.message}），重置工作区后重试。`);
+        discardWorkingTreeChanges(context);
+        continue;
+      }
+
+      if (readTask(context, task.filePath).meta.status !== TASK_STATUS.blocked) {
+        markTaskStatus(context, readTask(context, task.filePath), TASK_STATUS.failed, error.message);
+      }
+
+      appendLog(logPath, `任务失败：${error.message}`);
+      throw error;
     }
-
-    if (claudeResult.exitCode !== 0) {
-      assertPostRunSafety(context, runningTask, runnerOwnedSnapshots);
-      throw new Error(`Claude Code 执行失败，退出码：${claudeResult.exitCode}`);
-    }
-
-    ensureRunnerOwnedFilesUnchanged(context, runnerOwnedSnapshots);
-    ensureTaskChangedSomething(context, runningTask, runnerOwnedSnapshots);
-    validateAgentChangedPaths(context, runningTask, runnerOwnedSnapshots);
-    await runVerifyCommands(context, runningTask, logPath, runnerOwnedSnapshots);
-    validateAgentChangedPaths(context, runningTask, runnerOwnedSnapshots);
-
-    markTaskStatus(context, runningTask, TASK_STATUS.done);
-    commitTask(context, readTask(context, task.filePath));
-
-    appendLog(logPath, `任务完成并已提交：${task.meta.id}`);
-    console.log(`任务完成并已提交：${task.meta.id}`);
-  } catch (error) {
-    if (readTask(context, task.filePath).meta.status !== TASK_STATUS.blocked) {
-      markTaskStatus(context, runningTask, TASK_STATUS.failed, error.message);
-    }
-
-    appendLog(logPath, `任务失败：${error.message}`);
-    throw error;
   }
 }
 
@@ -580,6 +632,7 @@ function validateTaskSchema(context, task, options = {}) {
   validateTaskTitle(task);
   validateAgentAllowedPaths(context, task);
   validateVerifyCommands(context, task);
+  validateAllowedTools(task);
   validateBranchPolicyConstraints(context, task);
 }
 
@@ -741,6 +794,33 @@ function validateVerifyCommands(context, task) {
   }
 }
 
+function validateAllowedTools(task) {
+  /*
+   * allowed_tools 是可选字段：声明 task 实现阶段需要 Claude 自行执行的额外工具，
+   * 例如 Bash(pnpm test:*) 用于自测。它替代了原先危险的 bypassPermissions 全开模式，
+   * 让放行范围保持在最小且必要的工具规格内。
+   */
+  if (!Object.prototype.hasOwnProperty.call(task.meta, 'allowed_tools')) {
+    return;
+  }
+
+  const rawTools = task.meta.allowed_tools;
+
+  if (rawTools === null || rawTools === undefined) {
+    return;
+  }
+
+  const tools = Array.isArray(rawTools) ? rawTools : [rawTools];
+
+  for (const tool of tools) {
+    const value = String(tool).trim();
+
+    if (!value) {
+      throw new Error(`${task.relativePath} 的 allowed_tools 不能包含空值。`);
+    }
+  }
+}
+
 function selectRunnableTask(context, tasks) {
   const candidates = context.taskId
     ? tasks.filter((task) => String(task.meta.id) === context.taskId || task.fileName === context.taskId)
@@ -851,6 +931,7 @@ function stringifyFrontmatter(meta, body) {
     'depends_on',
     'agent_allowed_paths',
     'verify',
+    'allowed_tools',
     'allow_empty_code_changes',
     'updated_at',
     'last_error'
@@ -905,18 +986,7 @@ async function withRunnerLock(context, callback) {
     `started_at=${new Date().toISOString()}`
   ].join('\n');
 
-  try {
-    writeFileSync(context.lockFile, payload, {
-      encoding: 'utf8',
-      flag: 'wx'
-    });
-  } catch (error) {
-    if (error.code === 'EEXIST') {
-      throw new Error(`检测到已有 Runner 在执行：${context.lockFile}`);
-    }
-
-    throw error;
-  }
+  acquireRunnerLock(context, payload);
 
   try {
     return await callback();
@@ -924,6 +994,84 @@ async function withRunnerLock(context, callback) {
     if (existsSync(context.lockFile)) {
       unlinkSync(context.lockFile);
     }
+  }
+}
+
+/*
+ * 抢锁失败时不再直接报错：先判断锁持有者进程是否还活着，
+ * 只有确认已退出（崩溃残留）才回收，避免 Runner 崩溃后锁文件永久死锁。
+ */
+function acquireRunnerLock(context, payload) {
+  try {
+    writeFileSync(context.lockFile, payload, {
+      encoding: 'utf8',
+      flag: 'wx'
+    });
+    return;
+  } catch (error) {
+    if (error.code !== 'EEXIST') {
+      throw error;
+    }
+  }
+
+  if (!isStaleRunnerLock(context)) {
+    throw new Error(`检测到已有 Runner 在执行：${context.lockFile}`);
+  }
+
+  console.log('检测到残留锁文件且持有进程已退出，自动回收。');
+
+  try {
+    unlinkSync(context.lockFile);
+  } catch {
+    /* 并发竞争：其它 Runner 刚好释放，下面再次抢锁会处理 */
+  }
+
+  writeFileSync(context.lockFile, payload, {
+    encoding: 'utf8',
+    flag: 'wx'
+  });
+}
+
+function isStaleRunnerLock(context) {
+  let content;
+
+  try {
+    content = readFileSync(context.lockFile, 'utf8');
+  } catch {
+    return false;
+  }
+
+  const pidMatch = /^pid=(.+)$/m.exec(content);
+  const hostMatch = /^host=(.+)$/m.exec(content);
+
+  if (!pidMatch || !hostMatch) {
+    return true; // 格式不符，视为残留
+  }
+
+  const pid = Number(pidMatch[1].trim());
+  const host = hostMatch[1].trim();
+
+  if (!Number.isFinite(pid)) {
+    return true;
+  }
+
+  /*
+   * 不同主机的锁无法本地验证存活，保守视为仍活跃，避免误抢。
+   */
+  if (host !== os.hostname()) {
+    return false;
+  }
+
+  return !isProcessAlive(pid);
+}
+
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // ESRCH 表示进程不存在；EPERM 表示存在但无权限，视为存活。
+    return error.code === 'EPERM';
   }
 }
 
@@ -975,7 +1123,7 @@ function ensureGitCommitIdentity(context) {
 }
 
 function ensureClaudeAvailable(context) {
-  const { command } = createClaudeCommand('');
+  const command = process.env.AI_RUNNER_CLAUDE_BIN || 'claude';
   const checker = process.platform === 'win32'
     ? { command: 'where', args: [command], shell: false }
     : { command: 'sh', args: ['-lc', `command -v ${shellQuote(command)}`], shell: false };
@@ -1073,42 +1221,73 @@ function getAgentChangedFiles(context, runnerOwnedSnapshots) {
 
 async function runClaudeTask(context, task, logPath) {
   const prompt = buildPrompt(context, task);
-  const claudeCommand = process.env.AI_RUNNER_CLAUDE_BIN || 'claude';
-  const permissionArgs = buildClaudePermissionArgs();
-  const { command, args } = createClaudeCommand(prompt, logPath);
-  const permissionDisplay = permissionArgs.join(' ');
+  const claudeBin = process.env.AI_RUNNER_CLAUDE_BIN || 'claude';
+  const allowedTools = normalizeArray(task.meta.allowed_tools).map((tool) => String(tool).trim()).filter(Boolean);
+  /*
+   * 每次执行都按当前 task 重新生成 enforcement 产物：
+   * 一个 PreToolUse 钩子配置（经 --settings 注入）和一个路径上下文（经环境变量传给钩子）。
+   * 这样 agent_allowed_paths 在工具调用层被事前强制，越界编辑即时被拒。
+   */
+  const enforcement = writeEnforcementArtifacts(context, task, logPath);
+  const baseArgs = buildClaudeBaseArgs({
+    settingsPath: enforcement.settingsPath,
+    maxTurns: context.claudeMaxTurns,
+    allowedTools
+  });
+  const { command, args } = createClaudeCommand({
+    command: claudeBin,
+    prompt,
+    logPath,
+    baseArgs
+  });
 
-  appendLog(logPath, `启动 Claude Code：${claudeCommand} ${permissionDisplay} -p <task-prompt>`);
-  console.log(`启动 Claude Code：${claudeCommand} ${permissionDisplay} -p <task-prompt>`);
+  appendLog(logPath, `启动 Claude Code：${claudeBin} ${baseArgs.join(' ')} -p <task-prompt>`);
+  console.log(`启动 Claude Code：${claudeBin} ${baseArgs.join(' ')} -p <task-prompt>`);
 
-  return runCommand(context, command, args, {
+  const rawResult = await runCommand(context, command, args, {
     shell: false,
     capture: true,
+    streamJson: true,
     timeoutMs: context.claudeTimeoutMs,
     logPath,
-    rejectOnFailure: false
+    rejectOnFailure: false,
+    env: { ...process.env, AI_RUNNER_TASK_CONTEXT: enforcement.contextPath }
   });
+
+  const parsed = parseClaudeStreamJson(rawResult.stdout);
+
+  return { ...rawResult, ...parsed };
 }
 
-function buildClaudePermissionArgs() {
-  /*
-   * headless（-p）模式下，未被预先放行的工具调用会被直接拒绝而非弹窗询问，
-   * Claude 因此可能一路被拒、写不出任何代码，最终撞上“没有产生代码改动”的闸门。
-   * Runner 已经用独立分支 + 事后路径校验 + verify 兜底，
-   * 这里默认让文件编辑自动放行，保证自动推进能真正跑起来。
-   * 如果 task 需要让 Claude 自行执行 bash（如代码生成、自测），
-   * 可设置 AI_RUNNER_CLAUDE_PERMISSION_MODE=bypassPermissions 完全放行，
-   * 边界仍由 Runner 的事后校验保证。
-   */
-  const mode = (process.env.AI_RUNNER_CLAUDE_PERMISSION_MODE || 'acceptEdits').trim();
+/*
+ * 组装 Claude 启动参数：
+ * acceptEdits 保证 headless 下文件编辑不会被拒；
+ * --settings 注入 PreToolUse 钩子，在工具调用层事前拦截越界编辑；
+ * --output-format stream-json 让结果可结构化解析，替代脆弱的文本 grep；
+ * --max-turns 给回合上限防止死循环；
+ * --allowedTools 按 task 声明精确放行额外工具，取代危险的 bypassPermissions 全开模式。
+ */
+function buildClaudeBaseArgs({ settingsPath, maxTurns, allowedTools }) {
+  const args = ['--permission-mode', 'acceptEdits'];
 
-  return ['--permission-mode', mode];
+  if (settingsPath) {
+    args.push('--settings', settingsPath);
+  }
+
+  args.push('--output-format', 'stream-json');
+
+  if (maxTurns) {
+    args.push('--max-turns', String(maxTurns));
+  }
+
+  for (const tool of allowedTools) {
+    args.push('--allowedTools', tool);
+  }
+
+  return args;
 }
 
-function createClaudeCommand(prompt, logPath = '') {
-  const command = process.env.AI_RUNNER_CLAUDE_BIN || 'claude';
-  const baseArgs = buildClaudePermissionArgs();
-
+function createClaudeCommand({ command, prompt, logPath = '', baseArgs = [] }) {
   if (process.platform === 'win32') {
     return createWindowsClaudeCommand(command, prompt, logPath, baseArgs);
   }
@@ -1120,6 +1299,7 @@ function createClaudeCommand(prompt, logPath = '') {
  * Windows 上的全局 CLI 经常是 .cmd 包装器，不能可靠地用 shell:false 直接启动。
  * 这里把多行 prompt 写入日志目录旁的文件，再用 PowerShell 读取后作为参数传入，
  * 避免把大段 prompt 拼进 cmd 命令行造成截断、转义错误或命令注入。
+ * 每个 baseArg 都做 PowerShell 单引号转义，保证含空格的 --settings 路径或工具规格不会破坏命令。
  */
 function createWindowsClaudeCommand(command, prompt, logPath, baseArgs = []) {
   if (!logPath) {
@@ -1128,7 +1308,7 @@ function createWindowsClaudeCommand(command, prompt, logPath, baseArgs = []) {
 
   const promptPath = `${logPath}.prompt.md`;
   writeFileSync(promptPath, prompt, 'utf8');
-  const baseArgsString = baseArgs.join(' ');
+  const quotedArgs = baseArgs.map(toPowerShellSingleQuoted).join(' ');
 
   const script = [
     '$ErrorActionPreference = "Stop"',
@@ -1139,7 +1319,7 @@ function createWindowsClaudeCommand(command, prompt, logPath, baseArgs = []) {
      * 否则 Claude 收到的上下文会乱码，Runner 的边界规则也会失真。
      */
     `$prompt = Get-Content -Raw -Encoding UTF8 -LiteralPath ${toPowerShellSingleQuoted(promptPath)}`,
-    `& ${toPowerShellSingleQuoted(command)} ${baseArgsString} -p $prompt`,
+    `& ${toPowerShellSingleQuoted(command)} ${quotedArgs} -p $prompt`,
     'exit $LASTEXITCODE'
   ].join('\n');
 
@@ -1155,6 +1335,120 @@ function createWindowsClaudeCommand(command, prompt, logPath, baseArgs = []) {
       Buffer.from(script, 'utf16le').toString('base64')
     ]
   };
+}
+
+/*
+ * 生成 PreToolUse 钩子配置和路径上下文文件，二者配合实现 agent_allowed_paths 的事前强制。
+ * 钩子脚本通过环境变量 AI_RUNNER_TASK_CONTEXT 找到上下文，对越界 Edit/Write 以非零退出码阻断。
+ */
+function writeEnforcementArtifacts(context, task, logPath) {
+  const allowedPaths = normalizeArray(task.meta.agent_allowed_paths).map(normalizeAllowedPath);
+  const protectedFiles = [task.relativePath, task.meta.spec, task.meta.plan]
+    .map(normalizeAllowedPath)
+    .filter(Boolean);
+
+  const contextPayload = {
+    taskId: String(task.meta.id),
+    projectRoot: context.projectRoot,
+    allowedPaths,
+    protectedFiles,
+    forbiddenPatterns: context.forbiddenAgentPathPatterns
+  };
+  const contextPath = `${logPath}.task-context.json`;
+  writeFileSync(contextPath, JSON.stringify(contextPayload, null, 2), 'utf8');
+
+  const hookScript = toPosix(path.join(context.runnerRoot, 'scripts', 'ai-enforce-paths.mjs'));
+  const settingsPayload = {
+    hooks: {
+      PreToolUse: [
+        {
+          matcher: 'Edit|Write|MultiEdit|NotebookEdit',
+          hooks: [
+            { type: 'command', command: `node ${hookScript}` }
+          ]
+        }
+      ]
+    }
+  };
+  const settingsPath = `${logPath}.settings.json`;
+  writeFileSync(settingsPath, JSON.stringify(settingsPayload, null, 2), 'utf8');
+
+  return { contextPath, settingsPath };
+}
+
+/*
+ * 解析 Claude 的 stream-json 输出，提取最终结果文本与是否出错。
+ * 任何解析失败都降级为空值，blocked 识别会回退到原始 stdout，不会破坏既有流程。
+ */
+function parseClaudeStreamJson(stdout) {
+  const parsed = { resultText: '', streamError: false, numTurns: null };
+
+  if (!stdout) {
+    return parsed;
+  }
+
+  const lines = stdout.split(/\r?\n/);
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+
+    if (!trimmed || !trimmed.startsWith('{')) {
+      continue;
+    }
+
+    let event;
+
+    try {
+      event = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+
+    if (event.type === 'result') {
+      parsed.resultText = String(event.result || '');
+      parsed.streamError = event.subtype === 'error';
+
+      if (Number.isFinite(event.num_turns)) {
+        parsed.numTurns = event.num_turns;
+      }
+    }
+  }
+
+  return parsed;
+}
+
+/*
+ * stream-json 模式下，原始流完整落盘便于事后排查，但终端只回显 assistant 的文本增量，
+ * 避免把整段 JSON 刷屏。result 事件由 Runner 自己汇总，不在这里重复打印。
+ */
+function extractStreamJsonDisplay(line) {
+  const trimmed = line.trim();
+
+  if (!trimmed) {
+    return '';
+  }
+
+  if (!trimmed.startsWith('{')) {
+    return trimmed;
+  }
+
+  let event;
+
+  try {
+    event = JSON.parse(trimmed);
+  } catch {
+    return trimmed;
+  }
+
+  if (event.type === 'assistant' && event.message && Array.isArray(event.message.content)) {
+    const texts = event.message.content
+      .filter((block) => block && block.type === 'text' && typeof block.text === 'string')
+      .map((block) => block.text);
+
+    return texts.join('\n');
+  }
+
+  return '';
 }
 
 function buildPrompt(context, task) {
@@ -1302,6 +1596,7 @@ async function runCommand(context, command, args, options = {}) {
     const child = spawn(command, args, {
       cwd: context.projectRoot,
       shell: options.shell || false,
+      env: options.env || process.env,
       stdio: options.capture ? ['ignore', 'pipe', 'pipe'] : 'inherit'
     });
 
@@ -1316,12 +1611,36 @@ async function runCommand(context, command, args, options = {}) {
         }, timeout)
       : null;
 
+    let streamJsonBuffer = '';
+
     if (options.capture) {
       child.stdout.on('data', (chunk) => {
         const text = chunk.toString();
         stdout += text;
         appendLog(options.logPath, text.trimEnd());
-        process.stdout.write(text);
+
+        if (options.streamJson) {
+          /*
+           * stream-json 输出按行分隔。逐行解析后只回显 assistant 文本增量，
+           * 原始 JSON 流仍完整保留在 stdout 和日志里供事后解析。
+           */
+          streamJsonBuffer += text;
+          let newlineIndex = streamJsonBuffer.indexOf('\n');
+
+          while (newlineIndex !== -1) {
+            const line = streamJsonBuffer.slice(0, newlineIndex);
+            streamJsonBuffer = streamJsonBuffer.slice(newlineIndex + 1);
+            newlineIndex = streamJsonBuffer.indexOf('\n');
+
+            const display = extractStreamJsonDisplay(line);
+
+            if (display) {
+              process.stdout.write(display.endsWith('\n') ? display : `${display}\n`);
+            }
+          }
+        } else {
+          process.stdout.write(text);
+        }
       });
 
       child.stderr.on('data', (chunk) => {
@@ -1394,9 +1713,22 @@ function terminateProcess(child) {
   child.kill('SIGTERM');
 }
 
-function extractBlockedReason(output) {
-  const match = /AI_TASK_BLOCKED:\s*(.+)/.exec(output);
-  return match ? match[1].trim() : '';
+function extractBlockedReason(resultText, rawOutput) {
+  /*
+   * 优先从结构化结果文本识别 blocked 信号（stream-json 的 result 字段是干净的 Claude 输出）；
+   * 解析失败或没有结果文本时回退到原始 stdout，保证旧行为不丢失。
+   */
+  const sources = [resultText, rawOutput].filter(Boolean);
+
+  for (const source of sources) {
+    const match = /AI_TASK_BLOCKED:\s*(.+)/.exec(source);
+
+    if (match) {
+      return match[1].trim();
+    }
+  }
+
+  return '';
 }
 
 function extractTitle(body) {
@@ -1527,6 +1859,38 @@ function readTimeoutMs(envName, defaultValue) {
   }
 
   return timeout;
+}
+
+function readPositiveInt(envName, defaultValue) {
+  const rawValue = process.env[envName];
+
+  if (!rawValue) {
+    return defaultValue;
+  }
+
+  const value = Number(rawValue);
+
+  if (!Number.isFinite(value) || value < 1 || !Number.isInteger(value)) {
+    throw new Error(`${envName} 必须是正整数。`);
+  }
+
+  return value;
+}
+
+function readNonNegativeInt(envName, defaultValue) {
+  const rawValue = process.env[envName];
+
+  if (!rawValue) {
+    return defaultValue;
+  }
+
+  const value = Number(rawValue);
+
+  if (!Number.isFinite(value) || value < 0 || !Number.isInteger(value)) {
+    throw new Error(`${envName} 必须是非负整数。`);
+  }
+
+  return value;
 }
 
 function shellQuote(value) {
