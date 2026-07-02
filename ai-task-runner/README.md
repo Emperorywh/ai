@@ -150,6 +150,7 @@ verify:
 
 - Runner 执行时会创建 `.ai-task-runner.lock`，防止多个 Runner 同时修改状态。
 - 执行日志写入 `docs/ai-runner-logs/`，默认被 git 忽略。
+- 如果通过 `--project-root` 在业务项目中运行，请在业务项目 `.gitignore` 中加入 `docs/ai-runner-logs/` 和 `.ai-task-runner.lock`；Runner 内部也会在工作区检查和自动提交时忽略这些运行期产物。
 - Claude 默认超时是 30 分钟，可用 `AI_RUNNER_CLAUDE_TIMEOUT_MS` 调整。
 - verify 默认超时是 10 分钟，可用 `AI_RUNNER_VERIFY_TIMEOUT_MS` 调整。
 

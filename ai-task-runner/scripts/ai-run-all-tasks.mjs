@@ -12,9 +12,14 @@ try {
   /*
    * dry-run 不会改变状态，指定 taskId 也只代表一次明确执行。
    * 这两种模式都不能进入批量循环，否则会重复选中同一个任务。
+   * 真实执行指定 task 成功时仍然计入完成数，让命令输出和实际提交保持一致。
    */
   if (options.dryRun || options.taskId) {
-    await runNextTask(options);
+    const completed = await runNextTask(options);
+
+    if (completed && !options.dryRun) {
+      completedCount += 1;
+    }
   } else {
     while (await runNextTask(options)) {
       completedCount += 1;

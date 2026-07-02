@@ -67,7 +67,18 @@ const DEFAULT_FORBIDDEN_AGENT_PATH_PATTERNS = [
   '.git/**',
   '.ai-runner/**',
   '.ai-task-runner.lock',
-  'scripts/ai-task-*'
+  /*
+   * Runner 脚本属于调度层，不能被单个业务 task 反向修改。
+   * 这里把入口脚本、共享库和执行 prompt 一起保护起来，
+   * 避免 task 通过 agent_allowed_paths 绕开 README 和 prompt 中声明的边界。
+   */
+  'scripts/task-lib.mjs',
+  'scripts/ai-run-*.mjs',
+  'scripts/ai-reset-task.mjs',
+  'scripts/ai-validate-tasks.mjs',
+  'scripts/ai-task-*',
+  'scripts/ai-task-status.mjs',
+  'scripts/ai-task-prompt.md'
 ];
 
 /*
@@ -1022,7 +1033,12 @@ function createWindowsClaudeCommand(command, prompt, logPath) {
   const script = [
     '$ErrorActionPreference = "Stop"',
     '$ProgressPreference = "SilentlyContinue"',
-    `$prompt = Get-Content -Raw -LiteralPath ${toPowerShellSingleQuoted(promptPath)}`,
+    /*
+     * Windows PowerShell 5.1 默认会按系统 ANSI 编码读取无 BOM 的 UTF-8 文件。
+     * 执行 prompt 包含大量中文约束，必须显式指定 UTF-8，
+     * 否则 Claude 收到的上下文会乱码，Runner 的边界规则也会失真。
+     */
+    `$prompt = Get-Content -Raw -Encoding UTF8 -LiteralPath ${toPowerShellSingleQuoted(promptPath)}`,
     `& ${toPowerShellSingleQuoted(command)} -p $prompt`,
     'exit $LASTEXITCODE'
   ].join('\n');
