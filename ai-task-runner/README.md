@@ -40,6 +40,7 @@ npm run ai:next -- --task TASK_001
 npm run ai:next -- --dry-run
 npm run ai:all
 npm run ai:reset -- --task TASK_001 --status ready
+npm run ai:reset -- --task TASK_001 --reset-branch
 ```
 
 可选参数：
@@ -50,6 +51,7 @@ npm run ai:reset -- --task TASK_001 --status ready
 - `--task <id>`：只执行或恢复指定 task。
 - `--dry-run`：只预览下一个可执行 task，不调用 Claude、不切分支、不改状态。
 - `--status <status>`：配合 `ai:reset` 恢复任务状态。
+- `--reset-branch`：配合 `ai:reset`，切到该 task 分支并丢弃上面残留的未提交改动，再把恢复后的状态落盘提交，让任务回到可直接重跑的干净状态。
 - `--allow-empty`：允许 `ai:validate` 在没有 task 文件时通过，通常只用于模板或初始化检查。
 
 ## 跨项目配置
@@ -159,7 +161,13 @@ verify:
 默认执行：
 
 ```bash
-claude -p "<task prompt>"
+claude --permission-mode acceptEdits -p "<task prompt>"
+```
+
+`--permission-mode acceptEdits` 让文件编辑在 headless 模式下自动放行。Runner 已经用独立分支、事后路径校验和 verify 兜底，所以这一层放行不会破坏安全模型，但能保证 Claude 真正写得出代码。如果某个 task 需要让 Claude 自行执行 bash（如代码生成或自测），可以改用完全放行：
+
+```bash
+AI_RUNNER_CLAUDE_PERMISSION_MODE=bypassPermissions
 ```
 
 如果你的 Claude Code 命令名不同，可以设置：

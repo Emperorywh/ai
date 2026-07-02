@@ -155,6 +155,11 @@ export function parseRunnerCliArgs(argv) {
       continue;
     }
 
+    if (arg === '--reset-branch') {
+      options.resetBranch = true;
+      continue;
+    }
+
     throw new Error(`未知参数：${arg}`);
   }
 
@@ -384,7 +389,7 @@ export async function runNextTask(options = {}) {
   });
 }
 
-export function resetTaskStatus(options = {}) {
+export async function resetTaskStatus(options = {}) {
   const context = resolveContext(options);
 
   if (!context.taskId) {
@@ -397,16 +402,75 @@ export function resetTaskStatus(options = {}) {
     throw new Error(`未知任务状态：${nextStatus}`);
   }
 
-  const tasks = loadTasks(context);
-  validateTaskSet(context, tasks, { allowRunning: true });
-  const task = findTaskById(tasks, context.taskId);
+  /*
+   * reset 会改写 task 状态文件，必要时还会切分支并丢弃工作区改动，
+   * 必须和 Runner 互斥，避免和正在执行的任务竞争同一个工作区。
+   */
+  return withRunnerLock(context, async () => {
+    ensureGitRepository(context);
 
-  if (!task) {
-    throw new Error(`没有找到任务：${context.taskId}`);
+    const tasks = loadTasks(context);
+    validateTaskSet(context, tasks, { allowRunning: true });
+    const task = findTaskById(tasks, context.taskId);
+
+    if (!task) {
+      throw new Error(`没有找到任务：${context.taskId}`);
+    }
+
+    /*
+     * 失败或中断后，task 分支上可能残留 Claude 的未提交改动，
+     * 直接重跑会被 ensureCleanWorkingTree 拦下。
+     * --reset-branch 会切到该 task 分支并丢弃这些改动，
+     * 再把恢复后的状态落盘提交，让任务回到可直接重跑的干净状态。
+     */
+    if (options.resetBranch) {
+      discardTaskBranchChanges(context, task);
+    }
+
+    markTaskStatus(context, task, nextStatus);
+
+    if (options.resetBranch) {
+      commitTaskStatusReset(context, task, nextStatus);
+    }
+
+    console.log(`任务状态已恢复：${task.meta.id} -> ${nextStatus}`);
+  });
+}
+
+function discardTaskBranchChanges(context, task) {
+  const branch = String(task.meta.branch || '').trim();
+
+  if (!branch) {
+    throw new Error(`${task.relativePath} 没有声明 branch，无法 --reset-branch。`);
   }
 
-  markTaskStatus(context, task, nextStatus);
-  console.log(`任务状态已恢复：${task.meta.id} -> ${nextStatus}`);
+  const existingBranches = runGit(context, ['branch', '--list', branch], { capture: true }).trim();
+
+  if (!existingBranches) {
+    console.log(`task 分支不存在，跳过工作区清理：${branch}`);
+    return;
+  }
+
+  runGit(context, ['switch', branch]);
+  /*
+   * tracked 文件还原到 HEAD（包含被 Claude 改动的代码和 task 状态文件），
+   * 再用 clean -fd 删除 Claude 新增的未跟踪文件。
+   * 不加 -x，node_modules、日志、锁文件等被忽略的产物不会被误删。
+   */
+  runGit(context, ['restore', '--staged', '--worktree', '--', '.']);
+  runGit(context, ['clean', '-fd']);
+  console.log(`已丢弃 task 分支上的未提交改动：${branch}`);
+}
+
+function commitTaskStatusReset(context, task, nextStatus) {
+  /*
+   * markTaskStatus 会把状态写入 task 文件，使工作区再次变脏。
+   * 这里只提交该 task 状态文件，保证 reset 结束后工作区干净、可直接重跑，
+   * 不会把恢复过程中残留的其它改动一起带入提交。
+   */
+  runGit(context, ['add', '--', task.relativePath]);
+  runGit(context, ['commit', '-m', `chore(${task.meta.id}): 重置任务状态为 ${nextStatus}`]);
+  console.log(`已提交任务状态重置：${task.meta.id} -> ${nextStatus}`);
 }
 
 async function runTask(context, task, tasks) {
@@ -516,6 +580,25 @@ function validateTaskSchema(context, task, options = {}) {
   validateTaskTitle(task);
   validateAgentAllowedPaths(context, task);
   validateVerifyCommands(context, task);
+  validateBranchPolicyConstraints(context, task);
+}
+
+function validateBranchPolicyConstraints(context, task) {
+  /*
+   * base 模式下每个 task 分支都从 base_branch 独立拉出，
+   * 依赖任务的 done 提交留在各自分支上，不会出现在新分支工作区里。
+   * 此时 depends_on 没有实际意义，反而让依赖检查依赖切分支前的陈旧快照，
+   * 因此 base 模式强制 depends_on 为空，保证任务彼此独立、可各自验证。
+   */
+  if (context.branchPolicy.mode !== 'base') {
+    return;
+  }
+
+  const dependencies = normalizeArray(task.meta.depends_on);
+
+  if (dependencies.length > 0) {
+    throw new Error(`${task.relativePath} 在 branch_policy.mode=base 下不能声明 depends_on，base 模式仅用于彼此独立的任务：${dependencies.join(', ')}`);
+  }
 }
 
 function validateTaskDependencies(task, tasks) {
@@ -991,10 +1074,12 @@ function getAgentChangedFiles(context, runnerOwnedSnapshots) {
 async function runClaudeTask(context, task, logPath) {
   const prompt = buildPrompt(context, task);
   const claudeCommand = process.env.AI_RUNNER_CLAUDE_BIN || 'claude';
+  const permissionArgs = buildClaudePermissionArgs();
   const { command, args } = createClaudeCommand(prompt, logPath);
+  const permissionDisplay = permissionArgs.join(' ');
 
-  appendLog(logPath, `启动 Claude Code：${claudeCommand} -p <task-prompt>`);
-  console.log(`启动 Claude Code：${claudeCommand} -p <task-prompt>`);
+  appendLog(logPath, `启动 Claude Code：${claudeCommand} ${permissionDisplay} -p <task-prompt>`);
+  console.log(`启动 Claude Code：${claudeCommand} ${permissionDisplay} -p <task-prompt>`);
 
   return runCommand(context, command, args, {
     shell: false,
@@ -1005,16 +1090,30 @@ async function runClaudeTask(context, task, logPath) {
   });
 }
 
+function buildClaudePermissionArgs() {
+  /*
+   * headless（-p）模式下，未被预先放行的工具调用会被直接拒绝而非弹窗询问，
+   * Claude 因此可能一路被拒、写不出任何代码，最终撞上“没有产生代码改动”的闸门。
+   * Runner 已经用独立分支 + 事后路径校验 + verify 兜底，
+   * 这里默认让文件编辑自动放行，保证自动推进能真正跑起来。
+   * 如果 task 需要让 Claude 自行执行 bash（如代码生成、自测），
+   * 可设置 AI_RUNNER_CLAUDE_PERMISSION_MODE=bypassPermissions 完全放行，
+   * 边界仍由 Runner 的事后校验保证。
+   */
+  const mode = (process.env.AI_RUNNER_CLAUDE_PERMISSION_MODE || 'acceptEdits').trim();
+
+  return ['--permission-mode', mode];
+}
+
 function createClaudeCommand(prompt, logPath = '') {
   const command = process.env.AI_RUNNER_CLAUDE_BIN || 'claude';
+  const baseArgs = buildClaudePermissionArgs();
 
   if (process.platform === 'win32') {
-    return createWindowsClaudeCommand(command, prompt, logPath);
+    return createWindowsClaudeCommand(command, prompt, logPath, baseArgs);
   }
 
-  const args = ['-p', prompt];
-
-  return { command, args };
+  return { command, args: [...baseArgs, '-p', prompt] };
 }
 
 /*
@@ -1022,13 +1121,14 @@ function createClaudeCommand(prompt, logPath = '') {
  * 这里把多行 prompt 写入日志目录旁的文件，再用 PowerShell 读取后作为参数传入，
  * 避免把大段 prompt 拼进 cmd 命令行造成截断、转义错误或命令注入。
  */
-function createWindowsClaudeCommand(command, prompt, logPath) {
+function createWindowsClaudeCommand(command, prompt, logPath, baseArgs = []) {
   if (!logPath) {
-    return { command, args: ['-p', prompt] };
+    return { command, args: [...baseArgs, '-p', prompt] };
   }
 
   const promptPath = `${logPath}.prompt.md`;
   writeFileSync(promptPath, prompt, 'utf8');
+  const baseArgsString = baseArgs.join(' ');
 
   const script = [
     '$ErrorActionPreference = "Stop"',
@@ -1039,7 +1139,7 @@ function createWindowsClaudeCommand(command, prompt, logPath) {
      * 否则 Claude 收到的上下文会乱码，Runner 的边界规则也会失真。
      */
     `$prompt = Get-Content -Raw -Encoding UTF8 -LiteralPath ${toPowerShellSingleQuoted(promptPath)}`,
-    `& ${toPowerShellSingleQuoted(command)} -p $prompt`,
+    `& ${toPowerShellSingleQuoted(command)} ${baseArgsString} -p $prompt`,
     'exit $LASTEXITCODE'
   ].join('\n');
 
