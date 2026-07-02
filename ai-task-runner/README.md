@@ -151,7 +151,10 @@ allowed_tools:
 - Claude 在 blocked 或失败前留下越界改动会停止。
 - Claude 没有产生 `agent_allowed_paths` 内的代码改动会停止。
 - 改动超出 `agent_allowed_paths` 会停止。
+- Bash 中明显会创建、移动、删除、重定向写入或修改 git 工作区的命令会停止。
 - 验证命令失败或超时会停止。
+- verify 失败后允许有限次数 Claude 修复；修复后仍失败会停止。
+- 提交前只读实现审查未明确通过会停止。
 - Runner 只提交成功完成的 task。
 
 ## 日志、锁和超时
@@ -163,27 +166,39 @@ allowed_tools:
 - verify 默认超时是 10 分钟，可用 `AI_RUNNER_VERIFY_TIMEOUT_MS` 调整。
 - Claude 默认回合上限 50，可用 `AI_RUNNER_CLAUDE_MAX_TURNS` 调整。
 - Claude 瞬态失败（超时或非零退出）默认重试 1 次，可用 `AI_RUNNER_CLAUDE_MAX_RETRIES` 调整。
+- verify 失败后默认给 Claude 1 次修复机会，可用 `AI_RUNNER_VERIFY_REPAIR_ATTEMPTS` 调整。
+- 提交前只读实现审查默认最多 12 回合，可用 `AI_RUNNER_REVIEW_MAX_TURNS` 调整。
 
 ## Claude 命令
 
 Runner 用 headless 模式驱动 Claude，实际启动参数大致是：
 
 ```bash
-claude --permission-mode acceptEdits \
+claude --permission-mode default \
        --settings <本次生成的 settings.json> \
        --output-format stream-json \
        --max-turns 50 \
+       --allowedTools Read \
+       --allowedTools Glob \
+       --allowedTools Grep \
+       --allowedTools LS \
+       --allowedTools Edit \
+       --allowedTools Write \
+       --allowedTools MultiEdit \
+       --allowedTools NotebookEdit \
        [--allowedTools "<task 声明的工具>"]... \
        -p "<task prompt>"
 ```
 
 要点：
 
-- `--permission-mode acceptEdits`：headless 下未预批工具会被直接拒绝，这里放行文件编辑，保证 Claude 写得出代码。
-- `--settings`：每次执行按当前 task 生成一份 settings，内含一个 PreToolUse 钩子（`scripts/ai-enforce-paths.mjs`），在工具调用层事前强制 `agent_allowed_paths`，越界编辑即时被拒。Runner 同时保留事后 `git diff` 校验作为二道防线。
+- `--permission-mode default`：headless 下所有工具都通过 `--allowedTools` 显式放行，不再使用会自动接受编辑和部分文件系统 Bash 命令的 `acceptEdits`。
+- `--settings`：每次执行按当前 task 生成一份 settings，内含一个 PreToolUse 钩子（`scripts/ai-enforce-paths.mjs`），在工具调用层事前强制 `agent_allowed_paths`，越界编辑即时被拒；Bash 中明显会创建、移动、删除、重定向写入或修改 git 工作区的命令也会被拒。Runner 同时保留事后 `git diff` 校验作为二道防线。
 - `--output-format stream-json`：结果以结构化事件返回，Runner 从中解析最终结果文本并识别 `AI_TASK_BLOCKED` 信号，不再依赖脆弱的全文 grep。
 - `--max-turns`：回合上限，防止 Claude 死循环；默认 50，可用 `AI_RUNNER_CLAUDE_MAX_TURNS` 覆盖。
-- `--allowedTools`：task 可在 frontmatter 用可选字段 `allowed_tools`（如 `Bash(pnpm test:*)`）声明实现阶段需要的额外工具，按需精确放行。
+- `--allowedTools`：Runner 默认只放行读写文件所需的基础工具；task 可在 frontmatter 用可选字段 `allowed_tools`（如 `Bash(pnpm test:*)`）声明实现阶段需要的额外工具，按需精确放行，不能声明通用 `Bash` 或 `Bash(*)`。
+
+Claude 实现结束后，Runner 会执行 verify。若 verify 失败，会把失败命令、退出码和输出回灌给 Claude，按 `AI_RUNNER_VERIFY_REPAIR_ATTEMPTS` 做有限修复；修复仍受 `agent_allowed_paths` 和 PreToolUse 钩子约束。verify 通过后，Runner 会再启动一个只读 Claude 审查上下文，只允许 `Read/Glob/Grep/LS`，根据 task、diff 和相关文件输出 `AI_TASK_REVIEW_PASSED` 或 `AI_TASK_REVIEW_FAILED: 原因`，只有审查通过才会提交。
 
 Runner 不再提供 `bypassPermissions` 全开模式：它会关闭所有权限检查，让实现期 bash 完全脱离 Runner 的路径闸门。需要让 Claude 跑 bash 自测时，请用 `allowed_tools` 声明最小工具规格。
 

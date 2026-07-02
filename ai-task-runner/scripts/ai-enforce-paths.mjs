@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /*
- * PreToolUse 钩子：在 Claude 调用 Edit/Write/MultiEdit/NotebookEdit 之前，
- * 检查目标路径是否在当前 task 的 agent_allowed_paths 内。
- * 越界时以退出码 2 阻断本次编辑，stderr 反馈给 Claude，让它自行改用允许范围内的路径。
+ * PreToolUse 钩子：在 Claude 调用 Edit/Write/MultiEdit/NotebookEdit/Bash 之前，
+ * 检查编辑目标路径是否在当前 task 的 agent_allowed_paths 内，并拦截明显会改写文件系统的 Bash。
+ * 越界或高风险 Bash 会以退出码 2 阻断本次工具调用，stderr 反馈给 Claude，让它自行改用允许范围内的路径。
  *
  * 这是 agent_allowed_paths 的“事前”防线，让边界从“事后 git diff 报错”
  * 升级为“工具调用层不可逾越”。Runner 的事后校验仍作为二道防线保留。
@@ -14,7 +14,34 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
-const GATED_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
+const GATED_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Bash']);
+/*
+ * Bash 很难可靠静态解析所有文件写入目标。
+ * 为了避免 shell 命令绕过 Edit/Write 的路径闸门，这里保守拦截常见文件系统写入、
+ * 删除、移动、重定向和 git 工作区变更；非变更类自测命令仍可在 task allowed_tools 中精确放行。
+ */
+const MUTATING_BASH_PATTERNS = [
+  { pattern: /(^|[;&|]\s*)rm\s+-/i, reason: '删除文件' },
+  { pattern: /(^|[;&|]\s*)del\s+/i, reason: '删除文件' },
+  { pattern: /(^|[;&|]\s*)rd\s+/i, reason: '删除目录' },
+  { pattern: /(^|[;&|]\s*)rmdir\s+/i, reason: '删除目录' },
+  { pattern: /(^|[;&|]\s*)mv\s+/i, reason: '移动文件' },
+  { pattern: /(^|[;&|]\s*)move\s+/i, reason: '移动文件' },
+  { pattern: /(^|[;&|]\s*)cp\s+/i, reason: '复制文件' },
+  { pattern: /(^|[;&|]\s*)copy\s+/i, reason: '复制文件' },
+  { pattern: /(^|[;&|]\s*)mkdir\s+/i, reason: '创建目录' },
+  { pattern: /(^|[;&|]\s*)touch\s+/i, reason: '创建或更新时间戳' },
+  { pattern: /(^|[;&|]\s*)tee\s+/i, reason: '写入文件' },
+  { pattern: /(^|[;&|]\s*)truncate\s+/i, reason: '截断文件' },
+  { pattern: /(^|[;&|]\s*)chmod\s+/i, reason: '修改文件权限' },
+  { pattern: /(^|[;&|]\s*)sed\s+[^;&|]*\s-i\b/i, reason: '原地修改文件' },
+  { pattern: /(^|[;&|]\s*)perl\s+[^;&|]*\s-i\b/i, reason: '原地修改文件' },
+  { pattern: /\bdd\s+[^;&|]*\bof=/i, reason: '写入文件' },
+  { pattern: /(^|[^&])>{1,2}(?!&)/, reason: '重定向写入文件' },
+  { pattern: /(^|\s)&>/, reason: '重定向写入文件' },
+  { pattern: /\b(?:Set-Content|Add-Content|Out-File|New-Item|Remove-Item|Move-Item|Copy-Item|Rename-Item)\b/i, reason: 'PowerShell 文件变更' },
+  { pattern: /\bgit\s+(add|commit|reset|checkout|switch|merge|rebase|clean|restore|rm|stash|apply)\b/i, reason: 'git 工作区或历史变更' }
+];
 
 function readStdin() {
   try {
@@ -140,6 +167,18 @@ function extractTargetPaths(toolInput) {
   return paths;
 }
 
+function findMutatingBashReason(command) {
+  const normalizedCommand = String(command || '').trim();
+
+  if (!normalizedCommand) {
+    return '';
+  }
+
+  const match = MUTATING_BASH_PATTERNS.find((rule) => rule.pattern.test(normalizedCommand));
+
+  return match ? match.reason : '';
+}
+
 function main() {
   let payload;
 
@@ -162,8 +201,20 @@ function main() {
   }
 
   const projectRoot = context.projectRoot || process.cwd();
-  const targetPaths = extractTargetPaths(payload.tool_input);
   const violations = [];
+
+  if (toolName === 'Bash') {
+    const command = payload.tool_input && typeof payload.tool_input.command === 'string'
+      ? payload.tool_input.command
+      : '';
+    const mutatingReason = findMutatingBashReason(command);
+
+    if (mutatingReason) {
+      violations.push(`Bash 命令被判定为文件系统或 git 变更（${mutatingReason}）。请改用 Edit/Write/MultiEdit，并限制在 agent_allowed_paths 内。`);
+    }
+  }
+
+  const targetPaths = extractTargetPaths(payload.tool_input);
 
   for (const rawPath of targetPaths) {
     const relativePath = resolveRelativeToProject(projectRoot, rawPath);
