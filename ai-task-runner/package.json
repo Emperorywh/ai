@@ -1,0 +1,10 @@
+{
+  "name": "ai-task-runner-mvp",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "ai:next": "node scripts/ai-run-next-task.mjs",
+    "ai:all": "node scripts/ai-run-all-tasks.mjs",
+    "ai:status": "node scripts/ai-task-status.mjs"
+  }
+}
