@@ -282,7 +282,8 @@ export function createRunnerContext(options = {}) {
     claudeMaxTurns: readPositiveInt('AI_RUNNER_CLAUDE_MAX_TURNS', DEFAULT_CLAUDE_MAX_TURNS),
     claudeMaxRetries: readNonNegativeInt('AI_RUNNER_CLAUDE_MAX_RETRIES', DEFAULT_CLAUDE_MAX_RETRIES),
     verifyRepairAttempts: readNonNegativeInt('AI_RUNNER_VERIFY_REPAIR_ATTEMPTS', DEFAULT_VERIFY_REPAIR_ATTEMPTS),
-    reviewMaxTurns: readPositiveInt('AI_RUNNER_REVIEW_MAX_TURNS', DEFAULT_REVIEW_MAX_TURNS)
+    reviewMaxTurns: readPositiveInt('AI_RUNNER_REVIEW_MAX_TURNS', DEFAULT_REVIEW_MAX_TURNS),
+    gitPathPrefix: undefined
   };
 }
 
@@ -1352,6 +1353,7 @@ async function runClaudeTask(context, task, logPath, options = {}) {
  * default 权限模式配合 allowedTools 显式放行必要工具；
  * --settings 注入 PreToolUse 钩子，在工具调用层事前拦截越界编辑；
  * --output-format stream-json 让结果可结构化解析，替代脆弱的文本 grep；
+ * --verbose 是 stream-json 在 --print 模式下的硬性前置条件，缺失时 Claude CLI 直接报错退出；
  * --max-turns 给回合上限防止死循环；
  * --allowedTools 按 task 声明精确放行额外工具，取代危险的 bypassPermissions 全开模式。
  */
@@ -1363,6 +1365,7 @@ function buildClaudeBaseArgs({ settingsPath, maxTurns, allowedTools }) {
   }
 
   args.push('--output-format', 'stream-json');
+  args.push('--verbose');
 
   if (maxTurns) {
     args.push('--max-turns', String(maxTurns));
@@ -1966,9 +1969,49 @@ function getChangedFiles(context) {
   const staged = runGit(context, ['diff', '--name-only', '--cached'], { capture: true });
   const untracked = runGit(context, ['ls-files', '--others', '--exclude-standard'], { capture: true });
 
+  /*
+   * git 返回的路径始终相对「git 仓库根」，而 Runner 内部的 task.relativePath、
+   * agent_allowed_paths、runnerOwnedSnapshots 等全部相对「projectRoot」。
+   * 当 projectRoot 只是 git 仓库的某个子目录时，必须先剥离 show-prefix 这段前缀，
+   * 否则 task 状态文件（由 Runner 自身改写）会被误判成 AI 的越界改动，
+   * commit/diff 等后续 git 操作也会因为路径基准不一致而失真。
+   */
   return uniqueLines(`${unstaged}\n${staged}\n${untracked}`)
-    .map(toPosix)
+    .map((filePath) => stripGitPathPrefix(context, filePath))
     .filter((filePath) => !isRunnerIgnoredChangedPath(context, filePath));
+}
+
+/*
+ * 计算 projectRoot 在 git 仓库内的相对前缀（git rev-parse --show-prefix）。
+ * 例如 projectRoot=C:/code/ai-opc/agv-3d 而 git 仓库根=C:/code/ai-opc 时，返回 "agv-3d/"；
+ * projectRoot 恰好是仓库根时返回空字符串。结果惰性缓存到 context，避免每次取变更都重复调用 git。
+ */
+function getGitPathPrefix(context) {
+  if (context.gitPathPrefix === undefined) {
+    context.gitPathPrefix = toPosix(runGit(context, ['rev-parse', '--show-prefix'], { capture: true }).trim());
+  }
+
+  return context.gitPathPrefix;
+}
+
+/*
+ * 把 git 返回的仓库根相对路径转换成 projectRoot 相对路径。
+ * 只剥离精确匹配的前缀；前缀为空（仓库根即 projectRoot）或路径不以该前缀开头时原样返回。
+ */
+function stripGitPathPrefix(context, filePath) {
+  const prefix = getGitPathPrefix(context);
+
+  if (!prefix) {
+    return toPosix(filePath);
+  }
+
+  const normalized = toPosix(filePath);
+
+  if (normalized.startsWith(prefix)) {
+    return normalized.slice(prefix.length);
+  }
+
+  return normalized;
 }
 
 function isRunnerIgnoredChangedPath(context, filePath) {
