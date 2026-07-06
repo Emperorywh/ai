@@ -85,6 +85,11 @@ const REVIEW_ALLOWED_TOOLS = Object.freeze([
 const REVIEW_FAILED_SIGNAL = 'AI_TASK_REVIEW_FAILED:';
 const REVIEW_PASSED_SIGNAL = 'AI_TASK_REVIEW_PASSED';
 const TEXT_SNIPPET_LIMIT = 20000;
+/*
+ * stream-json 回显里单条工具调用详情（命令、路径或查询）的最大长度。
+ * 太长会刷屏并淹没关键信息，截断后用省略号提示；完整内容仍保留在日志文件中。
+ */
+const TOOL_USE_DISPLAY_LIMIT = 120;
 
 /*
  * 这些路径过宽或会破坏 Runner 自己的调度数据。
@@ -615,6 +620,11 @@ async function runTask(context, task, tasks) {
 
       if (canRetry) {
         appendLog(logPath, `第 ${attempt} 次尝试失败（${error.message}），重置工作区后重试。`);
+        /*
+         * 瞬态失败重试发生在 Claude 进程已经退出之后，终端上只会看到上一轮静默结束。
+         * 这里显式回显失败原因和重试动作，避免"重试"这一关键事件只留在日志里、终端看起来像卡住。
+         */
+        console.log(`第 ${attempt} 次尝试失败：${error.message}，重置工作区后重试。`);
         discardWorkingTreeChanges(context);
         continue;
       }
@@ -1499,7 +1509,13 @@ function parseClaudeStreamJson(stdout) {
  * stream-json 模式下，原始流完整落盘便于事后排查，但终端只回显 assistant 的文本增量，
  * 避免把整段 JSON 刷屏。result 事件由 Runner 自己汇总，不在这里重复打印。
  */
-function extractStreamJsonDisplay(line) {
+/*
+ * 把 Claude stream-json 的一行事件转换成终端可实时阅读的回显。
+ * assistant 事件回显 AI 的思考文本和每一次工具调用摘要，
+ * user 事件回显工具执行出错标记；其余事件交给 Runner 在日志文件里完整留痕。
+ * projectRoot 用于把工具入参里的绝对路径转成项目内相对路径，避免 Windows 长路径刷屏。
+ */
+function extractStreamJsonDisplay(line, projectRoot = '') {
   const trimmed = line.trim();
 
   if (!trimmed) {
@@ -1519,14 +1535,148 @@ function extractStreamJsonDisplay(line) {
   }
 
   if (event.type === 'assistant' && event.message && Array.isArray(event.message.content)) {
-    const texts = event.message.content
-      .filter((block) => block && block.type === 'text' && typeof block.text === 'string')
-      .map((block) => block.text);
+    return summarizeAssistantContent(event.message.content, projectRoot);
+  }
 
-    return texts.join('\n');
+  if (event.type === 'user' && event.message && Array.isArray(event.message.content)) {
+    return summarizeToolResultContent(event.message.content);
+  }
+
+  /*
+   * result 事件是 Claude 一次执行的终态：成功时由 Runner 自行汇总，不在实时流重复；
+   * 只有 subtype=error 的失败终态需要立刻回显，让网络/API/限流类错误不再等到进程结束才暴露。
+   */
+  if (event.type === 'result' && event.subtype === 'error') {
+    return `[Claude 错误] ${String(event.result || '').trim() || '执行出错，详见日志'}`;
+  }
+
+  /*
+   * 兜底：捕获未识别事件结构里的错误信号。
+   * Claude Code 的非 result 错误事件字段尚未完全契约化，这里按 subtype/type 命中并回显原文，
+   * 既不漏报也不崩溃；正常事件仍静默，交由日志文件完整留痕。
+   */
+  if (event.subtype === 'error' || event.type === 'error') {
+    const detail = String(event.message || event.result || event.error || '执行出错').trim();
+    return `[Claude 错误] ${detail}`;
   }
 
   return '';
+}
+
+/*
+ * 汇总 assistant 一次消息里的文本与工具调用。
+ * 文本块原样输出保留 AI 的推理上下文，工具调用块输出一行摘要，
+ * 二者按出现顺序拼接，让终端读者能同时看到「为什么」和「在做什么」。
+ */
+function summarizeAssistantContent(content, projectRoot) {
+  const lines = [];
+
+  for (const block of content) {
+    if (!block || typeof block !== 'object') {
+      continue;
+    }
+
+    if (block.type === 'text' && typeof block.text === 'string' && block.text.trim()) {
+      lines.push(block.text);
+      continue;
+    }
+
+    if (block.type === 'tool_use') {
+      const summary = summarizeToolUse(block.name, block.input, projectRoot);
+
+      if (summary) {
+        lines.push(summary);
+      }
+    }
+  }
+
+  return lines.join('\n');
+}
+
+/*
+ * 把一次工具调用格式化成单行摘要，例如「[工具] Edit · src/App.tsx」。
+ * 文件类工具展示被操作路径，Bash 展示命令，搜索类展示 pattern/query，
+ * 让执行过程可观测，又不会把完整入参（可能含大段 diff 或代码）刷到终端。
+ */
+function summarizeToolUse(toolName, input, projectRoot) {
+  const name = String(toolName || '工具').trim() || '工具';
+  const detail = pickToolUseDetail(input || {}, projectRoot);
+
+  return detail ? `[工具] ${name} · ${detail}` : `[工具] ${name}`;
+}
+
+function pickToolUseDetail(input, projectRoot) {
+  const filePath = input.file_path || input.notebook_path || input.path;
+
+  if (typeof filePath === 'string' && filePath) {
+    return relativizeForDisplay(filePath, projectRoot);
+  }
+
+  if (typeof input.command === 'string' && input.command.trim()) {
+    return truncateForDisplay(input.command);
+  }
+
+  if (typeof input.pattern === 'string' && input.pattern.trim()) {
+    return `pattern=${truncateForDisplay(input.pattern)}`;
+  }
+
+  if (typeof input.query === 'string' && input.query.trim()) {
+    return `query=${truncateForDisplay(input.query)}`;
+  }
+
+  return '';
+}
+
+/*
+ * tool_result 通常体积很大，正文由日志文件完整保留即可。
+ * 终端只在工具出错时回显一行标记，避免成功结果把屏幕刷满，
+ * 同时让失败的工具调用在实时流里立刻可见。
+ */
+function summarizeToolResultContent(content) {
+  const lines = [];
+
+  for (const block of content) {
+    if (block && block.type === 'tool_result' && block.is_error) {
+      lines.push('[工具结果] 执行出错，详见日志');
+    }
+  }
+
+  return lines.join('\n');
+}
+
+function truncateForDisplay(text) {
+  const value = String(text || '').replace(/\s+/g, ' ').trim();
+
+  if (value.length <= TOOL_USE_DISPLAY_LIMIT) {
+    return value;
+  }
+
+  return `${value.slice(0, TOOL_USE_DISPLAY_LIMIT)}…`;
+}
+
+/*
+ * 把工具入参里的绝对路径转成项目内相对路径用于回显。
+ * 仅做展示层归一化，不影响 Claude 实际收到的路径；项目外或已是相对路径则原样返回。
+ */
+function relativizeForDisplay(filePath, projectRoot) {
+  const value = String(filePath || '');
+
+  if (!value || !projectRoot) {
+    return value;
+  }
+
+  const normalizedProject = toPosix(projectRoot).replace(/\/+$/, '');
+  const normalizedFile = toPosix(value);
+
+  if (normalizedFile === normalizedProject) {
+    return '.';
+  }
+
+  if (normalizedFile.startsWith(`${normalizedProject}/`)) {
+    return normalizedFile.slice(normalizedProject.length + 1);
+  }
+
+  return value;
 }
 
 function buildPrompt(context, task, extraInstructions = '') {
@@ -1896,7 +2046,7 @@ async function runCommand(context, command, args, options = {}) {
             streamJsonBuffer = streamJsonBuffer.slice(newlineIndex + 1);
             newlineIndex = streamJsonBuffer.indexOf('\n');
 
-            const display = extractStreamJsonDisplay(line);
+            const display = extractStreamJsonDisplay(line, context.projectRoot);
 
             if (display) {
               process.stdout.write(display.endsWith('\n') ? display : `${display}\n`);
