@@ -94,20 +94,36 @@ ui/
 - `cli` 和后期 `ui` 只作为交互入口，不拥有核心状态机和任务规则。
 - agent 会话、SDK session 和模型上下文只作为执行过程材料，不能替代文档协议中的长期上下文。
 
+角色与分层映射：
+
+- `Workflow Orchestrator`、`Reviewer / Validator`、`Task Executor` 是领域角色（见第 5 节），由 `application` 层编排，`infrastructure` 层提供执行引擎、文件、Git、SQLite 等适配能力；本文档中“Orchestrator 负责”“由 application 层调度”指的是同一件事——该角色经 application 层用例实现。
+- 角色之间只通过文档协议和状态机协作，不通过共享内存或聊天上下文。
+
+状态索引（SQLite）与文档协议的关系：
+
+- SQLite 仅作查询、审计、恢复加速和依赖索引的**派生存储**，文档协议（Markdown 正文 + YAML frontmatter）始终是唯一事实来源。
+- 索引内容至少包括：任务 `id / title / status / layer / depends_on / allowed_paths / permissions`、决策 `id / scope / status`、问题 `id / severity / status / owner`、最近一次执行摘要（`execution_status / review_result / next_action`）和执行 commit 元信息。
+- 写入时机：任务状态流转、合并回写、决策或问题变更时由 application 层**同步写入**索引；索引与文档不一致时以文档为准，可通过 `rebuild-index` 命令从文档全量重建。
+- 写入容错：索引写入失败**不阻断**状态流转和合并，由 application 层记录告警日志后继续流程，后续通过 `rebuild-index` 从文档全量重建修复；正确性始终以文档协议为准，不依赖索引写入是否成功。
+- 索引不参与状态机判定，状态机只读 frontmatter；任何“读状态”的判断都不得只依赖 SQLite。
+
 ### 3.2 并行执行与 worktree 合并策略
 
-`Git worktree` 为每个处于 `running` 状态的任务创建独立工作区和分支（命名建议 `task/TASK-XXX`）。默认执行模型仍为**串行**（见第 11 节流程）；只有当多个任务互无 `depends_on` 依赖、且 `allowed_paths` 不重叠时，才允许由 application 层调度并行执行。
+`Git worktree` 为每个处于 `running` 状态的任务创建独立工作区和分支（命名建议 `task/TASK-XXX`）。无论串行还是并行，每个 running 任务都使用独立 worktree，目的是统一执行、回滚、审查和冲突处理模型，infrastructure 层负责自动创建与回收，对上层透明；串行模式下 worktree 顺序复用、清理成本低，并行模式下 worktree 是隔离的硬性前提。默认执行模型为**串行**（见第 11 节流程）；只有当多个任务互无 `depends_on` 依赖、且 `allowed_paths` 不重叠时，才允许由 Orchestrator（经 application 层）调度并行执行。
 
 并行与合并规则：
 
-- 每个 worktree 基于任务启动时的主分支基线创建；任务进入 `done` 后，其分支以 **rebase 到最新主分支 + fast-forward 合并**的方式回收，避免无意义的 merge commit。
+- 每个 worktree 基于任务启动时的主分支基线创建；合并前由 Orchestrator 把该 worktree 分支上的执行 commit 元信息（`hash / message / author / 时间`）写入 `.result.md` 的 `execution_commits` 字段并落入 SQLite，以满足执行审计；之后其分支以 **rebase 到最新主分支 + fast-forward 合并**的方式回收，避免无意义的 merge commit，rebase 不影响已落库的审计元信息。
 - 合并顺序由 application 层按 `depends_on` 拓扑序决定，先合并被依赖方，再合并依赖方；任何任务都不得先于其依赖任务回收到主分支。
 - 合并冲突由 **Orchestrator 负责协调**，不交给 Task Executor 自行解决；冲突无法自动消解时，将后合并的任务置为 `blocked`，并把冲突清单写入 `ISSUES.md`。
 - `PROGRESS.md`、`DECISIONS.md`、`ISSUES.md`、任务 frontmatter 状态等**全局工作流状态只在主分支由 Orchestrator 维护**，worktree 中只读引用；Task Executor 完成后只把需要更新的内容写入 `.result.md` 的结构化字段，由 Orchestrator 在合并回主分支时统一回写到全局文档，避免多 worktree 并发写同一文件。
+- 并行任务的全局文档一致性：Orchestrator 在调度并行任务时记录各自的主分支基线 commit，Executor 读到的全局文档以该基线为准；合并回写时 Orchestrator 按 `depends_on` 拓扑序**串行**处理，每次回写前基于最新主分支重读全局文档再合并 `global_update_requests`。回写采用 **section 级合并**：不同 section 的更新直接合并；同一 section 若内容兼容则按拓扑序拼接，若互斥（如两条 `progress` 更新都改写"当前完成到哪个任务"且结论冲突）则后写者的该条更新落选，由 Orchestrator 将冲突项写入 `ISSUES.md`，并视情况把后合并任务置为 `blocked`，后写者不得静默覆盖先写者的更新。
 - `.result.md` 是 Task Executor 的内置输出产物，默认允许写入，不需要出现在业务 `allowed_paths` 中；除 `.result.md` 外，Task Executor 不得直接修改任务定义、全局文档或其他工作流状态文件。
-- 任务进入 `rejected` / `failed` / `cancelled` 时，其 worktree 分支保留至任务重新合并、取消或人工确认放弃后，再由 infrastructure 层删除。
+- 任务进入 `rejected` / `failed` 时，其 worktree 分支保留至该任务重新合并回主分支或人工确认放弃后，再由 infrastructure 层删除；`cancelled` 为终态，其 worktree 分支保留至人工确认放弃后删除。三类状态的分支都不会被自动清理。
 
 ## 4. 核心原则
+
+本节描述贯穿工作流的设计哲学与原则；具体到编码层的执行约束（不引入临时 patch、不写巨型函数、不跨层调用等）以 `AGENTS.md` 为唯一权威，本节不重复维护，仅在下述原则中点到为止。
 
 所有实现必须遵循：
 
@@ -126,19 +142,28 @@ ui/
 
 ### 5.1 Workflow Orchestrator
 
-负责任务正式编码前的准备工作。
+贯穿任务全生命周期：编码前负责规格、架构、计划与任务拆分，编码中负责调度与状态流转，编码后负责审查 gate 调度、合并、全局文档回写与失败恢复。
 
-职责包括：
+编码前职责包括：
 
 - 访谈用户。
 - 生成 `SPEC.md`。
 - 生成 `ARCHITECTURE.md`。
-- 对 `SPEC.md` 与 `ARCHITECTURE.md` 做生成后自检，并提交 Reviewer 独立审查。
+- 对 `SPEC.md` 与 `ARCHITECTURE.md` 做生成后自动一致性校验（结构完整、字段合规、内部引用一致），再提交 Reviewer 独立审查；该自动校验不替代 Reviewer 的独立审查。
 - 生成 `PLAN.md`。
 - 拆分 `TASKS/`。
 - 维护任务依赖关系。
 - 生成每个任务的上下文包。
 - 确保每个任务可以被独立上下文执行。
+
+编码中与编码后职责包括：
+
+- 将任务状态从 `ready` 置为 `running`；Task Executor 产出 `.result.md` 后，将状态置为 `reviewing`。
+- 在 `no_review: true` 时跳过 Reviewer，由 Orchestrator 直接校验产物：通过则置 `done`，不通过则置 `blocked`（等待人工确认或扩权）或 `failed`（无法修复）。
+- 按 Reviewer 的 `.review.md` 结论映射任务状态（见第 15 节）。
+- 按第 3.2 节策略执行合并：拓扑序 rebase + fast-forward、回填 `execution_commits`、协调合并冲突、串行回写全局文档。
+- 处理依赖级联：前置任务进入 `rejected` / `failed` / `blocked` 时，把所有后继任务（传递闭包）置为 `blocked`。
+- 处理失败恢复：根据 `.result.md` 与人工确认，将任务置为 `failed` 或 `blocked`。
 
 Workflow Orchestrator 不应直接完成所有开发，也不拥有规格、架构或任务结果的最终审查结论；它应优先建立清晰的文档协议、架构约束和任务边界，并把审查 gate 交给 Reviewer。
 
@@ -178,6 +203,8 @@ Reviewer 不应继续实现功能，只负责审查和反馈。
 
 Reviewer 在任务拆分前还负责独立审查 `SPEC.md` 和 `ARCHITECTURE.md`，避免 Orchestrator 自审。只有 SPEC 与 ARCHITECTURE 通过 Reviewer 审查后，Orchestrator 才能进入生成 `PLAN.md` 与 `TASKS/` 阶段。
 
+任务执行结果的审查结论由 Reviewer 写入独立的 `TASKS/TASK-XXX-xxx.review.md`（模板见第 15 节），不写入 `.result.md`；`.result.md` 只记录 Task Executor 的执行事实，审查结论与执行事实分别由不同角色拥有，互不覆写。当任务声明 `no_review: true` 时，Reviewer 不介入，由 Orchestrator 生成 `review_result: skipped` 的 `.review.md`。
+
 ## 6. 文档体系
 
 完整工作流应产生以下文档：
@@ -194,8 +221,10 @@ TESTING.md
 TASKS/
   TASK-001-xxx.md
   TASK-001-xxx.result.md
+  TASK-001-xxx.review.md
   TASK-002-xxx.md
   TASK-002-xxx.result.md
+  TASK-002-xxx.review.md
 ```
 
 ### 6.1 AGENTS.md
@@ -210,6 +239,8 @@ TASKS/
 - 不写巨型函数或巨型组件。
 - 不跨层调用。
 - 不制造隐式状态。
+
+`AGENTS.md` 是上述执行约束的**唯一权威来源**；第 13 节执行规则、第 18 节启动提示只引用 `AGENTS.md`，不重复维护约束副本，避免日后改一处漏一处。任务或工作流特有的增量约束（如修改范围、状态机相关规则）单独写在任务文件或对应章节中。`AGENTS.md` 为自由格式的约束文本，不强制 YAML frontmatter，也不参与 Zod Schema 校验；其内容变更由人工或 Orchestrator 在规格阶段维护。
 
 ### 6.2 SPEC.md
 
@@ -304,7 +335,7 @@ TASKS/
 - 影响范围。
 - 后续约束。
 
-为支持 Zod Schema 校验和 SQLite 重建索引，每条决策必须保留稳定机器字段，至少包括 `id`、`status`、`scope`、`created_from_task`、`decision` 和 `consequences`；这些字段应使用 YAML frontmatter、fenced YAML block 或统一 YAML 列表表达，纯 Markdown 标题不视为机器字段。Markdown 正文可以补充解释，但不得替代这些字段。
+为支持 Zod Schema 校验和 SQLite 重建索引，每条决策必须保留稳定机器字段，至少包括 `id`、`title`、`status`、`scope`、`created_from_task`、`decision`、`rationale` 和 `consequences`；这些字段应使用 YAML frontmatter、fenced YAML block 或统一 YAML 列表表达，纯 Markdown 标题不视为机器字段。Markdown 正文可以补充解释，但不得替代这些字段。该字段集与第 10 节 `global_update_requests.decisions` 提议项保持一致，Task Executor 提议时 `id` 留空，由 Orchestrator 回写时统一分配。
 
 ### 6.7 ISSUES.md
 
@@ -319,7 +350,7 @@ TASKS/
 - 需要谁确认。
 - 建议处理方式。
 
-为支持 Zod Schema 校验和 SQLite 重建索引，每个问题必须保留稳定机器字段，至少包括 `id`、`status`、`severity`、`scope`、`created_from_task`、`owner` 和 `recommended_action`；这些字段应使用 YAML frontmatter、fenced YAML block 或统一 YAML 列表表达，纯 Markdown 标题不视为机器字段。Markdown 正文可以补充上下文，但不得替代这些字段。
+为支持 Zod Schema 校验和 SQLite 重建索引，每个问题必须保留稳定机器字段，至少包括 `id`、`title`、`status`、`severity`、`scope`、`created_from_task`、`owner` 和 `recommended_action`；这些字段应使用 YAML frontmatter、fenced YAML block 或统一 YAML 列表表达，纯 Markdown 标题不视为机器字段。Markdown 正文可以补充上下文，但不得替代这些字段。该字段集与第 10 节 `global_update_requests.issues` 提议项保持一致，Task Executor 提议时 `id` 留空，由 Orchestrator 回写时统一分配。
 
 ### 6.8 TESTING.md
 
@@ -356,22 +387,24 @@ cancelled   任务被取消，不再执行
 draft     -> ready | cancelled
 ready     -> running | draft | cancelled
 running   -> reviewing | blocked | failed | cancelled
-running   -> done                         # 仅当 no_review: true
+running   -> done                         # 仅当 no_review: true 且 Orchestrator 校验产物通过
 reviewing -> done | rejected | blocked
-rejected  -> ready
+rejected  -> ready | cancelled
 blocked   -> ready | failed | cancelled
-failed    -> draft | ready | cancelled   # 仅允许 Orchestrator 或人工确认后流转
+failed    -> ready | cancelled            # 仅允许 Orchestrator 或人工确认后流转；需重新定义任务时先回 ready 再退 draft
+done      -> blocked                      # 仅 Orchestrator 或人工确认，用于 reopen 严重回归
 ```
 
-禁止跳过 `reviewing` 直接进入 `done`，除非任务 frontmatter 声明 `no_review: true`（此时允许 `running -> done`，等价于自审通过）。
+禁止跳过 `reviewing` 直接进入 `done`，除非任务 frontmatter 声明 `no_review: true`；此时允许 `running -> done`，含义是**跳过 Reviewer 独立审查，但仍由 Orchestrator 校验 `.result.md`、验证结果和全局文档更新建议齐全**（见第 15 节），并非”自审通过”。若 `no_review: true` 任务在 `running` 阶段 Orchestrator 校验产物不通过，则**不进入 `done`**，改走 `running -> blocked`（等待人工确认或扩权）或 `running -> failed`（无法修复），由 Orchestrator 按 `.result.md` 的 `next_action` 决定。
 
 补充说明：
 
 - `ready -> draft`：任务定义本身有问题时，可退回 `draft` 重新定义。
-- `rejected -> ready` 与 `blocked -> ready` 默认为**续跑语义**：保留已存在的 worktree 与已完成修改，Task Executor 在此基础上继续；若任务 frontmatter 声明 `restart_on_retry: true`，则重置 worktree 从干净状态重跑。worktree 的保留与重置由 infrastructure 层统一管理。
-- `failed` 不是自动重试态，Task Executor 不得自行从 `failed` 继续执行；只有 Orchestrator 或人工确认失败处理方案后，才能将其重开为 `draft` / `ready`，或取消为 `cancelled`。
+- `rejected -> ready` 与 `blocked -> ready` 默认为**续跑语义**：保留已存在的 worktree 与已完成修改，Task Executor 在此基础上继续；若任务 frontmatter 声明 `restart_on_retry: true`，则重置 worktree 从干净状态重跑。worktree 的保留与重置由 infrastructure 层统一管理。`rejected -> cancelled` 用于放弃一个被反复驳回的任务，不必再经 `ready` 中转。
+- `failed` 不是自动重试态，Task Executor 不得自行从 `failed` 继续执行；只有 Orchestrator 或人工确认失败处理方案后，才能将其重开为 `ready`（若问题出在任务定义本身，再由 `ready` 退回 `draft` 重新定义），或取消为 `cancelled`。
+- `done` 在通常情况下视为终态；仅在事后发现严重回归且无法通过新任务修复时，才由 Orchestrator 或人工确认走 `done -> blocked` 重开，重开后按 `blocked -> ready` 续跑或重定义。一般性问题应优先新开任务处理，而不是 reopen 已完成任务。
 - `cancelled` 为终态。进入 `failed` 或 `cancelled` 前必须按第 17 节要求记录失败或取消信息，并按第 3.2 节合并策略决定是否保留 worktree。
-- 依赖级联：当 `TASK-A` 处于 `rejected` / `failed` / `blocked` 时，所有 `depends_on: [TASK-A]` 的后继任务自动进入 `blocked`；后继任务只有在 `TASK-A` 到达 `done`、依赖被 Orchestrator 改写到替代任务，或人工取消该依赖后才能恢复。
+- 依赖级联（取**传递闭包**）：当 `TASK-A` 处于 `rejected` / `failed` / `blocked` 时，所有直接或间接 `depends_on` 到 `TASK-A` 的后继任务自动进入 `blocked`；后继任务只有在 `TASK-A` 到达 `done`、依赖被 Orchestrator 改写到替代任务，或人工取消该依赖后才能恢复。
 - `no_review: true` 只表示任务不进入独立 Reviewer 审查，不表示跳过验证；该任务仍必须生成 `.result.md` 并记录自动验证或人工验收建议。
 
 ## 8. Context Pack 上下文包
@@ -393,7 +426,7 @@ TASKS/TASK-XXX-xxx.md
 当前任务相关源码文件
 ```
 
-每个 Context Pack 必须具备机器可读清单，可以内嵌在任务 frontmatter，也可以由 Orchestrator 单独生成。清单至少包含：
+每个 Context Pack 必须具备机器可读清单，**裁剪类文档以任务 frontmatter 的 `context_pack` 字段为唯一权威来源**；Orchestrator 在拆分任务时生成并写入该字段，Task Executor 启动时只读取 frontmatter 的 `context_pack`，不接受其他来源的清单。必读核心文档（见下文裁剪规则）是硬性下限，与 `context_pack` 取**并集**生效，即 Task Executor 实际注入范围 = 必读核心 ∪ `required_docs` ∪ `optional_doc_excerpts` ∪ `source_files`；frontmatter 不得通过省略必读核心来缩小注入范围。清单至少包含：
 
 - `required_docs`：必须完整注入的文档。
 - `optional_doc_excerpts`：按章节裁剪注入的文档片段。
@@ -412,7 +445,7 @@ TASKS/TASK-XXX-xxx.md
 
 上下文包裁剪规则：
 
-- `AGENTS.md`、`ARCHITECTURE.md`、`PROGRESS.md`、当前任务文件为**必读核心**，任何任务都要带。
+- `AGENTS.md`、`ARCHITECTURE.md`、`PROGRESS.md`、当前任务文件为**必读核心**，任何任务都要带；当前任务文件是 Context Pack 的入口载体，本身不计入 `required_docs` 数组，但属于必读核心。
 - `SPEC.md`、`PLAN.md`、`DECISIONS.md`、`ISSUES.md`、`TESTING.md` 为**按需引用**，由 Orchestrator 根据任务 `layer` 和 `allowed_paths` 选择与本任务相关的章节或全文注入，无关章节不注入，避免上下文污染。
 - 源码文件由 Orchestrator 根据 `allowed_paths`、`depends_on` 对应 `.result.md` 的修改清单和 `ARCHITECTURE.md` 的模块边界圈定，并在任务文件“必读文件”中显式列出；executor 不得自行扩展范围。
 
@@ -472,6 +505,8 @@ workflow_outputs:
 - `page` — 页面组合层
 - `test` — 测试层
 
+`layer` 用于 Context Pack 裁剪（见第 8 节）、Reviewer 分层审查（见第 15 节）和 SQLite 索引；它与 `PLAN.md` 的阶段（见第 6.4 节）是松散对应关系——一个 PLAN 阶段可能横跨多个 `layer`（如"类型系统和领域模型"阶段同时涉及 `type` 与 `domain`），一个 `layer` 也可能出现在多个阶段，不必一一对应。
+
 ## 4. 必读文件
 
 - AGENTS.md
@@ -513,13 +548,14 @@ workflow_outputs:
 
 说明可能出现的风险、边界情况或容易误解的地方。
 
-## 13. 结束时必须产出
+## 13. 结束时必须产出（Task Executor 负责）
 
 - TASKS/TASK-XXX-xxx.result.md
 - 在 `.result.md` 中写入 `PROGRESS.md` 更新建议
 - 在 `.result.md` 中写入 `DECISIONS.md` 更新建议，如有新增架构决策
 - 在 `.result.md` 中写入 `ISSUES.md` 更新建议，如有未解决问题
-- 由 Orchestrator 在主分支统一回写 `PROGRESS.md`、`DECISIONS.md` 和 `ISSUES.md`
+
+> 合并回主分支后，由 Orchestrator 统一回写 `PROGRESS.md`、`DECISIONS.md` 和 `ISSUES.md`，这是 Orchestrator 的后续动作，不属于 Task Executor 的产出。
 ```
 
 ## 10. 任务执行结果模板
@@ -530,12 +566,12 @@ workflow_outputs:
 ---
 task_id: TASK-XXX
 execution_status: completed # completed | blocked | failed
-review_result: pending      # pending | approved | rejected | needs-human-confirmation | skipped
 modified_files:
   - path/to/file-a.ts
 created_files:
   - path/to/new-file.ts
 deleted_files: []
+execution_commits: []       # 由 Orchestrator 在合并前回填执行 commit 元信息（hash/message/author/time）
 verification:
   - command: npm run typecheck
     result: passed           # passed | failed | skipped
@@ -544,7 +580,7 @@ global_update_requests:
   progress: []
   decisions: []
   issues: []
-next_action: review          # review | retry | needs-human | merge | cancel
+next_action: review          # review | retry | needs-human | cancel
 ---
 
 # TASK-XXX 执行结果
@@ -599,6 +635,49 @@ next_action: review          # review | retry | needs-human | merge | cancel
 列出建议由 Orchestrator 回写到 `PROGRESS.md`、`DECISIONS.md`、`ISSUES.md` 的内容；Task Executor 不直接修改这些全局文档。
 ```
 
+`global_update_requests` 各子项的最小结构（Task Executor 提议时填写，`id` 留空由 Orchestrator 回写时统一分配）：
+
+```yaml
+global_update_requests:
+  progress:
+    - section: "当前完成到哪个任务"      # 对应 PROGRESS.md 的章节
+      content: "TASK-003 已完成状态层"
+  decisions:
+    - id: ""                             # 由 Orchestrator 分配，如 DEC-007
+      title: "状态层改用 Zustand"
+      status: accepted
+      scope: state
+      decision: "采用 Zustand 管理全局状态"
+      rationale: "..."
+      consequences: "..."
+      created_from_task: TASK-003
+  issues:
+    - id: ""                             # 由 Orchestrator 分配，如 ISS-004
+      title: "API 返回结构与 SPEC 不一致"
+      status: open
+      severity: high
+      scope: api
+      owner: ""
+      recommended_action: "与后端对齐返回结构后再继续 TASK-005"
+      created_from_task: TASK-003
+```
+
+`progress` 项可为 `{ section, content }` 或纯字符串片段；`decisions` / `issues` 项必须至少包含对应全局文档要求的机器字段（见 6.6 / 6.7），缺失必填字段时由 Orchestrator 在校验阶段驳回该次回写。
+
+`execution_status` × `next_action` 到任务状态的映射由 Orchestrator 在读取 `.result.md` 后执行：
+
+```text
+completed + review        -> reviewing（no_review: true 且校验通过时 -> done）
+completed + needs-human   -> blocked
+blocked   + needs-human   -> blocked
+blocked   + retry         -> blocked（等待 Orchestrator/人工确认后 -> ready）
+failed    + retry         -> failed（等待 Orchestrator/人工确认后 -> ready）
+failed    + needs-human   -> failed
+*         + cancel        -> cancelled（需 Orchestrator/人工确认）
+```
+
+`next_action` 是 Task Executor 的**建议**，最终状态流转由 Orchestrator 结合 Reviewer 结论（若有）和人工确认决定；Task Executor 不得自行修改任务 frontmatter 的 `status`。`retry` 不等于自动重跑——`failed` 任务的 `retry` 仍需人工确认后才能回到 `ready`（见第 7 节）。
+
 ## 11. 执行流程
 
 完整流程分为 9 个阶段：
@@ -608,10 +687,10 @@ next_action: review          # review | retry | needs-human | merge | cancel
 3. 生成 `ARCHITECTURE.md`。
 4. Reviewer 独立审核规格与架构。
 5. 生成 `PLAN.md`。
-6. 拆分 `TASKS/`。
-7. 为每个任务生成 Context Pack。
-8. 每个任务使用独立上下文执行。
-9. 审查、验证与人工验收。
+6. 拆分 `TASKS/`，并为每个任务把 Context Pack 写入 frontmatter（唯一权威来源，见第 8 节）。
+7. 每个任务使用独立上下文执行：Task Executor 完成后产出 `.result.md`，由 Orchestrator 将状态置为 `reviewing`（`no_review: true` 时跳过 Reviewer，由 Orchestrator 直接校验产物：通过置 `done`，不通过置 `blocked` 或 `failed`，见第 7 节）。
+8. Reviewer 审查并产出 `.review.md`；Orchestrator 按第 15 节映射流转任务状态。
+9. 验证、人工验收与合并回主分支（含全局文档回写，见第 3.2 节）。
 
 ## 12. 编码前复述要求
 
@@ -632,17 +711,10 @@ Task Executor 在编码前必须复述：
 
 Task Executor 必须遵守：
 
-- 只完成当前任务。
-- 不提前实现后续任务。
-- 不主动格式化无关代码。
-- 不引入临时 patch。
-- 不复制粘贴重复逻辑。
-- 不写巨型函数或巨型组件。
-- 不制造隐式状态。
-- 不跨层调用。
+- 通用编码约束（不引入临时 patch、不复制粘贴重复逻辑、不写巨型函数或组件、不制造隐式状态、不跨层调用、不主动格式化无关代码、简体中文注释规范等）以 `AGENTS.md` 为准，此处不重复。
+- 只完成当前任务，不提前实现后续任务。
 - 不破坏 `ARCHITECTURE.md` 中定义的模块边界。
-- 新增或修改的复杂或非显而易见的逻辑必须用简体中文注释；自解释的简单代码不强求注释。
-- 发现架构不合理时：若修复在 `allowed_paths` 内，优先重构；若需要越过 `forbidden_paths`，**不得自行越界**，应在 `.result.md` 中写入 `issues` 更新建议和 `next_action: needs-human`，由 Orchestrator 将任务状态置为 `blocked` 并请求 Orchestrator 或用户扩权，扩权后再继续。
+- 发现架构不合理时：若修复在 `allowed_paths` 内，优先重构；若需要越过 `forbidden_paths`，**不得自行越界**，应在 `.result.md` 的 `global_update_requests.issues` 中写入更新建议并把 `next_action` 设为 `needs-human`，由 Orchestrator 将任务状态置为 `blocked` 并请求扩权，扩权后再继续。
 - 不自动启动浏览器测试，除非用户明确要求。
 
 ## 14. 验证机制
@@ -703,7 +775,28 @@ needs-human-confirmation
 - `rejected` -> `rejected`
 - `needs-human-confirmation` -> `blocked`
 
-当任务声明 `no_review: true` 时，`review_result` 记录为 `skipped`；Orchestrator 仍必须检查 `.result.md`、验证结果和全局文档更新建议是否齐全，才能将任务置为 `done`。
+当任务声明 `no_review: true` 时，Reviewer 不介入，由 Orchestrator 生成 `review_result: skipped` 的 `.review.md`；此时 Orchestrator 仍必须检查 `.result.md`、验证结果和全局文档更新建议是否齐全，才能将任务置为 `done`；若检查不通过，则按第 7 节状态机走 `blocked` 或 `failed`，不得置为 `done`。
+
+审查结论由 Reviewer 写入独立的 `TASKS/TASK-XXX-xxx.review.md`（不写入 `.result.md`），其模板如下：
+
+```markdown
+---
+task_id: TASK-XXX
+review_result: approved     # approved | rejected | needs-human-confirmation | skipped
+reviewer: reviewer-agent
+reviewed_at: 2026-07-07T00:00:00Z
+required_changes: []        # rejected / needs-human-confirmation 时必须填写
+findings: []                # 审查发现清单
+---
+
+# TASK-XXX 审查结论
+
+## 1. 审查意见
+
+## 2. 必须修改项（如有）
+
+## 3. 建议修改项（如有）
+```
 
 ## 16. 权限模型
 
@@ -729,8 +822,10 @@ network_access
 - 允许修改当前任务 `allowed_paths` 范围内的文件。
 - 允许写入当前任务 `workflow_outputs.result_file` 指定的 `.result.md`。
 - 禁止修改 `forbidden_paths` 范围内的文件。
-- 允许执行 `TESTING.md` 或任务 frontmatter `verification` 中明确列出的验证命令；这些命令必须被视为验证 allowlist，不等价于开放通用 `run_commands` 权限。
-- `run_commands`、`install_dependencies`、`modify_config`、`delete_files`、`start_dev_server`、`open_browser`、`network_access` 等能力默认禁用，必须在任务 frontmatter 的 `permissions` 字段中显式声明后才生效。
+- 验证命令来源与优先级：项目级 `TESTING.md` 与任务级 frontmatter `verification` 共同构成**验证 allowlist**，两者取**并集**；任务级 `verification` 用于声明本任务必须通过的命令，不能缩小 `TESTING.md` 已声明的项目级命令范围，同一命令在两处声明时以任务级为准。
+- 验证 allowlist 内的命令执行时自动获得**仅限该具体命令行**的执行授权，无需在 `permissions` 中重复声明 `run_commands`；该命令对 `allowed_paths` 内文件的读写副作用同样自动允许。
+- 验证命令若涉及 `allowed_paths` 之外的能力，仍需在 `permissions` 中显式声明对应能力：安装依赖 `install_dependencies`、联网 `network_access`、启动长期服务 `start_dev_server`、打开浏览器 `open_browser`、删除文件 `delete_files`、修改配置 `modify_config`。任务编写者应在 `verification` 旁注明每条命令所需的额外能力；若执行时检测到未声明的能力需求，命令因权限不足失败，Task Executor 应将 `execution_status` 标为 `blocked` 并在 `.result.md` 中说明，而不是自行扩权。
+- `run_commands`（用于验证 allowlist 之外的任意命令）、`install_dependencies`、`modify_config`、`delete_files`、`start_dev_server`、`open_browser`、`network_access` 等能力默认禁用，必须在任务 frontmatter 的 `permissions` 字段中显式声明后才生效。
 - 禁止自动启动浏览器测试，除非 `permissions` 含 `open_browser` 且用户明确要求。
 
 `permissions` 字段在任务文件 frontmatter 中声明（见第 9 节模板），由 infrastructure 层在 Task Executor 启动前注入 agent 的权限边界。
@@ -775,10 +870,8 @@ Task Executor 只记录失败事实和建议状态；任务状态由 Orchestrato
 - 明确不会修改哪些模块。
 - 明确必须遵守哪些架构边界。
 - 如发现文档冲突、需求不清或架构问题，先指出问题，不要直接编码。
-- 修改代码时遵守 AGENTS.md 中的全部约束。
-- 不主动格式化无关代码。
-- 不自动启动浏览器测试。
-- 完成、阻塞或失败后必须生成 TASKS/TASK-XXX-xxx.result.md。
+- 修改代码时遵守 AGENTS.md 中的全部约束（AGENTS.md 是编码约束唯一权威，此处不重复）。
+- 完成、阻塞或失败后必须生成 TASKS/TASK-XXX-xxx.result.md；审查结论由 Reviewer / Orchestrator 写入 .review.md，不要写入 .result.md。
 - 需要更新 PROGRESS.md、DECISIONS.md 或 ISSUES.md 时，只能在 .result.md 的 global_update_requests 中提出建议，由 Orchestrator 回写。
 ```
 
