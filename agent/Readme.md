@@ -1,5 +1,4 @@
 
-````markdown
 # 自研 Coding Agent 长任务工作流需求说明
 
 ## 1. 背景
@@ -95,6 +94,18 @@ ui/
 - `cli` 和后期 `ui` 只作为交互入口，不拥有核心状态机和任务规则。
 - agent 会话、SDK session 和模型上下文只作为执行过程材料，不能替代文档协议中的长期上下文。
 
+### 3.2 并行执行与 worktree 合并策略
+
+`Git worktree` 为每个处于 `running` 状态的任务创建独立工作区和分支（命名建议 `task/TASK-XXX`）。默认执行模型仍为**串行**（见第 11 节流程）；只有当多个任务互无 `depends_on` 依赖、且 `allowed_paths` 不重叠时，才允许由 application 层调度并行执行。
+
+并行与合并规则：
+
+- 每个 worktree 基于任务启动时的主分支基线创建；任务进入 `done` 后，其分支以 **rebase 到最新主分支 + fast-forward 合并**的方式回收，避免无意义的 merge commit。
+- 合并顺序由 application 层按 `depends_on` 拓扑序决定，先合并无后继依赖的任务。
+- 合并冲突由 **Orchestrator 负责协调**，不交给 Task Executor 自行解决；冲突无法自动消解时，将后合并的任务置为 `blocked`，并把冲突清单写入 `ISSUES.md`。
+- `PROGRESS.md`、`DECISIONS.md` 等**全局文档只在主分支维护**，worktree 中只读引用；Task Executor 完成后把需要更新的内容写入 `.result.md`，由 Orchestrator 在合并回主分支时统一回写到全局文档，避免多 worktree 并发写同一文件。
+- 任务进入 `rejected` / `failed` / `cancelled` 时，其 worktree 分支保留至任务重新到达终态或人工确认放弃后，再由 infrastructure 层删除。
+
 ## 4. 核心原则
 
 所有实现必须遵循：
@@ -103,7 +114,7 @@ ui/
 - 先明确数据流和状态流，再实现 UI。
 - 先定义模块边界，再拆分任务。
 - 优先长期架构正确性，而不是短期完成速度。
-- 不保留 legacy、fallback、deprecated 或灰度逻辑。
+- 不保留 legacy 兼容代码、deprecated 旧入口或灰度开关；但网络请求、特性检测等合理的运行时降级 fallback 不在此列。
 - 不通过临时 patch 解决结构性问题。
 - 每个任务只负责一个清晰目标。
 - 每个任务都必须显式声明修改范围和禁止修改范围。
@@ -164,6 +175,8 @@ Task Executor 不应依赖历史聊天记录，也不应执行当前任务以外
 
 Reviewer 不应继续实现功能，只负责审查和反馈。
 
+Reviewer 在任务拆分前还负责独立审查 `SPEC.md` 和 `ARCHITECTURE.md`，避免 Orchestrator 自审。只有 SPEC 与 ARCHITECTURE 通过 Reviewer 审查后，Orchestrator 才能进入生成 `PLAN.md` 与 `TASKS/` 阶段。
+
 ## 6. 文档体系
 
 完整工作流应产生以下文档：
@@ -189,7 +202,7 @@ TASKS/
 定义 agent 的通用执行约束，例如：
 
 - 使用简体中文回复。
-- 修改代码必须添加多行简体中文注释。
+- 复杂或非显而易见的逻辑必须添加简体中文注释；自解释的简单代码不强求注释，避免噪声。
 - 不主动格式化无关代码。
 - 不自动启动浏览器测试。
 - 不引入临时 patch。
@@ -328,18 +341,29 @@ blocked     被阻塞，需要人工确认或前置任务
 reviewing   等待审查
 done        已完成并通过审查
 rejected    执行结果被驳回，需要返工
+failed      执行失败且无法自动重试，需人工介入或回滚
+cancelled   任务被取消，不再执行
 ```
 
 状态流转规则：
 
 ```text
-draft -> ready -> running -> reviewing -> done
-running -> blocked
-reviewing -> rejected -> ready
-blocked -> ready
+draft     -> ready | cancelled
+ready     -> running | draft | cancelled
+running   -> reviewing | blocked | failed | cancelled
+reviewing -> done | rejected | blocked
+rejected  -> ready
+blocked   -> ready | failed | cancelled
 ```
 
-禁止跳过 `reviewing` 直接进入 `done`，除非任务明确声明无需审查。
+禁止跳过 `reviewing` 直接进入 `done`，除非任务 frontmatter 声明 `no_review: true`（此时允许 `running -> done`，等价于自审通过）。
+
+补充说明：
+
+- `ready -> draft`：任务定义本身有问题时，可退回 `draft` 重新定义。
+- `rejected -> ready` 与 `blocked -> ready` 默认为**续跑语义**：保留已存在的 worktree 与已完成修改，Task Executor 在此基础上继续；若任务 frontmatter 声明 `restart_on_retry: true`，则重置 worktree 从干净状态重跑。worktree 的保留与重置由 infrastructure 层统一管理。
+- `failed` 与 `cancelled` 为终态。进入终态前必须按第 17 节要求记录失败信息，并按第 3.2 节合并策略决定是否回滚 worktree。
+- 依赖级联：当 `TASK-A` 处于 `rejected` / `failed` / `blocked` 时，所有 `depends_on: [TASK-A]` 的后继任务自动进入 `blocked`，直到 `TASK-A` 重新到达 `done`。
 
 ## 8. Context Pack 上下文包
 
@@ -370,6 +394,12 @@ TASKS/TASK-XXX-xxx.md
 - 必须遵守哪些架构边界。
 - 做完后要留下什么上下文。
 
+上下文包裁剪规则：
+
+- `AGENTS.md`、`ARCHITECTURE.md`、`PROGRESS.md`、当前任务文件为**必读核心**，任何任务都要带。
+- `SPEC.md`、`PLAN.md`、`DECISIONS.md`、`ISSUES.md`、`TESTING.md` 为**按需引用**，由 Orchestrator 根据任务 `layer` 和 `allowed_paths` 选择与本任务相关的章节或全文注入，无关章节不注入，避免上下文污染。
+- 源码文件由 Orchestrator 根据 `allowed_paths`、`depends_on` 对应 `.result.md` 的修改清单和 `ARCHITECTURE.md` 的模块边界圈定，并在任务文件“必读文件”中显式列出；executor 不得自行扩展范围。
+
 ## 9. 任务文件模板
 
 每个任务文件应使用以下模板。
@@ -378,7 +408,7 @@ TASKS/TASK-XXX-xxx.md
 ---
 id: TASK-XXX
 title: 任务名称
-status: ready
+status: draft
 layer: state
 depends_on:
   - TASK-001
@@ -387,6 +417,9 @@ allowed_paths:
 forbidden_paths:
   - src/modules/example/ui
   - src/modules/example/api
+permissions: []          # 需要授权的能力，取值见第 16 节，如 [delete_files, install_dependencies]
+no_review: false         # true 表示允许 running -> done，跳过 reviewing
+restart_on_retry: false  # true 表示 rejected/blocked 续跑时重置 worktree 重跑
 verification:
   - npm run typecheck
   - npm test
@@ -404,15 +437,15 @@ verification:
 
 ## 3. 所属层级
 
-例如：
+`layer` 字段取以下枚举值（frontmatter 使用英文键）：
 
-- 类型层
-- 数据层
-- 状态层
-- 业务逻辑层
-- UI 组件层
-- 页面组合层
-- 测试层
+- `type` — 类型层
+- `data` — 数据层
+- `state` — 状态层
+- `domain` — 业务逻辑层
+- `ui` — UI 组件层
+- `page` — 页面组合层
+- `test` — 测试层
 
 ## 4. 必读文件
 
@@ -546,7 +579,7 @@ Task Executor 在编码前必须复述：
 - 发现的风险或不确定点。
 - 预计执行步骤。
 
-如果发现当前任务与 `SPEC.md`、`ARCHITECTURE.md`、`PLAN.md` 或 `PROGRESS.md` 冲突，必须先指出冲突，并优先修正文档或请求用户确认，不应直接编码。
+如果发现当前任务与 `SPEC.md`、`ARCHITECTURE.md`、`PLAN.md` 或 `PROGRESS.md` 冲突，或发现需要越过 `forbidden_paths` 才能修复的架构问题，必须先指出冲突，并优先修正文档或请求用户确认，不应直接编码。
 
 ## 13. 执行规则
 
@@ -561,8 +594,8 @@ Task Executor 必须遵守：
 - 不制造隐式状态。
 - 不跨层调用。
 - 不破坏 `ARCHITECTURE.md` 中定义的模块边界。
-- 新增或修改代码必须有多行简体中文注释。
-- 发现架构不合理时，优先重构相关结构，而不是继续堆逻辑。
+- 新增或修改的复杂或非显而易见的逻辑必须用简体中文注释；自解释的简单代码不强求注释。
+- 发现架构不合理时：若修复在 `allowed_paths` 内，优先重构；若需要越过 `forbidden_paths`，**不得自行越界**，应写入 `ISSUES.md`、将任务状态置为 `blocked`、并请求 Orchestrator 或用户扩权，扩权后再继续。
 - 不自动启动浏览器测试，除非用户明确要求。
 
 ## 14. 验证机制
@@ -638,26 +671,27 @@ network_access
 默认策略：
 
 - 允许读取项目文件。
-- 允许修改当前任务声明范围内的文件。
-- 禁止修改禁止范围内的文件。
-- 禁止删除文件，除非任务明确声明。
-- 禁止自动启动浏览器测试。
-- 安装依赖、修改配置、删除文件需要明确任务授权。
+- 允许修改当前任务 `allowed_paths` 范围内的文件。
+- 禁止修改 `forbidden_paths` 范围内的文件。
+- `install_dependencies`、`modify_config`、`delete_files`、`start_dev_server`、`open_browser`、`network_access` 等能力默认禁用，必须在任务 frontmatter 的 `permissions` 字段中显式声明后才生效。
+- 禁止自动启动浏览器测试，除非 `permissions` 含 `open_browser` 且用户明确要求。
+
+`permissions` 字段在任务文件 frontmatter 中声明（见第 9 节模板），由 infrastructure 层在 Task Executor 启动前注入 agent 的权限边界。
 
 ## 17. 失败恢复机制
 
-任务失败时必须记录：
+任务失败时必须将以下信息写入 `TASKS/TASK-XXX-xxx.result.md`（与正常完成的结果文件同路径，“执行结论”标注为失败），并在 `ISSUES.md` 登记一条阻塞项：
 
 - 失败发生在哪一步。
 - 已完成哪些修改。
 - 哪些文件被修改。
 - 失败原因。
-- 是否可以重试。
+- 是否可以重试（对应 `restart_on_retry` 续跑/重置语义）。
 - 是否需要人工确认。
-- 是否需要回滚。
+- 是否需要回滚（按第 3.2 节 worktree 合并策略决定是否丢弃 worktree 分支）。
 - 建议下一步处理方式。
 
-失败任务不得直接标记为完成。
+任务状态置为 `failed`（无法自动重试）或 `blocked`（等待人工确认/前置任务），失败任务不得直接标记为 `done`。
 
 ## 18. 新上下文启动提示模板
 
@@ -736,4 +770,3 @@ network_access
 - 做完后要留下什么上下文。
 
 最终目标是让 Coding Agent 的长任务执行从“依赖聊天记忆”转变为“依赖文档协议和可审查状态”，从而降低上下文丢失、架构漂移和长期维护成本。
-````
