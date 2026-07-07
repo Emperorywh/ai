@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync, appendFileSync, unlinkSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync, appendFileSync, unlinkSync, copyFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -557,6 +557,36 @@ function discardWorkingTreeChanges(context) {
   runGit(context, ['clean', '-fd']);
 }
 
+/*
+ * 在 agent 执行前把 runner_assets 声明的文件从 src 拷贝到 dest。
+ *
+ * 拷贝由 Runner 用 Node fs 完成，绕过规则 13 对 agent 的 Bash 禁令——
+ * 规则 13 约束的是 agent，Runner 本就是任务边界外的可信执行者。
+ * dest 已在 schema 校验阶段确认落在 agent_allowed_paths 内，
+ * 因此这次拷贝不会引入越界改动，事后 git diff 检查也能正常通过。
+ *
+ * 拷贝放在每次 attempt 的 runClaudeTask 之前：discardWorkingTreeChanges 会清掉
+ * 未跟踪的预置文件，重试必须重新预置，保证 agent 每次都在完整资产上工作。
+ */
+function prepareRunnerAssets(context, task, logPath) {
+  const assets = normalizeArray(task.meta.runner_assets);
+
+  if (assets.length === 0) {
+    return;
+  }
+
+  for (const asset of assets) {
+    const srcAbsolute = resolveProjectPath(context, String(asset.src));
+    const destAbsolute = resolveProjectPath(context, String(asset.dest));
+
+    mkdirSync(path.dirname(destAbsolute), { recursive: true });
+    copyFileSync(srcAbsolute, destAbsolute);
+
+    appendLog(logPath, `预置资源文件：${asset.src} -> ${asset.dest}`);
+    console.log(`预置资源文件：${asset.src} -> ${asset.dest}`);
+  }
+}
+
 function commitTaskStatusReset(context, task, nextStatus) {
   /*
    * markTaskStatus 会把状态写入 task 文件，使工作区再次变脏。
@@ -597,6 +627,7 @@ async function runTask(context, task, tasks) {
     markTaskStatus(context, readTask(context, task.filePath), TASK_STATUS.running);
     const runningTask = readTask(context, task.filePath);
     const runnerOwnedSnapshots = snapshotRunnerOwnedFiles(context, runningTask);
+    prepareRunnerAssets(context, runningTask, logPath);
 
     try {
       const claudeResult = await runClaudeTask(context, runningTask, logPath);
@@ -690,6 +721,7 @@ function validateTaskSchema(context, task, options = {}) {
   validateAgentAllowedPaths(context, task);
   validateVerifyCommands(context, task);
   validateAllowedTools(task);
+  validateRunnerAssets(context, task);
   validateBranchPolicyConstraints(context, task);
 }
 
@@ -887,6 +919,69 @@ function validateAllowedTools(task) {
   }
 }
 
+/*
+ * runner_assets 让 task 声明「由 Runner 在 agent 执行前预置的数据文件」。
+ *
+ * 背景：agent 的工具集没有 Bash，规则 13 也禁止用 Bash 改文件，因此它无法复制
+ * 超大体量的数据文件——Write 需要完整内容，几 MB 的 JSON 既装不进上下文也无法忠实复现。
+ * 这类「把现有大文件复制到 agent_allowed_paths 内」的合法操作改由 Runner 在边界外完成，
+ * agent 拿到的就是已就位的文件，路径闸门与规则 13 都不必为它开口子。
+ *
+ * 约束：dest 必须落在 agent_allowed_paths 内且不触碰受保护文件，
+ * 否则预置本身就是越界写；src 必须是项目内已存在的相对路径。
+ * 这些都在审查阶段校验，避免执行到一半才发现配置错误。
+ */
+function validateRunnerAssets(context, task) {
+  if (!Object.prototype.hasOwnProperty.call(task.meta, 'runner_assets')) {
+    return;
+  }
+
+  const rawAssets = task.meta.runner_assets;
+
+  if (rawAssets === null || rawAssets === undefined) {
+    return;
+  }
+
+  const assets = Array.isArray(rawAssets) ? rawAssets : [rawAssets];
+  const allowedPaths = normalizeArray(task.meta.agent_allowed_paths).map(normalizeAllowedPath);
+  const protectedFiles = [task.relativePath, task.meta.spec, task.meta.plan].map(normalizeAllowedPath);
+
+  for (const rawAsset of assets) {
+    if (!rawAsset || typeof rawAsset !== 'object') {
+      throw new Error(`${task.relativePath} 的 runner_assets 每项必须是 { src, dest } 对象。`);
+    }
+
+    const src = String(rawAsset.src || '').trim();
+    const dest = String(rawAsset.dest || '').trim();
+
+    if (!src || !dest) {
+      throw new Error(`${task.relativePath} 的 runner_assets 每项必须同时提供 src 和 dest。`);
+    }
+
+    if (path.isAbsolute(src) || src.includes('..')) {
+      throw new Error(`${task.relativePath} 的 runner_assets.src 必须是项目内相对路径：${src}`);
+    }
+
+    if (path.isAbsolute(dest) || dest.includes('..') || dest.includes('*')) {
+      throw new Error(`${task.relativePath} 的 runner_assets.dest 必须是项目内相对路径：${dest}`);
+    }
+
+    const srcAbsolute = resolveProjectPath(context, src);
+    if (!existsSync(srcAbsolute)) {
+      throw new Error(`${task.relativePath} 的 runner_assets 源文件不存在：${src}`);
+    }
+
+    const normalizedDest = normalizeAllowedPath(dest);
+    if (isProtectedRunnerFile(normalizedDest, protectedFiles)) {
+      throw new Error(`${task.relativePath} 的 runner_assets.dest 命中受保护文件：${dest}`);
+    }
+
+    if (!isAllowedFile(normalizedDest, allowedPaths)) {
+      throw new Error(`${task.relativePath} 的 runner_assets.dest 不在 agent_allowed_paths 内：${dest}`);
+    }
+  }
+}
+
 function selectRunnableTask(context, tasks) {
   const candidates = context.taskId
     ? tasks.filter((task) => String(task.meta.id) === context.taskId || task.fileName === context.taskId)
@@ -999,6 +1094,7 @@ function stringifyFrontmatter(meta, body) {
     'verify',
     'allowed_tools',
     'allow_empty_code_changes',
+    'runner_assets',
     'updated_at',
     'last_error'
   ];
@@ -1702,6 +1798,16 @@ function buildPrompt(context, task, extraInstructions = '') {
 
   const template = readFileSync(context.promptTemplatePath, 'utf8');
 
+  /*
+   * runner_assets 的预置结果回显给 agent：它列出的文件已由 Runner 在边界外拷贝就位，
+   * agent 不应再尝试用 Write 复现这些大文件，直接当作既存资产使用即可。
+   * 没有声明时填「无」，让模板里的占位段保持语义完整。
+   */
+  const runnerAssets = normalizeArray(task.meta.runner_assets);
+  const runnerAssetsText = runnerAssets.length > 0
+    ? runnerAssets.map((item) => `- ${item.src} -> ${item.dest}`).join('\n')
+    : '无';
+
   const basePrompt = template
     .replaceAll('{taskId}', String(task.meta.id))
     .replaceAll('{taskTitle}', task.title)
@@ -1709,6 +1815,7 @@ function buildPrompt(context, task, extraInstructions = '') {
     .replaceAll('{specPath}', String(task.meta.spec))
     .replaceAll('{planPath}', String(task.meta.plan))
     .replaceAll('{agentAllowedPaths}', normalizeArray(task.meta.agent_allowed_paths).map((item) => `- ${item}`).join('\n'))
+    .replaceAll('{runnerAssets}', runnerAssetsText)
     .replaceAll('{verifyCommands}', normalizeArray(task.meta.verify).map((item) => `- ${item}`).join('\n'));
 
   if (!extraInstructions) {

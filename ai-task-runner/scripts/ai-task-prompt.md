@@ -27,6 +27,10 @@ AI 允许修改代码路径：
 
 以上路径由 Runner 通过 PreToolUse 钩子在工具调用层事前强制：任何越界编辑（包括对 task 文件、SPEC、PLAN、.git、Runner 脚本的修改）会被直接拒绝，原因会反馈给你。请只使用允许范围内的路径，不要反复尝试越界文件；若实现确实必须触碰这些文件，说明任务边界有问题，应按下面的 blocked 流程停止。
 
+Runner 已预置的数据文件（src -> dest，已就位，无需你创建或重写）：
+
+{runnerAssets}
+
 验证命令：
 
 {verifyCommands}

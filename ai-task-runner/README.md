@@ -135,6 +135,7 @@ allowed_tools:
 - `verify` 必须是可结束的检查命令，不能启动 dev/start/serve 服务，不能执行 git 变更或删除命令。
 - 可选字段 `allowed_tools` 声明实现阶段需要 Claude 自行执行的额外工具（如 `Bash(pnpm test:*)` 用于自测），按需精确放行，替代全开权限。
 - 可选字段 `allow_empty_code_changes: true` 只用于纯验证类任务；普通开发任务不要使用。
+- 可选字段 `runner_assets` 声明由 Runner 在 agent 执行前预置的数据文件拷贝（`{ src, dest }` 列表）。agent 的工具集和规则 13 无法复制几 MB 的大文件，这类「把现有大文件落到 `agent_allowed_paths` 内」的操作交给 Runner 在边界外完成；`dest` 必须落在 `agent_allowed_paths` 内、`src` 必须是项目内已存在的相对路径，否则审查阶段直接报错。
 
 ## 安全闸门
 
