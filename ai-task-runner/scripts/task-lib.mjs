@@ -1323,7 +1323,7 @@ async function runClaudeTask(context, task, logPath, options = {}) {
     maxTurns: context.claudeMaxTurns,
     allowedTools
   });
-  const { command, args } = createClaudeCommand({
+  const { command, args, input } = createClaudeCommand({
     command: claudeBin,
     prompt,
     logPath,
@@ -1340,6 +1340,7 @@ async function runClaudeTask(context, task, logPath, options = {}) {
     timeoutMs: context.claudeTimeoutMs,
     logPath,
     rejectOnFailure: false,
+    input,
     env: { ...process.env, AI_RUNNER_TASK_CONTEXT: enforcement.contextPath }
   });
 
@@ -1383,34 +1384,40 @@ function createClaudeCommand({ command, prompt, logPath = '', baseArgs = [] }) {
     return createWindowsClaudeCommand(command, prompt, logPath, baseArgs);
   }
 
-  return { command, args: [...baseArgs, '-p', prompt] };
+  /*
+   * prompt 不进命令行：作为 stdin 交给 Claude（`-p` 不带值时 Claude 从 stdin 读取）。
+   * 这样跨平台统一，命令行只剩短小选项，彻底回避 argv 分词、转义和长度限制。
+   */
+  return { command, args: [...baseArgs, '-p'], input: prompt };
 }
 
 /*
- * Windows 上的全局 CLI 经常是 .cmd 包装器，不能可靠地用 shell:false 直接启动。
- * 这里把多行 prompt 写入日志目录旁的文件，再用 PowerShell 读取后作为参数传入，
- * 避免把大段 prompt 拼进 cmd 命令行造成截断、转义错误或命令注入。
- * 每个 baseArg 都做 PowerShell 单引号转义，保证含空格的 --settings 路径或工具规格不会破坏命令。
+ * Windows 上的全局 CLI 经常是 .cmd 包装器，不能可靠地用 shell:false 直接启动，
+ * 这里用 PowerShell 包装执行 claude。
+ *
+ * prompt 绝不进入命令行：PowerShell 5.1 把字符串变量传给 native 命令时不会自动加引号，
+ * 含空格/特殊字符的值会被重新分词。审查 prompt 注入了 git diff，其中 package.json 的
+ * `"build": "tsc -b && vite build"` 一旦被分词，孤立的 -b 就会被 claude(commander.js)
+ * 当成未知短选项直接拒绝启动（实现阶段 prompt 不含 diff 所以侥幸逃过）。
+ *
+ * 因此 prompt 落盘留痕后改由 Node 经 stdin 注入：PowerShell 调用 native 命令时默认透传
+ * 自身 stdin，Node 写入 PowerShell 的 stdin 即可直达 claude。命令行只剩短小选项，
+ * 彻底回避分词、转义和长度三重坑。
+ *
+ * 每个 baseArg 仍做 PowerShell 单引号转义，保证含空格的 --settings 路径或工具规格不破坏脚本。
  */
 function createWindowsClaudeCommand(command, prompt, logPath, baseArgs = []) {
   if (!logPath) {
-    return { command, args: [...baseArgs, '-p', prompt] };
+    return { command, args: [...baseArgs, '-p'], input: prompt };
   }
 
-  const promptPath = `${logPath}.prompt.md`;
-  writeFileSync(promptPath, prompt, 'utf8');
+  writeFileSync(`${logPath}.prompt.md`, prompt, 'utf8');
   const quotedArgs = baseArgs.map(toPowerShellSingleQuoted).join(' ');
 
   const script = [
     '$ErrorActionPreference = "Stop"',
     '$ProgressPreference = "SilentlyContinue"',
-    /*
-     * Windows PowerShell 5.1 默认会按系统 ANSI 编码读取无 BOM 的 UTF-8 文件。
-     * 执行 prompt 包含大量中文约束，必须显式指定 UTF-8，
-     * 否则 Claude 收到的上下文会乱码，Runner 的边界规则也会失真。
-     */
-    `$prompt = Get-Content -Raw -Encoding UTF8 -LiteralPath ${toPowerShellSingleQuoted(promptPath)}`,
-    `& ${toPowerShellSingleQuoted(command)} ${quotedArgs} -p $prompt`,
+    `& ${toPowerShellSingleQuoted(command)} ${quotedArgs} -p`,
     'exit $LASTEXITCODE'
   ].join('\n');
 
@@ -1424,7 +1431,8 @@ function createWindowsClaudeCommand(command, prompt, logPath, baseArgs = []) {
       'Bypass',
       '-EncodedCommand',
       Buffer.from(script, 'utf16le').toString('base64')
-    ]
+    ],
+    input: prompt
   };
 }
 
@@ -1802,7 +1810,7 @@ async function runImplementationReview(context, task, logPath, runnerOwnedSnapsh
     maxTurns: context.reviewMaxTurns,
     allowedTools: REVIEW_ALLOWED_TOOLS
   });
-  const { command, args } = createClaudeCommand({
+  const { command, args, input } = createClaudeCommand({
     command: claudeBin,
     prompt,
     logPath,
@@ -1819,6 +1827,7 @@ async function runImplementationReview(context, task, logPath, runnerOwnedSnapsh
     timeoutMs: context.claudeTimeoutMs,
     logPath,
     rejectOnFailure: false,
+    input,
     env: process.env
   });
   const parsed = parseClaudeStreamJson(rawResult.stdout);
@@ -2050,12 +2059,23 @@ function runCommandSync(context, command, args, options = {}) {
 
 async function runCommand(context, command, args, options = {}) {
   return new Promise((resolve, reject) => {
+    /*
+     * options.input 提供时把 stdin 接成管道并写入，供「prompt 走 stdin」使用。
+     * 这是为了回避 Windows PowerShell 把大段 prompt 作为命令行参数传递时的分词/转义缺陷；
+     * 只有 capture 模式（claude 调用）才会带 input，verify 等命令不传 input，stdin 仍为 ignore。
+     */
+    const useStdin = Boolean(options.input) && options.capture;
     const child = spawn(command, args, {
       cwd: context.projectRoot,
       shell: options.shell || false,
       env: options.env || process.env,
-      stdio: options.capture ? ['ignore', 'pipe', 'pipe'] : 'inherit'
+      stdio: options.capture ? [useStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'] : 'inherit'
     });
+
+    if (useStdin) {
+      child.stdin.write(options.input);
+      child.stdin.end();
+    }
 
     let stdout = '';
     let stderr = '';
@@ -2172,13 +2192,34 @@ function terminateProcess(child) {
 
 function extractBlockedReason(resultText, rawOutput) {
   /*
-   * 优先从结构化结果文本识别 blocked 信号（stream-json 的 result 字段是干净的 Claude 输出）；
-   * 解析失败或没有结果文本时回退到原始 stdout，保证旧行为不丢失。
+   * blocked 信号只承认 Claude 主动声明的「标记行」：
+   * 必须独占一行（出现在行首），不能是思考流里对规则的引用或讨论。
+   *
+   * 为什么不能扫整段 stdout：stream-json 的原始流里包含每一轮 assistant 事件的
+   * 思考文本，Claude 在推理「要不要 block」时会写出形如
+   * `AI_TASK_BLOCKED: xxx` 的字样（且这类中间事件 stop_reason 通常为 null，
+   * 并非最终结论）。一旦回退到 stdout 扫描，这些噪声就会把正常执行的任务误判成 blocked。
+   *
+   * 因此识别顺序定为：
+   * 1) resultText 非空时，只认 result 事件的 result 字段（权威最终输出），
+   *    即便其中没有 blocked 信号也绝不回退 stdout——否则思考流噪声会覆盖真实结论；
+   * 2) 仅当 resultText 缺失（stream-json 解析失败、没有 result 事件）时，
+   *    才回退到原始 stdout 兜底，同样要求信号独占一行以降低误匹配。
    */
-  const sources = [resultText, rawOutput].filter(Boolean);
+  const SIGNAL_PATTERN = /^AI_TASK_BLOCKED:\s*(.+)$/m;
 
-  for (const source of sources) {
-    const match = /AI_TASK_BLOCKED:\s*(.+)/.exec(source);
+  if (resultText) {
+    const match = SIGNAL_PATTERN.exec(resultText);
+
+    if (match) {
+      return match[1].trim();
+    }
+
+    return '';
+  }
+
+  if (rawOutput) {
+    const match = SIGNAL_PATTERN.exec(rawOutput);
 
     if (match) {
       return match[1].trim();
