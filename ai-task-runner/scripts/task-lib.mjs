@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync, appendFileSync, unlinkSync, copyFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync, appendFileSync, unlinkSync, copyFileSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -587,6 +587,40 @@ function prepareRunnerAssets(context, task, logPath) {
   }
 }
 
+/*
+ * 在 agent 执行前删除 runner_remove 声明的文件/目录。
+ *
+ * 删除由 Runner 用 fs.rmSync(force) 完成，幂等：路径不存在视为已达成，不报错。
+ * 这绕过规则 13 对 agent 的 Bash rm 禁令——规则 13 约束的是 agent，
+ * Runner 是任务边界外的可信执行者。被删路径已在校验阶段确认落在 agent_allowed_paths 内。
+ *
+ * 与 prepareRunnerAssets 一样放在每次 attempt：discardWorkingTreeChanges 会把
+ * tracked 的被删文件 restore 回来，重试必须重新删除。
+ *
+ * 执行顺序是先删后建：先清理模板残留，再预置数据资产，符合「清理→建设」的心智模型，
+ * 也避免删除操作误伤同一次 attempt 刚预置的文件。
+ */
+function removeRunnerPaths(context, task, logPath) {
+  const paths = normalizeArray(task.meta.runner_remove);
+
+  if (paths.length === 0) {
+    return;
+  }
+
+  for (const target of paths) {
+    const targetAbsolute = resolveProjectPath(context, String(target));
+
+    if (!existsSync(targetAbsolute)) {
+      continue;
+    }
+
+    rmSync(targetAbsolute, { recursive: true, force: true });
+
+    appendLog(logPath, `删除遗留资产：${target}`);
+    console.log(`删除遗留资产：${target}`);
+  }
+}
+
 function commitTaskStatusReset(context, task, nextStatus) {
   /*
    * markTaskStatus 会把状态写入 task 文件，使工作区再次变脏。
@@ -627,6 +661,7 @@ async function runTask(context, task, tasks) {
     markTaskStatus(context, readTask(context, task.filePath), TASK_STATUS.running);
     const runningTask = readTask(context, task.filePath);
     const runnerOwnedSnapshots = snapshotRunnerOwnedFiles(context, runningTask);
+    removeRunnerPaths(context, runningTask, logPath);
     prepareRunnerAssets(context, runningTask, logPath);
 
     try {
@@ -722,6 +757,7 @@ function validateTaskSchema(context, task, options = {}) {
   validateVerifyCommands(context, task);
   validateAllowedTools(task);
   validateRunnerAssets(context, task);
+  validateRunnerRemove(context, task);
   validateBranchPolicyConstraints(context, task);
 }
 
@@ -982,6 +1018,54 @@ function validateRunnerAssets(context, task) {
   }
 }
 
+/*
+ * runner_remove 让 task 声明「由 Runner 在 agent 执行前删除的文件/目录」。
+ *
+ * 与 runner_assets 对称：agent 的 Write 只能覆写不能删除文件，Bash rm 又被规则 13
+ * 和钩子双重禁止，因此「清理模板残留资产」这类合法删除只能由 Runner 在边界外完成。
+ *
+ * 约束：被删路径必须落在 agent_allowed_paths 内且不触碰受保护文件，
+ * 否则删除本身就是越界。不强制路径已存在——删除按幂等处理，
+ * task 可以声明「可能存在」的遗留文件而不必预判。
+ */
+function validateRunnerRemove(context, task) {
+  if (!Object.prototype.hasOwnProperty.call(task.meta, 'runner_remove')) {
+    return;
+  }
+
+  const rawPaths = task.meta.runner_remove;
+
+  if (rawPaths === null || rawPaths === undefined) {
+    return;
+  }
+
+  const paths = Array.isArray(rawPaths) ? rawPaths : [rawPaths];
+  const allowedPaths = normalizeArray(task.meta.agent_allowed_paths).map(normalizeAllowedPath);
+  const protectedFiles = [task.relativePath, task.meta.spec, task.meta.plan].map(normalizeAllowedPath);
+
+  for (const rawPath of paths) {
+    const target = String(rawPath || '').trim();
+
+    if (!target) {
+      throw new Error(`${task.relativePath} 的 runner_remove 不能包含空值。`);
+    }
+
+    if (path.isAbsolute(target) || target.includes('..') || target.includes('*')) {
+      throw new Error(`${task.relativePath} 的 runner_remove 必须是项目内相对路径：${target}`);
+    }
+
+    const normalizedTarget = normalizeAllowedPath(target);
+
+    if (isProtectedRunnerFile(normalizedTarget, protectedFiles)) {
+      throw new Error(`${task.relativePath} 的 runner_remove 命中受保护文件：${target}`);
+    }
+
+    if (!isAllowedFile(normalizedTarget, allowedPaths)) {
+      throw new Error(`${task.relativePath} 的 runner_remove 不在 agent_allowed_paths 内：${target}`);
+    }
+  }
+}
+
 function selectRunnableTask(context, tasks) {
   const candidates = context.taskId
     ? tasks.filter((task) => String(task.meta.id) === context.taskId || task.fileName === context.taskId)
@@ -1095,6 +1179,7 @@ function stringifyFrontmatter(meta, body) {
     'allowed_tools',
     'allow_empty_code_changes',
     'runner_assets',
+    'runner_remove',
     'updated_at',
     'last_error'
   ];
@@ -1808,6 +1893,15 @@ function buildPrompt(context, task, extraInstructions = '') {
     ? runnerAssets.map((item) => `- ${item.src} -> ${item.dest}`).join('\n')
     : '无';
 
+  /*
+   * runner_remove 同样回显：列出的文件已由 Runner 删除，agent 不应再为「DoD 要求删除」
+   * 而强行用 Bash rm（会被拒绝）或纠结于无法删除，直接当作已清理。
+   */
+  const runnerRemove = normalizeArray(task.meta.runner_remove);
+  const runnerRemoveText = runnerRemove.length > 0
+    ? runnerRemove.map((item) => `- ${item}`).join('\n')
+    : '无';
+
   const basePrompt = template
     .replaceAll('{taskId}', String(task.meta.id))
     .replaceAll('{taskTitle}', task.title)
@@ -1816,6 +1910,7 @@ function buildPrompt(context, task, extraInstructions = '') {
     .replaceAll('{planPath}', String(task.meta.plan))
     .replaceAll('{agentAllowedPaths}', normalizeArray(task.meta.agent_allowed_paths).map((item) => `- ${item}`).join('\n'))
     .replaceAll('{runnerAssets}', runnerAssetsText)
+    .replaceAll('{runnerRemove}', runnerRemoveText)
     .replaceAll('{verifyCommands}', normalizeArray(task.meta.verify).map((item) => `- ${item}`).join('\n'));
 
   if (!extraInstructions) {
