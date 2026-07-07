@@ -60,4 +60,6 @@ schema 约束：
 - agent_allowed_paths 不能包含 docs/tasks、docs/SPEC_*、docs/PLAN_*、.git、.ai-runner、Runner 脚本或 task 状态文件。
 - verify 必须是会结束的检查命令，不能启动 dev/start/serve 服务，不能执行 git 变更、git 工作区清理或删除命令。
 - 如果 task 需要 Claude 在实现阶段自行执行 bash（如自测），用可选字段 allowed_tools 声明，例如 `allowed_tools: ['Bash(pnpm test:*)']`，而不是放宽整体权限。
+- 可选字段 `runner_assets` 声明由 Runner 在 agent 执行前预置的大文件拷贝（`{ src, dest }` 列表）。当 task 需要把已存在的大文件（如几 MB 以上的样例数据，超出 agent 的 Read/Write 能力边界）落到 `agent_allowed_paths` 内时，必须用此字段交给 Runner 在边界外完成，不要写进 agent 的实现步骤。`src` 必须是项目内已存在的相对路径；`dest` 必须落在 `agent_allowed_paths` 内；否则审查阶段直接报错。
+- 可选字段 `runner_remove` 声明由 Runner 在 agent 执行前删除的遗留文件/目录（相对路径列表），与 `runner_assets` 对称。当 task 需要清理模板残留等文件时必须用此字段——agent 的 Edit/Write 只能覆写不能删除、Bash rm 被禁止，删除只能由 Runner 完成。路径必须落在 `agent_allowed_paths` 内，删除按幂等处理（不存在视为已达成）。
 - 如果项目存在 .ai-runner/config.yml，verify 必须符合其中的 allow_prefixes 和 deny_patterns。

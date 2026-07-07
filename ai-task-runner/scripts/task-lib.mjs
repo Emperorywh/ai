@@ -1871,6 +1871,26 @@ function relativizeForDisplay(filePath, projectRoot) {
   return value;
 }
 
+/*
+ * 把 task 声明的 runner_assets / runner_remove 格式化成回显文本。
+ * 执行 prompt 与审查 prompt 都需要这段信息：让模型知道哪些文件已由 Runner 在边界外
+ * 预置或删除，从而既不让 agent 重复尝试复制大文件/删除文件，也不让审查 agent 把这类
+ * Runner 拥有的产物误判为 agent 的遗漏。没有声明时填「无」，保持占位段语义完整。
+ */
+function formatRunnerProvisioning(task) {
+  const runnerAssets = normalizeArray(task.meta.runner_assets);
+  const runnerAssetsText = runnerAssets.length > 0
+    ? runnerAssets.map((item) => `- ${item.src} -> ${item.dest}`).join('\n')
+    : '无';
+
+  const runnerRemove = normalizeArray(task.meta.runner_remove);
+  const runnerRemoveText = runnerRemove.length > 0
+    ? runnerRemove.map((item) => `- ${item}`).join('\n')
+    : '无';
+
+  return { runnerAssetsText, runnerRemoveText };
+}
+
 function buildPrompt(context, task, extraInstructions = '') {
   /*
    * 执行 prompt 是 Runner 和 AI 之间的关键契约。
@@ -1884,23 +1904,10 @@ function buildPrompt(context, task, extraInstructions = '') {
   const template = readFileSync(context.promptTemplatePath, 'utf8');
 
   /*
-   * runner_assets 的预置结果回显给 agent：它列出的文件已由 Runner 在边界外拷贝就位，
-   * agent 不应再尝试用 Write 复现这些大文件，直接当作既存资产使用即可。
-   * 没有声明时填「无」，让模板里的占位段保持语义完整。
+   * runner_assets / runner_remove 的回显文本由共享 helper 生成，
+   * 执行 prompt 与审查 prompt 复用同一段格式化逻辑，避免两处实现漂移。
    */
-  const runnerAssets = normalizeArray(task.meta.runner_assets);
-  const runnerAssetsText = runnerAssets.length > 0
-    ? runnerAssets.map((item) => `- ${item.src} -> ${item.dest}`).join('\n')
-    : '无';
-
-  /*
-   * runner_remove 同样回显：列出的文件已由 Runner 删除，agent 不应再为「DoD 要求删除」
-   * 而强行用 Bash rm（会被拒绝）或纠结于无法删除，直接当作已清理。
-   */
-  const runnerRemove = normalizeArray(task.meta.runner_remove);
-  const runnerRemoveText = runnerRemove.length > 0
-    ? runnerRemove.map((item) => `- ${item}`).join('\n')
-    : '无';
+  const { runnerAssetsText, runnerRemoveText } = formatRunnerProvisioning(task);
 
   const basePrompt = template
     .replaceAll('{taskId}', String(task.meta.id))
@@ -2062,6 +2069,12 @@ function buildImplementationReviewPrompt(context, task, changedFiles) {
   const diff = readAgentDiff(context, changedFiles);
   const allowedPaths = normalizeArray(task.meta.agent_allowed_paths).map((item) => `- ${item}`).join('\n');
   const verifyCommands = normalizeArray(task.meta.verify).map((item) => `- ${item}`).join('\n');
+  /*
+   * 把 runner_assets / runner_remove 也注入审查上下文：审查者需要知道哪些文件由 Runner
+   * 在边界外预置或删除，才不会把这类 Runner 拥有的产物误判为 agent 的遗漏（例如把
+   * Runner 预置的 sample.json 当成「agent 没创建」而错误阻断）。
+   */
+  const { runnerAssetsText, runnerRemoveText } = formatRunnerProvisioning(task);
   const changedFileList = changedFiles.length > 0
     ? changedFiles.map((filePath) => `- ${filePath}`).join('\n')
     : '- 无';
@@ -2078,6 +2091,12 @@ function buildImplementationReviewPrompt(context, task, changedFiles) {
     '',
     'AI 允许修改路径：',
     allowedPaths,
+    '',
+    'Runner 已预置的数据文件（由 Runner 在边界外拷贝就位，不计入 agent 改动，审查时不应判为缺失）：',
+    runnerAssetsText,
+    '',
+    'Runner 已删除的遗留文件（由 Runner 在边界外删除，审查时不应判为残留）：',
+    runnerRemoveText,
     '',
     'Runner 已执行并通过的验证命令：',
     verifyCommands,
