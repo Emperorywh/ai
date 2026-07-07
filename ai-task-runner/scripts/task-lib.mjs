@@ -569,7 +569,7 @@ function discardWorkingTreeChanges(context) {
  * 未跟踪的预置文件，重试必须重新预置，保证 agent 每次都在完整资产上工作。
  */
 function prepareRunnerAssets(context, task, logPath) {
-  const assets = normalizeArray(task.meta.runner_assets);
+  const assets = toArray(task.meta.runner_assets);
 
   if (assets.length === 0) {
     return;
@@ -1878,7 +1878,7 @@ function relativizeForDisplay(filePath, projectRoot) {
  * Runner 拥有的产物误判为 agent 的遗漏。没有声明时填「无」，保持占位段语义完整。
  */
 function formatRunnerProvisioning(task) {
-  const runnerAssets = normalizeArray(task.meta.runner_assets);
+  const runnerAssets = toArray(task.meta.runner_assets);
   const runnerAssetsText = runnerAssets.length > 0
     ? runnerAssets.map((item) => `- ${item.src} -> ${item.dest}`).join('\n')
     : '无';
@@ -2455,12 +2455,21 @@ function extractTitle(body) {
   return heading ? heading.replace(/^#\s+/, '').trim() : '未命名任务';
 }
 
-function normalizeArray(value) {
+/*
+ * 把值归一化为数组：undefined/null 返回空数组，非数组包一层，数组原样返回。
+ * 与 normalizeArray 的区别是不对元素调用 String——用于元素是对象（如 runner_assets
+ * 的 { src, dest }）的字段，避免对象被 toString 成 '[object Object]' 而丢失 src/dest。
+ */
+function toArray(value) {
   if (!value) {
     return [];
   }
 
-  return Array.isArray(value) ? value.map(String) : [String(value)];
+  return Array.isArray(value) ? value : [value];
+}
+
+function normalizeArray(value) {
+  return toArray(value).map(String);
 }
 
 function uniqueValues(values) {
