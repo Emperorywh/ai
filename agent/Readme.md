@@ -42,6 +42,59 @@
 - 一次性脚本或静态文本生成。
 - 没有长期维护价值的临时实验代码。
 
+### 3.1 推荐技术栈
+
+本工作流推荐采用以下技术栈实现：
+
+```text
+TypeScript + Node.js CLI
++ Claude Agent SDK
++ Markdown/YAML 文档协议
++ Zod Schema 校验
++ SQLite 状态索引
++ Git worktree 任务隔离
++ MCP 工具扩展
++ 后期 Tauri/React UI
+```
+
+各技术的职责边界如下：
+
+- `TypeScript + Node.js CLI` 作为第一阶段主入口，负责任务初始化、文档生成、状态检查、任务执行、审查调度和本地命令编排。
+- `Claude Agent SDK` 作为 agent 执行引擎适配层，负责调用模型、工具、权限、hooks、subagents 和 MCP 能力，不作为长期业务状态的唯一来源。
+- `Markdown/YAML 文档协议` 作为长期上下文和任务协议的事实来源，其中 YAML frontmatter 面向机器解析，Markdown 正文面向人工和 agent 理解。
+- `Zod Schema 校验` 用于校验任务 frontmatter、状态机流转、配置文件、Context Pack、权限声明和执行结果结构。
+- `SQLite 状态索引` 用于查询、审计、恢复加速和任务依赖索引，不替代 Markdown/YAML 文档协议；必要时应能从文档重新构建索引。
+- `Git worktree 任务隔离` 用于为每个独立任务创建隔离工作区和分支，降低并行执行、回滚、审查和冲突处理的复杂度。
+- `MCP 工具扩展` 用于接入外部工具能力，例如浏览器、设计工具、文档系统、测试平台或项目管理系统，但不承载核心工作流领域逻辑。
+- `Tauri/React UI` 作为后期可视化界面，只调用稳定的应用服务层，不直接操作核心领域模型、SQLite 或底层 agent SDK。
+
+推荐的长期分层边界如下：
+
+```text
+core/
+  workflow 模型、任务状态机、领域规则、Zod schema
+
+application/
+  规格生成、架构生成、计划拆分、Context Pack 生成、任务调度、审查调度
+
+infrastructure/
+  文件系统文档仓储、SQLite 索引仓储、Git worktree 适配器、Claude Agent SDK 适配器、MCP 适配器
+
+cli/
+  init、plan、task:create、task:run、task:review、status 等命令入口
+
+ui/
+  后期 Tauri/React 可视化界面
+```
+
+核心约束：
+
+- `core` 不依赖 CLI、UI、SQLite、Git、MCP 或 Claude Agent SDK。
+- `application` 编排用例流程，但不直接依赖具体基础设施实现。
+- `infrastructure` 只实现外部系统适配，不反向承载业务规则。
+- `cli` 和后期 `ui` 只作为交互入口，不拥有核心状态机和任务规则。
+- agent 会话、SDK session 和模型上下文只作为执行过程材料，不能替代文档协议中的长期上下文。
+
 ## 4. 核心原则
 
 所有实现必须遵循：
