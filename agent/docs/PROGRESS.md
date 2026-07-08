@@ -44,9 +44,9 @@ status: active
 
 ## 当前未解决问题摘要
 
-1. Readme.md 未显式枚举 `DecisionStatus` / `IssueStatus` / `IssueSeverity` 完整取值（TASK-002 遗留，medium / open）；已由 `enums.ts` 最小推断集覆盖并标注，待 Orchestrator 在 Readme/文档确认。
-2. `scope` 字段语义张力（TASK-004，medium / open）：任务 §8「status/scope/severity 用枚举」与 `enums.ts` `ScopeSchema` 注释倾向于 scope 为枚举，但 §6.6「影响范围」语义、§10 正例（`scope: state` / `scope: api`）、TASK-003 已提交 result.md（`scope: core`）均为自由文本；TASK-004 按自由文本落地，待 Orchestrator 确认统一方向。
-3. 任务文件 id 正则精度不一致（TASK-003 遗留，medium / open）：§8 写 `^TASK-\d{3,}$`，`enums.ts` 的 `TaskIdSchema` 为 `^TASK-\d+$`，TASK-003 按单一来源复用后者，差异待 Orchestrator 确认统一方向。
+1. ISS-001 — Readme.md 未显式枚举 `DecisionStatus` / `IssueStatus` / `IssueSeverity` 完整取值（TASK-002 遗留，medium / open）；已由 `enums.ts` 最小推断集覆盖并标注，待 Orchestrator 在 Readme/文档确认。
+2. ISS-003（关联 DEC-003）— `scope` 字段语义张力（TASK-004，medium / open）：任务 §8「status/scope/severity 用枚举」与 `enums.ts` `ScopeSchema` 注释倾向于 scope 为枚举，但 §6.6「影响范围」语义、§10 正例（`scope: state` / `scope: api`）、TASK-003 已提交 result.md（`scope: core`）均为自由文本；TASK-004 按自由文本落地，待 Orchestrator 确认统一方向。
+3. ISS-002（关联 DEC-002）— 任务文件 id 正则精度不一致（TASK-003 遗留，medium / open）：§8 写 `^TASK-\d{3,}$`，`enums.ts` 的 `TaskIdSchema` 为 `^TASK-\d+$`，TASK-003 按单一来源复用后者，差异待 Orchestrator 确认统一方向。
 
 ## 建议下一个任务
 
