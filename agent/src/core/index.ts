@@ -17,3 +17,5 @@ export * from './schemas/decision-issue-schema.js'
 export * from './schemas/result-schema.js'
 // TASK-006：审查结论（.review.md）frontmatter Schema。
 export * from './schemas/review-schema.js'
+// TASK-007：任务状态机（Readme.md §7）。
+export * from './state-machine.js'
