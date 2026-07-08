@@ -46,7 +46,7 @@ workflow_outputs:
 ## 2. 当前目标
 
 实现 `recoverMerge(taskId, { adapter, repos })`：
-- 用 `git branch --merged` 检查 worktree 分支是否已进入 main。
+- 通过 `GitMergePort.branchMerged`（底层等价 `git branch --merged`）检查 worktree 分支是否已进入 main。
 - 已进入 → 跳过合并，仅补做未完成的全局文档回写。
 - 未进入 → 丢弃上次不完整的 rebase 中间态，从 main 最新基线重新 rebase。
 - 返回恢复后的「待续步骤」清单，使整个合并可从任意崩溃点继续。
@@ -75,7 +75,7 @@ workflow_outputs:
 
 ## 8. 架构约束
 
-- 对 worktree 的操作经 `application/ports.ts` 的 `WorktreePort`（TASK-015 建立），不直接 import infra 实现类；恢复判定只依赖 git 状态 + frontmatter `status`，可完全重建（§3.2）。
+- 对 worktree 与 git merge 原语的操作经 `application/ports.ts` 的 `WorktreePort`/`GitMergePort`（TASK-015 建立），不直接 import infra 实现类；恢复判定只依赖 git 状态 + frontmatter `status`，可完全重建（§3.2）。
 - 不依赖外部「合并进度文件」。
 
 ## 9. 数据流和状态流要求

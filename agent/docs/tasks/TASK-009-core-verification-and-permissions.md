@@ -42,8 +42,8 @@ workflow_outputs:
 
 ## 2. 当前目标
 
-- `verification-rules.ts`：`computeVerificationAllowlist({ taskLayer, testingCommands, taskVerification })`。项目级命令 = `layers` 未声明 ∪ `layers` 含本 layer；再与任务级 `verification` 取并集；同名命令任务级覆盖项目级。
-- `permission-rules.ts`：`resolvePathScope(allowed, forbidden)` 检测重叠并告警/拒绝；`requiredExtraPermissions(command)` 推断命令所需额外能力（install/network/start_server/open_browser/delete/config）。
+- `verification-rules.ts`：`computeVerificationAllowlist({ taskLayer, testingCommands, taskVerification })`。项目级命令 = `layers` 未声明 ∪ `layers` 含本 layer；再与任务级 `verification` 取并集；同名命令任务级覆盖项目级；命令对象携带显式 `requires_permissions`。
+- `permission-rules.ts`：`resolvePathScope(allowed, forbidden)` 检测重叠并告警/拒绝；`validateCommandPermissions(command, taskPermissions)` 校验命令声明的 `requires_permissions` 是否被任务 `permissions` 覆盖；启发式命令扫描只返回 warning，不参与授权。
 
 ## 3. 所属层级
 
@@ -74,7 +74,7 @@ workflow_outputs:
 
 ## 9. 数据流和状态流要求
 
-输入：任务 frontmatter + TESTING.md 命令声明；输出：实际执行的命令序列 + 命令所需权限 + 路径作用域冲突报告。
+输入：任务 frontmatter + TESTING.md 命令声明；输出：实际执行的命令序列 + 显式权限校验结果 + 路径作用域冲突报告。
 
 ## 10. 预期新增或修改文件
 
@@ -85,11 +85,12 @@ workflow_outputs:
 - `layers` 裁剪用例：未声明→全 layer 生效；声明→仅命中 layer。
 - 任务级覆盖项目级同名命令有用例。
 - 路径重叠 → deny 优先 + 拒绝启动有用例。
+- `requires_permissions` 未被任务 `permissions` 覆盖时拒绝执行；启发式扫描只产生 warning，不授予权限。
 - `typecheck` 0 错误。
 
 ## 12. 风险提示
 
-- 命令所需能力的推断是启发式（字符串匹配 npm install/network 等），需在注释中说明局限性，避免过度断言。
+- 不得把命令字符串匹配结果当作授权依据；所有额外能力必须来自显式 `requires_permissions` 声明。
 
 ## 13. 结束时必须产出（Task Executor 负责）
 

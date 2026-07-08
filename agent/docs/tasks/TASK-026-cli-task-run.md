@@ -50,11 +50,11 @@ workflow_outputs:
 
 ## 1. 背景
 
-来自 PLAN P8。`task:run` 是执行编排的集成入口（§11/§3.2）：ready→running（建 worktree、刷新 context_pack 并回写、注入权限、启动 Executor）→ 读 `.result.md` → 状态流转（reviewing 或 no_review 校验）→ 合并回收（rebase+ff+回写，含恢复）。
+来自 PLAN P8。`task:run` 是执行编排的集成入口（§11/§3.2）：ready→running（建 worktree、刷新 context_pack 并回写、注入权限、启动 Executor）→ 读 `.result.md` → 状态流转。普通任务停在 `reviewing` 等待 `task:review`；只有 `no_review: true` 且 Orchestrator 产物校验通过并进入 `done` 的任务，才在本命令内触发合并回收（rebase+audit+ff+回写，含恢复）。
 
 ## 2. 当前目标
 
-实现 `task:run <taskId>`：按依赖检查前置 done → 刷新 context_pack 并回写 frontmatter → create worktree → 按 R7 策略恢复 worktree 内 `node_modules`（串行默认复用主工作区，否则按子任务 `install_dependencies` 能力在 worktree 内重装）→ 选 Executor（SDK 或 DryRun）→ 执行 → 读 result → `applyResult` 流转 → 触发合并（调 TASK-019/020/021）→ 失败走恢复与 ISSUES 登记。
+实现 `task:run <taskId>`：按依赖检查前置 done → 刷新 context_pack 并回写 frontmatter → create worktree → 按 R7 策略恢复 worktree 内 `node_modules`（串行默认复用主工作区，否则按子任务 `install_dependencies` 能力在 worktree 内重装）→ 选 Executor（SDK 或 DryRun）→ 执行 → 读 result → `applyResult` 流转。若目标状态为 `reviewing`，命令结束并提示运行 `task:review`；若 `no_review` 校验后目标状态为 `done`，才触发合并（调 TASK-019/020/021）；失败走恢复与 ISSUES 登记。
 
 ## 3. 所属层级
 
@@ -87,7 +87,7 @@ workflow_outputs:
 
 ## 9. 数据流和状态流要求
 
-ready → running（worktree+context_pack+权限+Executor）→ result → reviewing/done/blocked/failed → 合并回收 → 全局文档回写。
+ready → running（worktree+context_pack+权限+Executor）→ result → reviewing/done/blocked/failed。`reviewing` 不合并；`done` 且来源为免审校验通过时合并回收并回写全局文档。
 
 ## 10. 预期新增或修改文件
 
@@ -95,7 +95,7 @@ ready → running（worktree+context_pack+权限+Executor）→ result → revie
 
 ## 11. 验收标准
 
-- 用 DryRunExecutor 在临时仓库端到端跑通：ready→running→done（no_review）或 reviewing。
+- 用 DryRunExecutor 在临时仓库端到端跑通：ready→running→reviewing 时不合并；ready→running→done（no_review）时合并。
 - 前置未完成时拒绝；合并冲突置 blocked；`typecheck` 0 错误。
 
 ## 12. 风险提示

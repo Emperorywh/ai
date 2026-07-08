@@ -15,8 +15,8 @@ owner: Orchestrator
 
 按需求第 5 条，以下内容在 SPEC 中**不适合直接执行 / 未确认 / 存在耦合风险**，已通过任务边界加以隔离或后置，**不阻塞**本计划，但需在对应任务中先确认再实现：
 
-1. **`Readme.md` 是合并文档，非标准 SPEC.md + ARCHITECTURE.md。**
-   `Readme.md` 把产品规格、架构约束、状态机、文档模板混在一起。本计划把它作为**权威 spec+architecture 来源**；TASK-001 负责生成一份薄 `ARCHITECTURE.md`（落地目录结构与分层边界）并指向 `Readme.md`，以满足文档协议的「必读核心 = AGENTS/ARCHITECTURE/PROGRESS/任务文件」要求。**不另起 SPEC.md 重写**，避免与 `Readme.md` 漂移。
+1. **`Readme.md` 是本仓库自举阶段的 `source_spec`。**
+   `Readme.md` 把产品规格、架构约束、状态机、文档模板混在一起；这符合 SPEC 第 6 节定义的自举例外。本计划把它作为**权威 source_spec + architecture 来源**；TASK-001 负责生成一份薄 `docs/ARCHITECTURE.md`（落地目录结构与分层边界）并指向 `Readme.md`，以满足文档协议的「必读核心 = `AGENTS.md` + `docs/ARCHITECTURE.md` + `docs/PROGRESS.md` + 当前任务文件」要求。**不另起 `docs/SPEC.md` 重写**，避免与 `Readme.md` 漂移。该例外在任务进入 `ready` 前必须由 Reviewer 或人工确认：`Readme.md` 与本 PLAN 不存在阻塞级待确认问题。
 
 2. **Claude Agent SDK 的具体 API 未确认（高风险）。**
    SPEC 仅声明「Claude Agent SDK 作为执行引擎适配层」，但未明确 SDK 版本、子 agent 派发、hooks、权限注入的具体接口。处理：
@@ -31,13 +31,16 @@ owner: Orchestrator
    不纳入本计划，后续单独立项。
 
 5. **CLI 命令签名未在 SPEC 中固定。**
-   `init / plan / task:create / task:run / task:review / status / rebuild-index` 仅列出名称。处理：各 CLI 任务（P8）负责固化入参/出参与退出码，并在 `ARCHITECTURE.md` 的「CLI 边界」小节回写。
+   `init / plan / task:create / task:run / task:review / status / rebuild-index` 仅列出名称。处理：各 CLI 任务（P8）负责固化入参/出参与退出码，并在 `docs/ARCHITECTURE.md` 的「CLI 边界」小节回写。
 
 6. **合并编排跨 Git / 文档仓储 / 应用逻辑（耦合风险）。**
    SPEC 自身已把合并拆为 rebase + 回填 + fast-forward + section 回写 + 幂等恢复。本计划严格按此拆为 3 个任务（TASK-019/020/021），每个 ≤4 文件、可在临时 git 仓库内独立验证。
 
 7. **SQLite 是派生存储，非事实来源。**
    已在 P3（TASK-013/014）明确：写入失败不阻断流程，提供 `rebuild-index` 全量重建；状态机只读 frontmatter，不读 SQLite。
+
+8. **第三方依赖必须前置集中声明。**
+   Zod、YAML、SQLite、CLI 框架等基础依赖由 TASK-001 在 `package.json` 中一次性声明并安装，后续任务默认不得临时新增依赖；若后续任务发现必须新增依赖，应阻塞并在 `.result.md` 中提出扩权/新增依赖任务建议，而不是越权修改 `package.json`。
 
 > 结论：以上均为**可隔离的后置确认项**，不存在需要现在就推翻 SPEC 的硬阻塞。计划继续。
 
@@ -75,6 +78,7 @@ agent/
       index.ts
     application/                # 编排用例，不依赖具体基础设施实现
       ports.ts                 # application→infra 窄接口（TaskDoc/GlobalDoc/Worktree Port）
+      planning-workflow.ts
       context-pack-generator.ts
       scheduler.ts
       state-orchestrator.ts
@@ -120,9 +124,9 @@ agent/
 
 分层依赖方向（硬约束）：`cli → application → core ← infrastructure`；`infrastructure → core`；**`core` 不反向依赖任何层**。
 
-application→infrastructure 依赖倒置约定：application 经 `src/application/ports.ts` 中的窄接口（`TaskDocRepositoryPort`/`GlobalDocRepositoryPort`/`WorktreePort`）依赖 infrastructure；infrastructure 提供具体实现类，由 CLI 层在 composition root 处 wiring 注入，借助 TS 结构类型兼容，infra 无需显式 `implements`。application 不得直接 import infra 实现类。`executor-contract.ts` 仍留在 `infrastructure/sdk/`，因其仅被 CLI 层（TASK-026）依赖、不经 application，不构成反向依赖。
+application→infrastructure 依赖倒置约定：application 经 `src/application/ports.ts` 中的窄接口（`TaskDocRepositoryPort`/`GlobalDocRepositoryPort`/`WorktreePort`/`GitMergePort`）依赖 infrastructure；infrastructure 提供具体实现类，由 CLI 层在 composition root 处 wiring 注入，借助 TS 结构类型兼容，infra 无需显式 `implements`。application 不得直接 import infra 实现类。`executor-contract.ts` 仍留在 `infrastructure/sdk/`，因其仅被 CLI 层（TASK-026/027）依赖、不经 application，不构成反向依赖。
 
-`layer` 与物理分层的关系（澄清 SPEC §9）：本项目把状态机与状态编排归入 `domain`，SPEC §9 的 `state` 取值在本计划中暂不被任何任务使用（枚举仍由 TASK-002 完整定义并保留，供未来或其他项目启用），不影响验证 allowlist——`TESTING.md` 的 `layers` 声明只需覆盖实际出现的 `type/domain/data/page`。
+`layer` 与物理分层的关系（澄清 SPEC §9）：本项目把状态机与状态编排归入 `domain`，SPEC §9 的 `state` 取值在本计划中暂不被任何任务使用（枚举仍由 TASK-002 完整定义并保留，供未来或其他项目启用），不影响验证 allowlist——`docs/TESTING.md` 的 `layers` 声明只需覆盖实际出现的 `type/domain/data/page`。
 
 ## 2. 整体阶段与任务顺序
 
@@ -132,7 +136,7 @@ application→infrastructure 依赖倒置约定：application 经 `src/applicati
 | P1 | Core 领域模型与 Schema | TASK-002…009 | TASK-001 |
 | P2 | Infrastructure 文件系统文档仓储 | TASK-010…012 | Core Schema |
 | P3 | Infrastructure SQLite 索引 | TASK-013…014 | P2 |
-| P4 | Application 编排 | TASK-015…017 | Core + P2 |
+| P4 | Application 编排 | TASK-015…017, TASK-029 | Core + P2 |
 | P5 | Infrastructure Git worktree | TASK-018 | TASK-001 |
 | P6 | Application 合并编排 | TASK-019…021 | P4 + P5 |
 | P7 | Infrastructure Claude Agent SDK | TASK-022 | P4 |
@@ -160,16 +164,17 @@ application→infrastructure 依赖倒置约定：application 经 `src/applicati
 | TASK-015 | App Context Pack 生成器 + application/ports | domain | 003,011 |
 | TASK-016 | App 拓扑排序与并行检测 | domain | 003 |
 | TASK-017 | App 状态流转编排器 | domain | 007,008,011,015 |
+| TASK-029 | App 规划文档生成与任务拆分用例 | domain | 003,011,015,016 |
 | TASK-018 | Infra Git worktree 适配器 | data | 001 |
 | TASK-019 | App 合并：rebase + 回填 + fast-forward | domain | 011,015,016,018 |
 | TASK-020 | App 合并：全局文档 section 回写与冲突 | domain | 012,015,016 |
 | TASK-021 | App 合并：幂等恢复 | domain | 015,018,019,020 |
 | TASK-022 | Infra Claude Agent SDK 适配器 | data | 009,015 |
 | TASK-023 | CLI 框架与 init 命令 | page | 001 |
-| TASK-024 | CLI plan 与 task:create 命令 | page | 011,015,016 |
+| TASK-024 | CLI plan 与 task:create 命令 | page | 011,015,016,029 |
 | TASK-025 | CLI status 与 rebuild-index 命令 | page | 014 |
 | TASK-026 | CLI task:run 命令 | page | 015,017,018,019,020,021,022 |
-| TASK-027 | CLI task:review 命令 | page | 011,017 |
+| TASK-027 | CLI task:review 命令 | page | 011,017,019,020,021 |
 | TASK-028 | Infra MCP 适配器骨架 | data | 001 |
 
 ## 3. 依赖关系说明
@@ -179,8 +184,8 @@ application→infrastructure 依赖倒置约定：application 经 `src/applicati
 - **状态相关**：`status-mapping`（TASK-008）引用状态机的状态枚举 → 依赖 TASK-007。
 - **文档仓储（P2）** 依赖对应 Schema（读写即校验）。
 - **SQLite（P3）** 的 `rebuild-index` 必须能从文档重建 → 依赖 P2 文档仓储。
-- **Application（P4）** 依赖 Core 规则 + 文档仓储；不依赖 SQLite（状态判定只读 frontmatter）。
-- **合并（P6）** 依赖调度（TASK-016）+ worktree（TASK-018）+ 文档仓储（TASK-011/012）；内部 019→020→021 串行。017/019/020/021 均经 TASK-015 的 `ports.ts` 接口依赖 infra，同时保留对对应 infra 实现任务（011/012/018）的依赖，供 CLI 层 wiring 与端到端测试使用。
+- **Application（P4）** 依赖 Core 规则 + 文档仓储；不依赖 SQLite（状态判定只读 frontmatter）。规划文档生成与任务拆分由 TASK-029 提供独立 application 用例，CLI 不直接承载该领域逻辑。
+- **合并（P6）** 依赖调度（TASK-016）+ worktree/git merge 原语（TASK-018）+ 文档仓储（TASK-011/012）；内部 019→020→021 串行。017/019/020/021 均经 TASK-015 的 `ports.ts` 接口依赖 infra，同时保留对对应 infra 实现任务（011/012/018）的依赖，供 CLI 层 wiring 与端到端测试使用。
 - **SDK（P7）** 依赖 Context Pack（015）+ 权限解析（009）；以接口暴露给 CLI，CLI 在 SDK 未就位时可用 dry-run executor。
 - **CLI（P8）** 是集成层，依赖其所编排的全部下游服务。
 
@@ -222,7 +227,7 @@ application→infrastructure 依赖倒置约定：application 经 `src/applicati
 | R3 | SQLite 与文档漂移 | 派生存储定位 + `rebuild-index` + 写失败不阻断 |
 | R4 | frontmatter/Schema 漂移 | Zod 为单一来源；文档仓储读取即校验 |
 | R5 | 范围蔓延 | MCP 仅骨架；UI 不纳入 |
-| R6 | 并行写全局文档冲突 | section 级机器判定合并（020）+ 冲突落 `ISSUES.md` |
+| R6 | 并行写全局文档冲突 | section 级机器判定合并（020）+ 冲突落 `docs/ISSUES.md` |
 | R7 | worktree 缺 `node_modules` 致后续 task verify 失败 | TASK-018 仅管 worktree；`task:run`（026）在 `create` 后按需复用主工作区 `node_modules` 或重装（声明 `install_dependencies`） |
 
 ## 7. 回滚 / 恢复方式
@@ -236,7 +241,7 @@ application→infrastructure 依赖倒置约定：application 经 `src/applicati
 ## 8. 任务文件位置
 
 - 计划：`docs/PLAN_coding-agent-workflow.md`（本文件）
-- 任务：`docs/tasks/TASK-XXX-*.md`（共 28 个，初始状态均为 `draft`）
+- 任务：`docs/tasks/TASK-XXX-*.md`（共 29 个，初始状态均为 `draft`）
 
 ## 9. 收尾标准（所有任务 done 后）
 

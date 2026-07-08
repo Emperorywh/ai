@@ -43,7 +43,7 @@ workflow_outputs:
 ## 2. 当前目标
 
 - `framework.ts`：CLI 入口、命令注册、退出码约定、错误输出格式。
-- `init` 命令：在目标目录生成 `AGENTS.md / SPEC.md / ARCHITECTURE.md / PLAN.md / PROGRESS.md / DECISIONS.md / ISSUES.md / TESTING.md` 与 `TASKS/` 目录（§6 文档体系）。模板内嵌，幂等（已存在不覆盖）。
+- `init` 命令：在目标目录生成 `AGENTS.md`、`docs/SPEC.md`、`docs/ARCHITECTURE.md`、`docs/PLAN.md`、`docs/PROGRESS.md`、`docs/DECISIONS.md`、`docs/ISSUES.md`、`docs/TESTING.md` 与 `docs/tasks/` 目录（§6 文档体系）。模板内嵌，幂等（已存在不覆盖）。
 
 ## 3. 所属层级
 
@@ -85,7 +85,7 @@ workflow_outputs:
 
 ## 11. 验收标准
 
-- 在临时目录跑 `init` 后，§6 列出的全部文档与 `TASKS/` 存在；重复执行不覆盖既有文件。
+- 在临时目录跑 `init` 后，§6 列出的全部文档与 `docs/tasks/` 存在；重复执行不覆盖既有文件。
 - 退出码正确；`typecheck` 0 错误。
 
 ## 12. 风险提示

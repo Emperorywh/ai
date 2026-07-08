@@ -77,7 +77,7 @@ workflow_outputs:
 
 - 依赖 core Schema + frontmatter-parser；不反向定义业务规则。
 - 写入保留正文（task 文件的 13 节正文、result/review 的正文），只更新 frontmatter 时做「frontmatter 替换 + 正文保留」。
-- 文件命名遵循 §6：`TASKS/TASK-XXX-xxx.md`、`TASK-XXX-xxx.result.md`、`TASK-XXX-xxx.review.md`。
+- 文件命名遵循 §6：`docs/tasks/TASK-XXX-xxx.md`、`docs/tasks/TASK-XXX-xxx.result.md`、`docs/tasks/TASK-XXX-xxx.review.md`。
 
 ## 9. 数据流和状态流要求
 

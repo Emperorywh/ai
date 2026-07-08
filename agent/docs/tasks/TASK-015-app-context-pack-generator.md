@@ -46,7 +46,7 @@ workflow_outputs:
 实现：
 - `computeContextPack(task, { dependencyResults })`：应用并集规则，产出最终注入清单。
 - `refreshSourceFiles(task, dependencyResults)`：用已完成依赖的 `.result.md` 文件清单替换预填 `source_files`，返回需回写 frontmatter 的新值。
-- 建立 `src/application/ports.ts`：定义 application→infrastructure 的窄接口 `TaskDocRepositoryPort`、`GlobalDocRepositoryPort`、`WorktreePort`（方法集覆盖 TASK-017/019/020 所需的任务/结果/审查读写与 worktree 操作，供后续 application 任务复用，infra 层不显式 `implements`、由 CLI 层 wiring 注入）。
+- 建立 `src/application/ports.ts`：定义 application→infrastructure 的窄接口 `TaskDocRepositoryPort`、`GlobalDocRepositoryPort`、`WorktreePort`、`GitMergePort`（方法集覆盖 TASK-017/019/020/021/029 所需的任务/结果/审查读写、worktree 生命周期与 git merge 原语，供后续 application 任务复用，infra 层不显式 `implements`、由 CLI 层 wiring 注入）。
 
 ## 3. 所属层级
 

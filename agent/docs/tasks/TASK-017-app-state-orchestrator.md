@@ -102,4 +102,4 @@ workflow_outputs:
 ## 13. 结束时必须产出（Task Executor 负责）
 
 - docs/tasks/TASK-017-app-state-orchestrator.result.md
-- `PROGRESS.md` 更新建议：状态编排就绪，P4 收尾
+- `PROGRESS.md` 更新建议：状态编排就绪，后续由 TASK-029 完成 P4 规划用例收尾

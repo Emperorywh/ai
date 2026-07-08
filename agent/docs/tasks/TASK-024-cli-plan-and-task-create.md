@@ -7,6 +7,7 @@ depends_on:
   - TASK-011
   - TASK-015
   - TASK-016
+  - TASK-029
 allowed_paths:
   - src/cli/commands/plan.ts
   - src/cli/commands/task-create.ts
@@ -32,6 +33,7 @@ context_pack:
     - Readme.md#8-context-pack-上下文包
     - Readme.md#9-任务文件模板
   source_files:
+    - src/application/planning-workflow.ts
     - src/application/context-pack-generator.ts
     - src/application/scheduler.ts
     - src/infrastructure/fs/task-doc-repo.ts
@@ -43,11 +45,11 @@ workflow_outputs:
 
 ## 1. 背景
 
-来自 PLAN P8。`plan` 负责生成 `PLAN.md` + 拆分 `TASKS/` 并为每个任务写入初始 `context_pack`（`source_files` 按依赖 `allowed_paths` 预填，§8/§11）；`task:create` 负责增量创建单个任务文件。
+来自 PLAN P8。`plan` 负责生成 `docs/PLAN.md` + 拆分 `docs/tasks/` 并为每个任务写入初始 `context_pack`（`source_files` 按依赖 `allowed_paths` 预填，§8/§11）；`task:create` 负责增量创建单个任务文件。
 
 ## 2. 当前目标
 
-- `plan` 命令：读取 SPEC/ARCHITECTURE → 调用 application 层生成 PLAN + 任务集合 → 经文档仓储落盘 → 对每个任务用 `computeContextPack`（依赖未执行，预填 `source_files`）写入 frontmatter。
+- `plan` 命令：读取 `docs/SPEC.md`/`docs/ARCHITECTURE.md` 或自举项目的 `source_spec` → 调用 TASK-029 的 application 规划用例生成 PLAN + 任务集合 → 经文档仓储落盘 → 对每个任务用 `computeContextPack`（依赖未执行，预填 `source_files`）写入 frontmatter。
 - `task:create` 命令：按入参（id/title/layer/depends_on/allowed_paths/...）生成单个任务文件，初始 `status: draft`，写入预填 context_pack。
 
 ## 3. 所属层级
@@ -71,7 +73,7 @@ workflow_outputs:
 
 - 不实现 task:run/task:review/status/rebuild-index。
 - 不做任务实际执行。
-- `plan` 的「SPEC/ARCHITECTURE → 任务」的智能拆分逻辑若复杂，仅做骨架编排（调用 application 层占位），深度拆分算法不在本任务膨胀——保持 ≤4 文件。
+- 不在 CLI 内实现「SPEC/ARCHITECTURE → 任务」的拆分逻辑；该逻辑只调用 TASK-029 的 application 用例。
 
 ## 8. 架构约束
 
@@ -81,7 +83,7 @@ workflow_outputs:
 
 ## 9. 数据流和状态流要求
 
-SPEC/ARCHITECTURE → plan → PLAN.md + TASKS/*.md（含预填 context_pack，status=draft）。
+SPEC/ARCHITECTURE 或 source_spec → PlanningWorkflow → docs/PLAN.md + docs/tasks/*.md（含预填 context_pack，status=draft）。
 
 ## 10. 预期新增或修改文件
 
