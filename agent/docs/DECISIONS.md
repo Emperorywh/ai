@@ -178,3 +178,68 @@ consequences: "TASK-014 索引仓储：构造 / 首次写入前调用 runMigrati
 ```
 
 提议自 `TASK-013-infra-sqlite-schema.result.md`。SQLite schema 仅 type-only import 既有 `better-sqlite3` + `@types/better-sqlite3`、零反向依赖、无边界冲突；迁移机制与列约束的六处关键解释（版本表唯一事实来源 + 前向 only 事务性 / IF NOT EXISTS 仅限 bootstrap / JSON 文本列 DEFAULT / 文本主键显式 NOT NULL / executions task_id 主键 + commit 单值列 / applied_at UTC）均为 §3.1/§3.2/§8 的合理落地，待 Orchestrator 回写确认。
+
+---
+
+## DEC-011 IndexRepository 设计：写入容错 onWarning 吞错不阻断、rebuild 单事务原子 + 文档损坏冒泡、DocSources 由调用方传入全局文档内容、代表性 commit 取首条、查询面仅 queryTasks+getExecution
+
+```yaml
+id: DEC-011
+title: IndexRepository 设计：写入容错 onWarning 吞错不阻断、rebuild 单事务原子 + 文档损坏冒泡、DocSources
+  由调用方传入全局文档内容、代表性 commit 取首条、查询面仅 queryTasks+getExecution
+status: proposed
+scope: infrastructure/sqlite
+created_from_task: TASK-014
+decision: TASK-014 对 §2/§3.2/§8/§11
+  未明文的索引仓储设计作如下解释并落地：（1）写入容错——upsertTask/upsertDecision/upsertIssue/upsertExecution
+  写失败经构造注入的 onWarning 回调记告警后吞掉、不向上抛阻断（§3.2「索引写入失败不阻断状态流转和合并」）；onWarning 默认
+  console.warn，可注入自定义回调便于测试断言（容错测试以「关闭 db 连接」可控注入失败，§12）。内部拆「严格直接插入
+  insertXxx（失败抛错）」+「容错包装 tolerantWrite（try/catch + onWarning）」，rebuild 复用
+  insertXxx 但不经 tolerantWrite。（2）rebuild 原子性——rebuildFromDocs 在单一 db.transaction
+  内「清空四表 + 逐条 INSERT」，任一步抛错整体回滚、索引保持重建前状态；rebuild 用直接插入而非容错 upsert*：rebuild
+  是显式修复命令，文档自身损坏应让错误显式冒泡由调用方处理，不静默丢行（否则索引 ≠ 文档违反 §11）；result/review
+  附属文档不存在属预期（任务尚未执行/未审查）跳过该任务 execution，文档存在但损坏（Zod
+  校验失败等）让错误冒泡触发回滚。（3）DocSources 由调用方传入全局文档内容——rebuildFromDocs({taskRepo,
+  globalRepo, decisionsDoc, issuesDoc})：GlobalDocRepository 是纯字符串变换、无文件
+  I/O（TASK-012 DEC-009），任务 §6 禁止修改 global-doc-repo.ts 加文件读取方法，故
+  DECISIONS.md/ISSUES.md 内容须由调用方（CLI composition
+  root，TASK-025）读盘后传入；tasks/executions 仍经
+  TaskDocRepository（listTasks→readTask/readResult/readReview）。任务 §2 提示的
+  {taskRepo, globalRepo} 签名不足以获取全局文档内容，故扩展为含 decisionsDoc/issuesDoc 的
+  DocSources（不越界、不改规格）。（4）代表性 commit 取首条——executions 的
+  commit_hash/message/author/time 单值列存 execution_commits 首条（DEC-010 委托 TASK-014
+  决定取首条/最新条，本任务取首条作主实现 commit，多 commit 全量索引留待后续需要时新增 execution_commits 表 +
+  迁移）。（5）查询面仅 queryTasks({status?,layer?}) + getExecution(taskId)——任务 §2
+  明示这两个；decisions/issues 无公共读接口：索引用途为审计与 rebuild，其人读展示走 DECISIONS.md/ISSUES.md
+  文档本身（测试以原始 SQL 校验 rebuild 产物）。（6）queryTasks 按 id 数值升序（与
+  TaskDocRepository.listTasks 一致，鲁棒于补零）。（7）readResultOptional/readReviewOptional
+  以 TaskDocRepository 错误前缀「文档不存在」区分「附属文档尚未产出」与「文档损坏」（DEC-008 稳定契约）。
+rationale: §3.2 明文「索引写入失败不阻断、可 rebuild-index 全量重建、正确性以文档为准」——upsert* 容错吞错 +
+  rebuild 全量重建是直接落地；onWarning 可注入让容错可测试（关闭 db 连接是最干净的可控失败注入，§12）。rebuild 原子性：清空
+  + 重灌不在事务内则中途崩溃会留半空索引（比重建前更糟），单事务保证 all-or-nothing；用直接插入而非容错 upsert* 是因为
+  rebuild 是显式修复、不应静默丢行（容错语义服务运行期状态流转，不服务修复命令）。DocSources
+  传入文档内容是架构约束的直接推论：GlobalDocRepository 经 DEC-009 设计为纯变换无 I/O（合并编排归 application
+  TASK-020），本任务 forbidden 含 global-doc-repo.ts 不能加读方法，故全局文档内容只能由上层传入；这与
+  TaskDocRepository 同步 I/O（可被 index-repo 直接调）不对称，但源于两仓储设计分工不同，非缺陷。代表性 commit
+  取首条：execution_commits 通常按时间序、首条是主实现 commit；取首条/最新条均可（DEC-010
+  明示），取首条简单且语义清晰。查询面仅 tasks+executions：§3.2 索引主要查询场景是任务状态/依赖与执行摘要（status
+  命令、依赖索引、恢复加速），decisions/issues 的索引行用于审计与 rebuild、人读展示走文档——故不为它们建公共读接口，避免提前实现后续
+  CLI 逻辑（AGENTS §4）。id 数值升序与 listTasks 一致避免排序语义漂移。错误前缀区分缺失/损坏：TaskDocRepository
+  对文件不存在与校验失败抛不同前缀的 Error（DEC-008 稳定契约），rebuild 据此跳过「尚未产出」的附属文档、对损坏文档冒泡——是
+  forbidden 约束下（不能改文档仓储加 exists 方法）的最干净方案。
+consequences: application 层（TASK-015 ports / TASK-017 编排）调用本仓储：状态流转 / 合并 /
+  决策问题变更时调 upsert* 同步写索引（写失败仅告警不阻断），调 queryTasks/getExecution 做 status 查询与依赖索引；调
+  rebuildFromDocs 做全量重建（须先读盘 DECISIONS.md/ISSUES.md 传入
+  decisionsDoc/issuesDoc）。CLI rebuild-index（TASK-025）在 composition root 处 new
+  Database(filePath) + new IndexRepository(db) + 读盘全局文档 + 调 rebuildFromDocs。若
+  Orchestrator 认为：(a) decisions/issues 应有公共读接口（如 listDecisions/listIssues 供
+  status 命令展示）——加 3 行方法 + 对应测试（届时同步改 DEC-011）；(b) 代表性 commit 应取最新条而非首条——改
+  buildExecutionSummary 的 execution_commits[0] 为 [length-1]（届时同步改测试）；(c) rebuild
+  应对损坏文档容错跳过而非冒泡——在 rebuildTasksAndExecutions 包 try/catch + onWarning（但会掩盖文档损坏，与
+  §11「索引=文档全集」张力，不推荐）；(d) readResultOptional 的错误前缀判定应改为更稳的机制——需先给
+  TaskDocRepository 加 exists 方法（扩权改文档仓储，违反本任务 forbidden）或用错误子类（改 DEC-008）；(e)
+  upsert* 容错应抛特定非阻断错误而非纯吞——改 tolerantWrite 返回 Result（当前纯吞 + onWarning，最贴合
+  §3.2「不阻断」）。运行时原生模块约束见 ISS-005。新增索引列 / 多 commit 全量索引：按 DEC-010 追加迁移
+  v2。application 层 ports（TASK-015）若定 SqliteIndexRepositoryPort，适配层创建 Database +
+  调 runMigrations + 委托读写（结构类型兼容，本类无需 implements）。
+```
