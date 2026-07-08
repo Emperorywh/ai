@@ -15,3 +15,5 @@ export * from './schemas/task-schema.js'
 export * from './schemas/decision-issue-schema.js'
 // TASK-005：执行结果（.result.md）frontmatter Schema。
 export * from './schemas/result-schema.js'
+// TASK-006：审查结论（.review.md）frontmatter Schema。
+export * from './schemas/review-schema.js'
