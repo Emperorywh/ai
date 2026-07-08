@@ -7,5 +7,7 @@
  *
  * 后续任务（TASK-002 起）在此导出领域原语、枚举、Schema、状态机与规则。
  */
-// TASK-002：领域原语（枚举）。后续任务在此继续补齐 Schema、状态机与规则。
+// TASK-002：领域原语（枚举）。
 export * from './enums.js'
+// TASK-003：任务文件 frontmatter Schema。
+export * from './schemas/task-schema.js'
