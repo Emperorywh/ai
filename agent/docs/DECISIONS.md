@@ -110,3 +110,20 @@ consequences: "TASK-010/012 解析 TESTING.md 与任务 frontmatter 后可直接
 ```
 
 提议自 `TASK-009-core-verification-and-permissions.result.md`。验证 / 权限规则无运行时依赖、无边界冲突；三处 §16 解释（同名覆盖 requires_permissions 归属 / 路径重叠精度 / 启发式仅 warning）均为合理推断，待 Orchestrator 回写确认。
+
+---
+
+## DEC-007 frontmatter 解析边界语义：只认首部围栏、开而无闭或空围栏 → frontmatter=null、CRLF/LF 兼容、非法 YAML 抛错不静默
+
+```yaml
+id: DEC-007
+title: "frontmatter 解析边界语义：只认首部围栏、开而无闭或空围栏 → frontmatter=null、CRLF/LF 兼容、非法 YAML 抛错不静默"
+status: proposed
+scope: "infrastructure/fs"
+created_from_task: TASK-010
+decision: "TASK-010 对 §9/§10 frontmatter 模板未明文的解析边界作如下解释并落地：（1）只认首部围栏——opening fence 必须是文档第一行且内容恰为 ---；其后的正文内出现的 ---（如 Markdown 水平线）不被误判，closing fence 取开围栏之后第一个内容恰为 --- 的行；（2）有开围栏但无闭合围栏（--- 起手但全文无第二个 ---）→ 不报错、整篇作为 body、frontmatter=null（与「无 frontmatter」对称，避免把残缺围栏后的正文当 YAML）；（3）空围栏（---\\n---）→ frontmatter=null；（4）CRLF/LF 兼容——行内容比对统一剥离行尾 \\r\\n / \\n，body 保留原始换行不规范化；（5）围栏内 YAML 语法非法时由 yaml 库抛错，不静默吞错（交上层仓储 catch + Zod 校验）。serializeDocument 以 frontmatter===null/undefined 表「无 frontmatter」，不输出围栏直接返回 body，保证 parse ∘ serialize 深度相等。"
+rationale: "§8「只认首部围栏」与 §11「正文内 --- 不被误判」、§12「CRLF/LF 兼容」是明文要求；但「开而无闭」「空围栏」「非法 YAML」三处未明文。沿用业界 frontmatter 事实标准（gray-matter 约定）：开而无闭不抢正文（更安全，避免把一段以 --- 起手的正文误吞为 YAML）、空围栏等同无内容（null）、非法 YAML 抛错交上层处理（AGENTS.md「非法状态抛错、不静默」）。这几处选择对下游 TASK-011/012 仓储是稳定契约：仓储层据此先 parseDocument 拆结构，再用 core Schema 校验 frontmatter（null 或结构不符由 Zod 拒，天然把「无 frontmatter 的文档」判为非法）。round-trip 稳定性靠 yaml 库 stringify/parse 的互逆性 + serialize 对 null/undefined 的围栏省略对称处理共同保证。"
+consequences: "TASK-011/012 仓储读取流程：parseDocument → frontmatter 为 null 或 Zod 校验失败即判文档非法（throw / 返回错误）；合法则按需改 body 与 frontmatter 后 serializeDocument 回写。若 Orchestrator 认为「开而无闭」应改为抛错（而非整篇作 body），改 parseDocument 的 closeIdx===-1 分支一行（届时同步改测试与 DEC-007）；若认为应规范化 body 换行（CRLF→LF），改 body 拼接处（当前保留原样，与 §「保留正文原样」一致）。新增文档类型（未来 review/task）复用同一解析器，无需另起围栏逻辑。"
+```
+
+提议自 `TASK-010-infra-frontmatter-parser.result.md`。frontmatter 解析器仅依赖既有 `yaml` 库、零反向依赖、无边界冲突；五处解析边界语义（只认首部围栏 / 开而无闭 / 空围栏 / CRLF 兼容 / 非法抛错）均为标准 frontmatter 语义（兼容 gray-matter 约定），待 Orchestrator 回写确认。
