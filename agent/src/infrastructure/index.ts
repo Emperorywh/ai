@@ -10,3 +10,5 @@
 export * from './fs/frontmatter-parser.js'
 // TASK-011：任务 / 结果 / 审查文档仓储（读写即 Zod 校验）。
 export * from './fs/task-doc-repo.js'
+// TASK-012：全局文档（PROGRESS / DECISIONS / ISSUES）仓储与 section 合并。
+export * from './fs/global-doc-repo.js'
