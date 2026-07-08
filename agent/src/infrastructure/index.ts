@@ -12,3 +12,5 @@ export * from './fs/frontmatter-parser.js'
 export * from './fs/task-doc-repo.js'
 // TASK-012：全局文档（PROGRESS / DECISIONS / ISSUES）仓储与 section 合并。
 export * from './fs/global-doc-repo.js'
+// TASK-013：SQLite 索引表 DDL 与前向迁移（runMigrations，幂等）。
+export * from './sqlite/schema.js'
