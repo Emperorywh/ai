@@ -69,7 +69,7 @@ workflow_outputs:
 ## 8. 架构约束
 
 - 仅依赖 `src/core/enums.ts` 与 Zod。
-- `id` 用正则 `^TASK-\d{3,}$`；`status` 初值虽由任务定，但 Schema 允许全部合法 `TaskStatus`（draft 由 PLAN 保证）。
+- `id` 用正则 `^TASK-\d+$`（至少一位数字，复用 enums.ts 的 TaskIdSchema）；`status` 初值虽由任务定，但 Schema 允许全部合法 `TaskStatus`（draft 由 PLAN 保证）。
 - `context_pack` 三子字段均为数组，允许空数组。
 
 ## 9. 数据流和状态流要求

@@ -343,7 +343,7 @@ docs/
 - 影响范围。
 - 后续约束。
 
-为支持 Zod Schema 校验和 SQLite 重建索引，每条决策必须保留稳定机器字段，至少包括 `id`、`title`、`status`、`scope`、`created_from_task`、`decision`、`rationale` 和 `consequences`；这些字段应使用 YAML frontmatter、fenced YAML block 或统一 YAML 列表表达，纯 Markdown 标题不视为机器字段。Markdown 正文可以补充解释，但不得替代这些字段。该字段集与第 10 节 `global_update_requests.decisions` 提议项保持一致，Task Executor 提议时 `id` 留空，由 Orchestrator 回写时统一分配。`created_from_task` 在任务阶段填任务 `id`（如 `TASK-003`）；SPEC / ARCHITECTURE 阶段产生的决策无对应任务，填阶段标识 `SPEC` 或 `ARCHITECTURE`，Zod Schema 将其与任务 `id` 一并作为合法枚举值。
+为支持 Zod Schema 校验和 SQLite 重建索引，每条决策必须保留稳定机器字段，至少包括 `id`、`title`、`status`、`scope`、`created_from_task`、`decision`、`rationale` 和 `consequences`；这些字段应使用 YAML frontmatter、fenced YAML block 或统一 YAML 列表表达，纯 Markdown 标题不视为机器字段。Markdown 正文可以补充解释，但不得替代这些字段。该字段集与第 10 节 `global_update_requests.decisions` 提议项保持一致，Task Executor 提议时 `id` 留空，由 Orchestrator 回写时统一分配。`created_from_task` 在任务阶段填任务 `id`（如 `TASK-003`）；SPEC / ARCHITECTURE 阶段产生的决策无对应任务，填阶段标识 `SPEC` 或 `ARCHITECTURE`，Zod Schema 将其与任务 `id` 一并作为合法枚举值。各枚举字段的权威取值（由 `src/core/enums.ts` 实现）：`status`（`DecisionStatus`）取 `proposed`（提议中，尚未确认回写）/ `accepted`（已确认接受）/ `superseded`（被新决策取代）。
 
 ### 6.7 docs/ISSUES.md
 
@@ -358,7 +358,7 @@ docs/
 - 需要谁确认。
 - 建议处理方式。
 
-为支持 Zod Schema 校验和 SQLite 重建索引，每个问题必须保留稳定机器字段，至少包括 `id`、`title`、`status`、`severity`、`scope`、`created_from_task`、`owner` 和 `recommended_action`；这些字段应使用 YAML frontmatter、fenced YAML block 或统一 YAML 列表表达，纯 Markdown 标题不视为机器字段。Markdown 正文可以补充上下文，但不得替代这些字段。该字段集与第 10 节 `global_update_requests.issues` 提议项保持一致，Task Executor 提议时 `id` 留空，由 Orchestrator 回写时统一分配。`created_from_task` 在任务阶段填任务 `id`；SPEC / ARCHITECTURE 审查阶段产生的问题填 `SPEC` 或 `ARCHITECTURE`，与任务 `id` 一并作为 Zod Schema 合法枚举值。
+为支持 Zod Schema 校验和 SQLite 重建索引，每个问题必须保留稳定机器字段，至少包括 `id`、`title`、`status`、`severity`、`scope`、`created_from_task`、`owner` 和 `recommended_action`；这些字段应使用 YAML frontmatter、fenced YAML block 或统一 YAML 列表表达，纯 Markdown 标题不视为机器字段。Markdown 正文可以补充上下文，但不得替代这些字段。该字段集与第 10 节 `global_update_requests.issues` 提议项保持一致，Task Executor 提议时 `id` 留空，由 Orchestrator 回写时统一分配。`created_from_task` 在任务阶段填任务 `id`；SPEC / ARCHITECTURE 审查阶段产生的问题填 `SPEC` 或 `ARCHITECTURE`，与任务 `id` 一并作为 Zod Schema 合法枚举值。各枚举字段的权威取值（由 `src/core/enums.ts` 实现）：`status`（`IssueStatus`）取 `open` / `resolved`；`severity`（`IssueSeverity`）取 `low` / `medium` / `high` / `critical`（由轻到重）。
 
 ### 6.8 docs/TESTING.md
 

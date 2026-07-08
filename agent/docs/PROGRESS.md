@@ -38,15 +38,13 @@ status: active
 - 基础依赖已在 `package.json` 一次性声明（zod / yaml / better-sqlite3 / commander / typescript / vitest / eslint）；后续任务默认**不得新增依赖**，确需新增时在 `.result.md` 提出扩权 / 新增依赖任务建议。
 - `tsconfig` 已启用 `strict` + `noUncheckedIndexedAccess`；`tsc --noEmit` 同时覆盖 `src` 与 `test`。
 - 工程为 ESM（`"type": "module"`），源码统一使用 ESM 导入。
-- 后续 Schema 任务（TASK-005…006）从 `src/core` 导入各 `XxxSchema` 复用，勿另起取值定义；`created_from_task` / 来源类字段用 `ScopeSchema` 校验。`DecisionStatus` / `IssueStatus` / `IssueSeverity` 当前为基于 Readme §10 示例 + 工作流语义的最小推断集，Readme 未显式枚举完整取值，见 ISSUES。
-- 后续 frontmatter / 索引 / 解析任务从 `src/core` 导入 `TaskFrontmatterSchema` / `ContextPackSchema` / `WorkflowOutputsSchema` 复用，勿另起结构定义。必填字段集为 `id / title / status / layer / allowed_paths / verification / context_pack / workflow_outputs`；`depends_on / forbidden_paths / permissions / no_review / restart_on_retry` 缺失取默认（`[]` / `false`）。任务文件模板的 `verification` 是字符串数组，与 `.result.md` 的对象数组形态（§10）不是同一结构，切勿混用。`id` 字段复用 `enums.ts` 的 `TaskIdSchema`（`/^TASK-\d+$/`），与任务 §8 字面的 `/^TASK-\d{3,}$/` 存在精度差异，见 ISSUES。
-- Result Schema（TASK-005）从 `src/core` 导入 `DecisionSchema` / `IssueSchema` 组装 `global_update_requests.decisions / issues` 容器，勿另起结构定义。`DecisionSchema` 必填 8 字段（`id / title / status / scope / created_from_task / decision / rationale / consequences`），`IssueSchema` 必填 8 字段（`id / title / status / severity / scope / created_from_task / owner / recommended_action`），缺失即拒。`id` 允许空串（提议态），`DEC-XXX` / `ISS-XXX` 格式校验是 application 层 id 分配职责（TASK-020），不在 Schema 内。`created_from_task` 复用 `ScopeSchema`（`SPEC` / `ARCHITECTURE` / `TASK-\d+`）；`scope` 当前为自由文本（非空），与任务 §8 字面「用枚举」存在张力，见 ISSUES。
+- 后续 Schema 任务（TASK-005…006）从 `src/core` 导入各 `XxxSchema` 复用，勿另起取值定义；`created_from_task` / 来源类字段用 `ScopeSchema` 校验。`DecisionStatus` / `IssueStatus` / `IssueSeverity` 已由 Orchestrator 确认为权威取值（DEC-001 / ISS-001），并回写 Readme §6.6 / §6.7。
+- 后续 frontmatter / 索引 / 解析任务从 `src/core` 导入 `TaskFrontmatterSchema` / `ContextPackSchema` / `WorkflowOutputsSchema` 复用，勿另起结构定义。必填字段集为 `id / title / status / layer / allowed_paths / verification / context_pack / workflow_outputs`；`depends_on / forbidden_paths / permissions / no_review / restart_on_retry` 缺失取默认（`[]` / `false`）。任务文件模板的 `verification` 是字符串数组，与 `.result.md` 的对象数组形态（§10）不是同一结构，切勿混用。`id` 字段复用 `enums.ts` 的 `TaskIdSchema`（`/^TASK-\d+$/`）；DEC-002 / ISS-002 已裁定统一为 `\d+`，TASK-003 §8 已回写。
+- Result Schema（TASK-005）从 `src/core` 导入 `DecisionSchema` / `IssueSchema` 组装 `global_update_requests.decisions / issues` 容器，勿另起结构定义。`DecisionSchema` 必填 8 字段（`id / title / status / scope / created_from_task / decision / rationale / consequences`），`IssueSchema` 必填 8 字段（`id / title / status / severity / scope / created_from_task / owner / recommended_action`），缺失即拒。`id` 允许空串（提议态），`DEC-XXX` / `ISS-XXX` 格式校验是 application 层 id 分配职责（TASK-020），不在 Schema 内。`created_from_task` 复用 `ScopeSchema`（`SPEC` / `ARCHITECTURE` / `TASK-\d+`）；`scope` 为自由文本影响范围（非空），DEC-003 / ISS-003 已确认此设计。
 
 ## 当前未解决问题摘要
 
-1. ISS-001 — Readme.md 未显式枚举 `DecisionStatus` / `IssueStatus` / `IssueSeverity` 完整取值（TASK-002 遗留，medium / open）；已由 `enums.ts` 最小推断集覆盖并标注，待 Orchestrator 在 Readme/文档确认。
-2. ISS-003（关联 DEC-003）— `scope` 字段语义张力（TASK-004，medium / open）：任务 §8「status/scope/severity 用枚举」与 `enums.ts` `ScopeSchema` 注释倾向于 scope 为枚举，但 §6.6「影响范围」语义、§10 正例（`scope: state` / `scope: api`）、TASK-003 已提交 result.md（`scope: core`）均为自由文本；TASK-004 按自由文本落地，待 Orchestrator 确认统一方向。
-3. ISS-002（关联 DEC-002）— 任务文件 id 正则精度不一致（TASK-003 遗留，medium / open）：§8 写 `^TASK-\d{3,}$`，`enums.ts` 的 `TaskIdSchema` 为 `^TASK-\d+$`，TASK-003 按单一来源复用后者，差异待 Orchestrator 确认统一方向。
+暂无开放问题。ISS-001 / ISS-002 / ISS-003 已于 2026-07-08 全部裁定解决，对应 DEC-001 / DEC-002 / DEC-003 均置 `accepted`；详见 `docs/ISSUES.md` 与 `docs/DECISIONS.md`。
 
 ## 建议下一个任务
 

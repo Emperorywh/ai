@@ -69,9 +69,7 @@ export type WorkflowOutputs = z.infer<typeof WorkflowOutputsSchema>
  * 任务文件 frontmatter schema。
  *
  * 覆盖 §9 模板全部机器字段：
- *   - id：复用 enums.ts 的 TaskIdSchema（开放集合，形如 TASK-\d+）。任务 §8
- *     示例正则为 ^TASK-\d{3,}$，与 TaskIdSchema 的 \d+ 存在精度差异，本任务
- *     按「单一来源」复用更宽松的 \d+（详见 .result.md issue 与决策）。
+ *   - id：复用 enums.ts 的 TaskIdSchema（开放集合，形如 TASK-\d+，至少一位数字）。
  *   - status：接受全部合法 TaskStatus，不强制初值（初值 draft 由 PLAN 保证，
  *     见任务 §8）。
  *

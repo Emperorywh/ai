@@ -199,8 +199,9 @@ export type TaskId = string
  * Scope schema：阶段标识 ∪ 任务 id（异构联合）。
  *
  * 合法值 = `'SPEC'` | `'ARCHITECTURE'` | 任意匹配 `TASK-\d+` 的任务 id。
- * 上层复合 Schema（TASK-004 决策 / 问题 Schema）直接复用本 schema
- * 校验 created_from_task / scope 字段，无需重复实现 union。
+ * 上层复合 Schema（TASK-004 决策 / 问题 Schema）复用本 schema 校验
+ * `created_from_task` 字段，无需重复实现 union。注意：决策 / 问题记录中独立的
+ * `scope`（影响范围）字段是自由文本（见 docs/DECISIONS.md DEC-003），不使用本 schema。
  */
 export const ScopeSchema = z.union([ScopeStageSchema, TaskIdSchema])
 export type Scope = z.infer<typeof ScopeSchema>
@@ -210,15 +211,11 @@ export type Scope = z.infer<typeof ScopeSchema>
  * ============================================================ */
 
 /**
- * DecisionStatus 枚举。
+ * DecisionStatus 枚举（Readme.md §6.6 权威取值）。
  *
- * ⚠ 取值依据（需 Orchestrator 在 Readme.md / docs 中最终确认，见 .result.md issues）：
- *   - `accepted`：Readme.md §10 decisions 示例值，Orchestrator 回写确认后的稳态。
- *   - `proposed`：基于「Task Executor 提议（id 留空）→ Orchestrator 回写分配 id」
- *     工作流（§6.6）推断的提议态。
- *   - `superseded`：基于 ADR 长期生命周期推断——被新决策取代的旧决策应保留记录
- *     并标注，而非删除（符合「优先长期架构正确性」原则）。
- * Readme.md 未显式枚举本字段完整取值；本集合为最小推断集，待 Orchestrator 确认。
+ *   - `proposed`：提议中，尚未由 Orchestrator 确认回写（Task Executor 提议时 id 留空）。
+ *   - `accepted`：已确认接受（Orchestrator 回写确认后的稳态）。
+ *   - `superseded`：被后续新决策取代——旧决策保留记录并标注，而非删除。
  */
 export const DecisionStatusSchema = z.enum([
   'proposed', // 提议中，尚未由 Orchestrator 确认回写
@@ -232,13 +229,10 @@ export type DecisionStatus = z.infer<typeof DecisionStatusSchema>
  * ============================================================ */
 
 /**
- * IssueStatus 枚举。
+ * IssueStatus 枚举（Readme.md §6.7 权威取值）。
  *
- * ⚠ 取值依据（需 Orchestrator 在 Readme.md / docs 中最终确认，见 .result.md issues）：
- *   - `open`：Readme.md §10 issues 示例值。
- *   - `resolved`：基于问题生命周期（§17「按 severity 与停留时长的升级提醒」
- *     暗示问题存在 open → 解决 的流转）推断的终态。
- * Readme.md 未显式枚举本字段完整取值；本集合为最小推断集。
+ *   - `open`：未解决。
+ *   - `resolved`：已解决。
  */
 export const IssueStatusSchema = z.enum([
   'open', // 未解决（Readme.md §10 示例）
@@ -251,13 +245,10 @@ export type IssueStatus = z.infer<typeof IssueStatusSchema>
  * ============================================================ */
 
 /**
- * IssueSeverity 枚举。
+ * IssueSeverity 枚举（Readme.md §6.7 权威取值）。
  *
- * ⚠ 取值依据（需 Orchestrator 在 Readme.md / docs 中最终确认，见 .result.md issues）：
- *   - `high`：Readme.md §10 issues 示例值。
- *   - `low` / `medium` / `critical`：§17「升级提醒」暗示存在多个级别，
- *     此处采用业界通用的 4 级分级补全。
- * Readme.md 未显式枚举本字段完整取值；本集合为最小推断集。
+ *   - `low` / `medium` / `high` / `critical`：由轻到重 4 级分级；
+ *     §17「按 severity 与停留时长的升级提醒」按级别触发升级。
  */
 export const IssueSeveritySchema = z.enum([
   'low', // 低

@@ -69,7 +69,7 @@ workflow_outputs:
 ## 8. 架构约束
 
 - 仅依赖 `core/enums.ts` + Zod。
-- `id` 用 `z.string()` 允许空（分配前）；`status/scope/severity` 用枚举。
+- `id` 用 `z.string()` 允许空（分配前）；`status`（DecisionStatus/IssueStatus）与 `severity`（IssueSeverity）用枚举；`scope` 为自由文本影响范围（非空），不套枚举（见 DEC-003）。
 - 字段集必须与 §6.6/§6.7 列出的「至少包括」逐字对齐。
 
 ## 9. 数据流和状态流要求
