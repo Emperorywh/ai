@@ -19,3 +19,6 @@ export * from './schemas/result-schema.js'
 export * from './schemas/review-schema.js'
 // TASK-007：任务状态机（Readme.md §7）。
 export * from './state-machine.js'
+// TASK-008：依赖级联（传递闭包）与执行状态映射（Readme.md §7 / §10）。
+export * from './rules/dependency-rules.js'
+export * from './rules/status-mapping.js'
