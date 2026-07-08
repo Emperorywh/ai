@@ -14,3 +14,5 @@ export * from './fs/task-doc-repo.js'
 export * from './fs/global-doc-repo.js'
 // TASK-013：SQLite 索引表 DDL 与前向迁移（runMigrations，幂等）。
 export * from './sqlite/schema.js'
+// TASK-014：SQLite 索引仓储（upsert / query / rebuildFromDocs，写入容错不阻断）。
+export * from './sqlite/index-repo.js'
