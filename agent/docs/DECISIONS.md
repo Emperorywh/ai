@@ -161,3 +161,20 @@ consequences: "TASK-020 合并编排调用本仓储：重读全局文档 → 逐
 ```
 
 提议自 `TASK-012-infra-global-doc-repo.result.md`。全局文档仓储仅依赖既有 `zod`/`yaml` + core/frontmatter-parser、零反向依赖、无边界冲突；section 合并与条目去重的六处关键解释（纯变换不做文件 I/O / section 标题层级精确匹配 + 子节不截断父节 / 缺失 section 两种 mode 均视为新建 / decisions·issues 用 fenced yaml block 沿用现有约定 / readDecisions·readIssues 跳过非本类损坏块 / 新建 section 默认 `##`）均为 §2/§3.2/§6.5/§6.6/§6.7/§8/§12 的合理落地，待 Orchestrator 回写确认。
+
+---
+
+## DEC-010 SQLite schema 迁移设计与列约束：版本表为唯一事实来源（前向 only、事务性、IF NOT EXISTS 仅限 bootstrap）、JSON 文本列 DEFAULT、文本主键显式 NOT NULL、executions 以 task_id 为主键
+
+```yaml
+id: DEC-010
+title: "SQLite schema 迁移设计与列约束：版本表为唯一事实来源（前向 only、事务性、IF NOT EXISTS 仅限 bootstrap）、JSON 文本列 DEFAULT、文本主键显式 NOT NULL、executions 以 task_id 为主键"
+status: proposed
+scope: "infrastructure/sqlite"
+created_from_task: TASK-013
+decision: "TASK-013 对 §3.1/§3.2/§8 未明文的迁移机制与列约束作如下解释并落地：（1）迁移机制——schema_migrations(version,name,applied_at) 版本表为「已应用版本」的唯一事实来源；MIGRATIONS 数组（{version,name,up} 前向 only、按 version 升序）为迁移定义单一来源；runMigrations 逐条检查版本表、未应用则 db.transaction 包「up + INSERT 版本记录」原子提交，up 抛错整条回滚（含已建表）+ 错误冒泡不静默；forward-only 不回滚、不复用已用版本号。（2）IF NOT EXISTS 边界——迁移版本表用 CREATE TABLE IF NOT EXISTS（它是 bootstrap：必须先存在才能查询已应用版本，重复调用时表已存在须 no-op）；4 张索引表 DDL 用裸 CREATE TABLE（由版本表守卫「建表只发生一次」，不用 IF NOT EXISTS 以保持迁移显式、避免掩盖 schema 漂移）。（3）列类型与约束——全部 TEXT（SQLite type affinity，派生索引无需强类型）；depends_on/allowed_paths/permissions 为 JSON 文本列（§8 明文「以 JSON 文本列存储」）且 NOT NULL DEFAULT '[]'（写入可省略、读出 JSON.parse），issues.owner NOT NULL DEFAULT ''（空串表「尚未指派」与 ISSUES.md owner 约定一致）；文本主键（id / task_id）显式 NOT NULL（SQLite 对非 INTEGER PRIMARY KEY 不隐式 NOT NULL——历史 quirk，显式声明符合 SQL 标准、杜绝 NULL 主键行）。（4）executions 以 task_id 为主键——一行 = 一个任务的「最近一次执行摘要」（§3.2「最近一次执行摘要」语义），任务重跑用 INSERT OR REPLACE 覆盖；commit_hash/commit_message/author/time 为单值列存「代表性 commit」（execution_commits 数组在索引中取首条/最新条，多 commit 全量索引留待后续需要时由 TASK-014+ 扩展，§3.2 为「至少包括」不强制全量）；review_result/next_action/commit_* 可空（任务可能尚未审查或无 commit）。（5）applied_at 用 new Date().toISOString()（ISO8601 UTC，与 reviewed_at §15 约定一致）。（6）表名 / SCHEMA_VERSION 导出为常量供 TASK-014 引用避免魔法字符串。"
+rationale: "§3.2 明文 SQLite 是「派生存储、非事实来源、写入失败不阻断、可 rebuild-index 全量重建」——索引 schema 应简单、可重建、可演进。版本表 + 前向迁移是业界标准模式（knex / TypeORM / prisma migration 均如此），单一事实来源 + 事务原子提交保证「建表与版本记录同进退」、不出现「表建了但版本没记」的中间态。IF NOT EXISTS 仅限 bootstrap 的迁移表：数据表若用 IF NOT EXISTS 会在「版本表丢失但表存在」的异常态静默跳过迁移、掩盖 schema 漂移，裸 CREATE TABLE 让迁移显式、异常态显式失败。JSON 文本列是 §8 明文要求（SQLite 无原生数组类型）；DEFAULT '[]' 让 TASK-014 写入无依赖的任务时可省略 JSON 列、降低出错面。文本主键显式 NOT NULL 规避 SQLite 非 INTEGER 主键允许 NULL 的历史 quirk（SQL 标准要求 PK 隐式 NOT NULL，SQLite 因早期 bug 不强制，显式声明最安全）。executions 以 task_id 为主键：§3.2「最近一次执行摘要」是 per-task 的最新一份，PRIMARY KEY(task_id) + INSERT OR REPLACE 天然支持「重跑覆盖」；commit 单值列是任务 §2 DDL 的字面（executions(task_id,...,commit_hash,commit_message,author,time)），代表性 commit 满足「至少包括」清单，全量 execution_commits 索引超出本任务范围。applied_at UTC 与项目 datetime 约定一致。schema.ts 用 type-only import better-sqlite3（只取实例类型、自身不开连接）：DDL 与迁移编排是纯 SQL 字符串 + 对传入 db 的方法调用，不需要构造 Database，连接归属 TASK-014 / cli composition root，职责单一。"
+consequences: "TASK-014 索引仓储：构造 / 首次写入前调用 runMigrations(db) 建表（幂等可重复）；读写用 prepare + run/get/all；depends_on/allowed_paths/permissions 写前 JSON.stringify、读后 JSON.parse；executions 重跑用 INSERT OR REPLACE 覆盖（task_id 主键）；表名用导出常量。新增列 / 表：按 version 递增追加 MIGRATIONS（如 v2 add-column-x），每条在事务内 up + 写版本，不复用版本号、不回滚。若 Orchestrator 认为：(a) executions 应支持多 commit 全量索引——新增 execution_commits(task_id,hash,message,author,time) 表 + 迁移 v2（届时改测试与 DEC-010）；(b) 索引表应用 IF NOT EXISTS 以容忍异常态——改 createInitialSchema 各 CREATE TABLE（但会掩盖 schema 漂移，不推荐）；(c) applied_at 应含本地时区——改 .toISOString() 为带 offset（当前 UTC，与 §15 一致）；(d) 应加索引（如 tasks.status 查询加速）——新增迁移加 CREATE INDEX。运行时原生模块约束见 ISS-005（Node 22 ABI 127 / 或装编译工具链重编译）。application 层 ports（TASK-015）若定 SqliteIndexRepositoryPort，适配层创建 Database 实例 + 调 runMigrations + 委托读写（结构类型兼容）。"
+```
+
+提议自 `TASK-013-infra-sqlite-schema.result.md`。SQLite schema 仅 type-only import 既有 `better-sqlite3` + `@types/better-sqlite3`、零反向依赖、无边界冲突；迁移机制与列约束的六处关键解释（版本表唯一事实来源 + 前向 only 事务性 / IF NOT EXISTS 仅限 bootstrap / JSON 文本列 DEFAULT / 文本主键显式 NOT NULL / executions task_id 主键 + commit 单值列 / applied_at UTC）均为 §3.1/§3.2/§8 的合理落地，待 Orchestrator 回写确认。

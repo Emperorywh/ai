@@ -76,3 +76,20 @@ recommended_action: "VerificationResultSchema 是 .result.md 的 verification.re
 ```
 
 提议自 `TASK-005-core-result-schema.result.md`。低优先级，不阻塞后续任务。
+
+---
+
+## ISS-005 better-sqlite3@11.10.0 无 Node 25（ABI 141）预编译、本机无 VS Build Tools 无法重编译，需 Node 22（ABI 127）运行
+
+```yaml
+id: ISS-005
+title: "better-sqlite3@11.10.0 无 Node 25（ABI 141）预编译、本机无 VS Build Tools 无法重编译，需 Node 22（ABI 127）运行"
+status: open
+severity: low
+scope: "infrastructure/sqlite"
+created_from_task: TASK-013
+owner: ""
+recommended_action: "better-sqlite3 是原生模块，预编译二进制绑定特定 NODE_MODULE_VERSION。当前环境 Node v25.9.0（ABI 141）无对应预编译；nvm 可用的 Node 22.0.0（ABI 127）有预编译。本任务实现期间已用 prebuild-install（Node 22 运行）补回被先前 npm rebuild 失败清空的 build/Release/better_sqlite3.node，并将 nvm 全局切到 Node 22 完成全绿验证。影响：开发者与 CI 需在 Node 22（或装有 VS Build Tools + Desktop C++ 工作负载可 node-gyp 重编译的版本）下运行本项目的 SQLite 相关测试 / 命令；package.json engines \"node\": \">=20\" 实际受原生模块约束。建议（任选其一，待 Orchestrator / 用户裁定）：(A) 固定项目 Node 版本为 22——加 .nvmrc（22）或收紧 engines 上界，并在文档标注；(B) 待 better-sqlite3 发布 Node 25 预编译后升级（npm i better-sqlite3@latest 触发 prebuild-install 重取）；(C) CI / 本机预装 VS Build Tools + Desktop C++ 工作负载以支持任意 Node 版本下 node-gyp 重编译。不阻塞 TASK-013 验收（已用 Node 22 全绿），但 TASK-014 及后续依赖 SQLite 的 CLI 任务同样受此约束。注：当前 nvm 全局已切到 Node 22（用户原为 Node 25）。"
+```
+
+提议自 `TASK-013-infra-sqlite-schema.result.md`。实现期间处理：原二进制为 Node 22（ABI 127）编译、Node 25 加载报 `NODE_MODULE_VERSION` 不匹配；`npm rebuild` 失败（无 VS Build Tools 且 Node 25 超 VS2017 支持范围）并清空了 build/Release 原二进制；改用 `prebuild-install`（Node 22 运行）从 GitHub release 补回 ABI 127 预编译，`nvm use 22.0.0` 后 typecheck/test/lint 全绿。低优先级（workaround 存在：用 Node 22），待 Orchestrator 裁定处理方向。
