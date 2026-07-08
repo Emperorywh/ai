@@ -11,3 +11,5 @@
 export * from './enums.js'
 // TASK-003：任务文件 frontmatter Schema。
 export * from './schemas/task-schema.js'
+// TASK-004：决策与问题机器字段 Schema。
+export * from './schemas/decision-issue-schema.js'
