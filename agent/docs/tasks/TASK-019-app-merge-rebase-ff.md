@@ -5,6 +5,7 @@ status: draft
 layer: domain
 depends_on:
   - TASK-011
+  - TASK-015
   - TASK-016
   - TASK-018
 allowed_paths:
@@ -30,8 +31,7 @@ context_pack:
     - Readme.md#32-并行执行与-worktree-合并策略
   source_files:
     - src/application/scheduler.ts
-    - src/infrastructure/git/worktree-adapter.ts
-    - src/infrastructure/fs/task-doc-repo.ts
+    - src/application/ports.ts
 workflow_outputs:
   result_file: docs/tasks/TASK-019-app-merge-rebase-ff.result.md
 ---
@@ -74,6 +74,7 @@ workflow_outputs:
 
 ## 8. 架构约束
 
+- 对 worktree 与文档仓储的依赖经 `application/ports.ts` 的 `WorktreePort`/`TaskDocRepositoryPort`（TASK-015 建立），不直接 import infra 实现类。
 - 审计元信息必须在 rebase 之后、ff 之前回填，确保 hash 与主分支历史一致（§3.2）。
 - rebase 前旧 hash 一律丢弃，不作审计依据。
 - 不产生 merge commit。

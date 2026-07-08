@@ -10,6 +10,7 @@ allowed_paths:
   - src/cli/commands/init.ts
   - src/cli/index.ts
   - test/cli/init.test.ts
+  - package.json
 forbidden_paths:
   - src/core
   - src/application
@@ -56,6 +57,7 @@ workflow_outputs:
 ## 5. 修改范围
 
 - `src/cli/framework.ts`、`src/cli/commands/init.ts`、`src/cli/index.ts`、`test/cli/init.test.ts`
+- `package.json`（仅限注册 CLI `bin` 入口与命令名，不改 `scripts`/`dependencies` 等其它字段）
 
 ## 6. 禁止修改范围
 
@@ -79,6 +81,7 @@ workflow_outputs:
 ## 10. 预期新增或修改文件
 
 - `src/cli/framework.ts`、`src/cli/commands/init.ts`、`test/cli/init.test.ts`、`src/cli/index.ts`
+- `package.json`（追加 `bin` 字段）
 
 ## 11. 验收标准
 

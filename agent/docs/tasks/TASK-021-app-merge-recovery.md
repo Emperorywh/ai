@@ -4,6 +4,8 @@ title: App 合并：幂等恢复
 status: draft
 layer: domain
 depends_on:
+  - TASK-015
+  - TASK-018
   - TASK-019
   - TASK-020
 allowed_paths:
@@ -30,7 +32,7 @@ context_pack:
   source_files:
     - src/application/merge/rebase-ff.ts
     - src/application/merge/section-writeback.ts
-    - src/infrastructure/git/worktree-adapter.ts
+    - src/application/ports.ts
 workflow_outputs:
   result_file: docs/tasks/TASK-021-app-merge-recovery.result.md
 ---
@@ -73,7 +75,7 @@ workflow_outputs:
 
 ## 8. 架构约束
 
-- 恢复判定只依赖 git 状态 + frontmatter `status`，可完全重建（§3.2）。
+- 对 worktree 的操作经 `application/ports.ts` 的 `WorktreePort`（TASK-015 建立），不直接 import infra 实现类；恢复判定只依赖 git 状态 + frontmatter `status`，可完全重建（§3.2）。
 - 不依赖外部「合并进度文件」。
 
 ## 9. 数据流和状态流要求

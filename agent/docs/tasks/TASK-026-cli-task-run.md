@@ -54,7 +54,7 @@ workflow_outputs:
 
 ## 2. 当前目标
 
-实现 `task:run <taskId>`：按依赖检查前置 done → 刷新 context_pack 并回写 frontmatter → create worktree → 选 Executor（SDK 或 DryRun）→ 执行 → 读 result → `applyResult` 流转 → 触发合并（调 TASK-019/020/021）→ 失败走恢复与 ISSUES 登记。
+实现 `task:run <taskId>`：按依赖检查前置 done → 刷新 context_pack 并回写 frontmatter → create worktree → 按 R7 策略恢复 worktree 内 `node_modules`（串行默认复用主工作区，否则按子任务 `install_dependencies` 能力在 worktree 内重装）→ 选 Executor（SDK 或 DryRun）→ 执行 → 读 result → `applyResult` 流转 → 触发合并（调 TASK-019/020/021）→ 失败走恢复与 ISSUES 登记。
 
 ## 3. 所属层级
 

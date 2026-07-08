@@ -56,7 +56,7 @@ workflow_outputs:
 
 ## 4. 必读文件
 
-- AGENTS.md、docs/ARCHITECTURE.md、docs/PROGRESS.md、docs/tasks/TASK-014-infra-sqlite-index-repo.result.md 之前为任务文件本身
+- AGENTS.md、docs/ARCHITECTURE.md、docs/PROGRESS.md、docs/tasks/TASK-014-infra-sqlite-index-repo.md
 - Readme.md §3.1/§3.2
 
 ## 5. 修改范围

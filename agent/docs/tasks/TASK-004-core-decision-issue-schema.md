@@ -50,7 +50,7 @@ workflow_outputs:
 
 ## 4. 必读文件
 
-- AGENTS.md、docs/ARCHITECTURE.md、docs/PROGRESS.md、docs/tasks/TASK-004-core-decision-issue-schema.result.md 之前为任务文件本身
+- AGENTS.md、docs/ARCHITECTURE.md、docs/PROGRESS.md、docs/tasks/TASK-004-core-decision-issue-schema.md
 - Readme.md §6.6/§6.7/§10 相关章节
 
 ## 5. 修改范围

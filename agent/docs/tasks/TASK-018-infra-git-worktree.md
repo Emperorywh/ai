@@ -88,6 +88,7 @@ workflow_outputs:
 ## 12. 风险提示
 
 - Windows 下 git 路径与 worktree 路径分隔符；子进程错误需捕获并转为领域错误。
+- worktree 不自动复制 `node_modules`：本适配器只负责 worktree/分支本身；`node_modules` 的复用（串行模式复用主工作区）或在独立 worktree 内重新安装，由 CLI 层（TASK-026 `task:run`）在 `create` 后按 `install_dependencies` 能力处理，不属于本任务。
 
 ## 13. 结束时必须产出（Task Executor 负责）
 

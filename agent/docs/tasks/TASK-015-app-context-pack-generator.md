@@ -8,6 +8,7 @@ depends_on:
   - TASK-011
 allowed_paths:
   - src/application/context-pack-generator.ts
+  - src/application/ports.ts
   - src/application/index.ts
   - test/application/context-pack-generator.test.ts
 forbidden_paths:
@@ -45,6 +46,7 @@ workflow_outputs:
 实现：
 - `computeContextPack(task, { dependencyResults })`：应用并集规则，产出最终注入清单。
 - `refreshSourceFiles(task, dependencyResults)`：用已完成依赖的 `.result.md` 文件清单替换预填 `source_files`，返回需回写 frontmatter 的新值。
+- 建立 `src/application/ports.ts`：定义 application→infrastructure 的窄接口 `TaskDocRepositoryPort`、`GlobalDocRepositoryPort`、`WorktreePort`（方法集覆盖 TASK-017/019/020 所需的任务/结果/审查读写与 worktree 操作，供后续 application 任务复用，infra 层不显式 `implements`、由 CLI 层 wiring 注入）。
 
 ## 3. 所属层级
 
@@ -57,7 +59,7 @@ workflow_outputs:
 
 ## 5. 修改范围
 
-- `src/application/context-pack-generator.ts`、`src/application/index.ts`、`test/application/context-pack-generator.test.ts`
+- `src/application/context-pack-generator.ts`、`src/application/ports.ts`、`src/application/index.ts`、`test/application/context-pack-generator.test.ts`
 
 ## 6. 禁止修改范围
 
@@ -67,10 +69,11 @@ workflow_outputs:
 
 - 不执行 frontmatter 回写（由状态编排 TASK-017 在 ready→running 时调用仓储写回）。
 - 不注入文档内容（注入是 SDK 适配器 TASK-022 的职责）。
+- 不实现 infra 具体类（`ports.ts` 只定义窄接口，实现归 TASK-011/012/018）。
 
 ## 8. 架构约束
 
-- 依赖 core Task Schema（类型）+ 文档仓储接口（注入，不耦合具体实现）。
+- 依赖 core Task Schema（类型）；对 infra 的依赖一律经本任务建立的 `application/ports.ts` 接口，不直接 import infra 实现类（`task-doc-repo.ts` 仅作定义接口形状的参考）。
 - 必读核心（AGENTS/ARCHITECTURE/PROGRESS/任务文件）硬性下限，不得被 frontmatter 省略。
 - 不得扩展范围：最终清单 ⊆ 候选来源。
 
@@ -80,7 +83,7 @@ workflow_outputs:
 
 ## 10. 预期新增或修改文件
 
-- `src/application/context-pack-generator.ts`、`test/application/context-pack-generator.test.ts`、`src/application/index.ts`
+- `src/application/context-pack-generator.ts`、`src/application/ports.ts`、`test/application/context-pack-generator.test.ts`、`src/application/index.ts`
 
 ## 11. 验收标准
 

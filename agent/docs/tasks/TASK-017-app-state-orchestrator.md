@@ -7,6 +7,7 @@ depends_on:
   - TASK-007
   - TASK-008
   - TASK-011
+  - TASK-015
 allowed_paths:
   - src/application/state-orchestrator.ts
   - src/application/index.ts
@@ -34,7 +35,7 @@ context_pack:
     - src/core/state-machine.ts
     - src/core/rules/dependency-rules.ts
     - src/core/rules/status-mapping.ts
-    - src/infrastructure/fs/task-doc-repo.ts
+    - src/application/ports.ts
 workflow_outputs:
   result_file: docs/tasks/TASK-017-app-state-orchestrator.result.md
 ---
@@ -77,7 +78,7 @@ workflow_outputs:
 
 ## 8. 架构约束
 
-- 依赖 core 状态机 + 规则 + 文档仓储接口；不直接依赖 SQLite。
+- 依赖 core 状态机 + 规则；对文档仓储的依赖经 `application/ports.ts` 的 `TaskDocRepositoryPort`（TASK-015 建立），不直接 import infra 实现类，不直接依赖 SQLite。
 - 所有状态变更必须先过 `validateTransition`，非法转移抛错不静默。
 - 编排器不自行修改全局文档（PROGRESS/DECISIONS/ISSUES），那是合并回写职责。
 

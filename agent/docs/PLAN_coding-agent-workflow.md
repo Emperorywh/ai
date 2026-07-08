@@ -74,6 +74,7 @@ agent/
         permission-rules.ts
       index.ts
     application/                # 编排用例，不依赖具体基础设施实现
+      ports.ts                 # application→infra 窄接口（TaskDoc/GlobalDoc/Worktree Port）
       context-pack-generator.ts
       scheduler.ts
       state-orchestrator.ts
@@ -119,6 +120,10 @@ agent/
 
 分层依赖方向（硬约束）：`cli → application → core ← infrastructure`；`infrastructure → core`；**`core` 不反向依赖任何层**。
 
+application→infrastructure 依赖倒置约定：application 经 `src/application/ports.ts` 中的窄接口（`TaskDocRepositoryPort`/`GlobalDocRepositoryPort`/`WorktreePort`）依赖 infrastructure；infrastructure 提供具体实现类，由 CLI 层在 composition root 处 wiring 注入，借助 TS 结构类型兼容，infra 无需显式 `implements`。application 不得直接 import infra 实现类。`executor-contract.ts` 仍留在 `infrastructure/sdk/`，因其仅被 CLI 层（TASK-026）依赖、不经 application，不构成反向依赖。
+
+`layer` 与物理分层的关系（澄清 SPEC §9）：本项目把状态机与状态编排归入 `domain`，SPEC §9 的 `state` 取值在本计划中暂不被任何任务使用（枚举仍由 TASK-002 完整定义并保留，供未来或其他项目启用），不影响验证 allowlist——`TESTING.md` 的 `layers` 声明只需覆盖实际出现的 `type/domain/data/page`。
+
 ## 2. 整体阶段与任务顺序
 
 | 阶段 | 主题 | 任务 | 依赖关键 |
@@ -152,13 +157,13 @@ agent/
 | TASK-012 | Infra 全局文档仓储与 section 合并 | data | 004,010 |
 | TASK-013 | Infra SQLite schema 与迁移 | data | 001 |
 | TASK-014 | Infra SQLite 索引仓储与 rebuild-index | data | 011,012,013 |
-| TASK-015 | App Context Pack 生成器 | domain | 003,011 |
+| TASK-015 | App Context Pack 生成器 + application/ports | domain | 003,011 |
 | TASK-016 | App 拓扑排序与并行检测 | domain | 003 |
-| TASK-017 | App 状态流转编排器 | domain | 007,008,011 |
+| TASK-017 | App 状态流转编排器 | domain | 007,008,011,015 |
 | TASK-018 | Infra Git worktree 适配器 | data | 001 |
-| TASK-019 | App 合并：rebase + 回填 + fast-forward | domain | 016,018,011 |
-| TASK-020 | App 合并：全局文档 section 回写与冲突 | domain | 012,016 |
-| TASK-021 | App 合并：幂等恢复 | domain | 019,020 |
+| TASK-019 | App 合并：rebase + 回填 + fast-forward | domain | 011,015,016,018 |
+| TASK-020 | App 合并：全局文档 section 回写与冲突 | domain | 012,015,016 |
+| TASK-021 | App 合并：幂等恢复 | domain | 015,018,019,020 |
 | TASK-022 | Infra Claude Agent SDK 适配器 | data | 009,015 |
 | TASK-023 | CLI 框架与 init 命令 | page | 001 |
 | TASK-024 | CLI plan 与 task:create 命令 | page | 011,015,016 |
@@ -175,7 +180,7 @@ agent/
 - **文档仓储（P2）** 依赖对应 Schema（读写即校验）。
 - **SQLite（P3）** 的 `rebuild-index` 必须能从文档重建 → 依赖 P2 文档仓储。
 - **Application（P4）** 依赖 Core 规则 + 文档仓储；不依赖 SQLite（状态判定只读 frontmatter）。
-- **合并（P6）** 依赖调度（TASK-016）+ worktree（TASK-018）+ 文档仓储（TASK-011/012）；内部 019→020→021 串行。
+- **合并（P6）** 依赖调度（TASK-016）+ worktree（TASK-018）+ 文档仓储（TASK-011/012）；内部 019→020→021 串行。017/019/020/021 均经 TASK-015 的 `ports.ts` 接口依赖 infra，同时保留对对应 infra 实现任务（011/012/018）的依赖，供 CLI 层 wiring 与端到端测试使用。
 - **SDK（P7）** 依赖 Context Pack（015）+ 权限解析（009）；以接口暴露给 CLI，CLI 在 SDK 未就位时可用 dry-run executor。
 - **CLI（P8）** 是集成层，依赖其所编排的全部下游服务。
 
@@ -218,6 +223,7 @@ agent/
 | R4 | frontmatter/Schema 漂移 | Zod 为单一来源；文档仓储读取即校验 |
 | R5 | 范围蔓延 | MCP 仅骨架；UI 不纳入 |
 | R6 | 并行写全局文档冲突 | section 级机器判定合并（020）+ 冲突落 `ISSUES.md` |
+| R7 | worktree 缺 `node_modules` 致后续 task verify 失败 | TASK-018 仅管 worktree；`task:run`（026）在 `create` 后按需复用主工作区 `node_modules` 或重装（声明 `install_dependencies`） |
 
 ## 7. 回滚 / 恢复方式
 

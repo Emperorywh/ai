@@ -5,6 +5,7 @@ status: draft
 layer: domain
 depends_on:
   - TASK-012
+  - TASK-015
   - TASK-016
 allowed_paths:
   - src/application/merge/section-writeback.ts
@@ -30,7 +31,7 @@ context_pack:
     - Readme.md#10-任务执行结果模板
   source_files:
     - src/application/scheduler.ts
-    - src/infrastructure/fs/global-doc-repo.ts
+    - src/application/ports.ts
 workflow_outputs:
   result_file: docs/tasks/TASK-020-app-merge-section-writeback.result.md
 ---
@@ -73,7 +74,7 @@ workflow_outputs:
 
 ## 8. 架构约束
 
-- 依赖全局文档仓储（section 合并）+ 调度（拓扑序）。
+- 对全局文档仓储的依赖经 `application/ports.ts` 的 `GlobalDocRepositoryPort`（TASK-015 建立），不直接 import infra 实现类；复用调度（拓扑序）。
 - 回写串行、每次重读最新主分支文档（§3.2）。
 - id 分配由注入的 `idAllocator` 完成（单一分配点，避免重复 id）。
 - decisions/issues 不参与 section 合并，仅按 id 去重追加。
