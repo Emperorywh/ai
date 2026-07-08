@@ -8,3 +8,5 @@
  * 后续任务（TASK-010 起）在此导出各仓储与适配器。
  */
 export * from './fs/frontmatter-parser.js'
+// TASK-011：任务 / 结果 / 审查文档仓储（读写即 Zod 校验）。
+export * from './fs/task-doc-repo.js'
