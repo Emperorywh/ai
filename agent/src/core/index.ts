@@ -22,3 +22,6 @@ export * from './state-machine.js'
 // TASK-008：依赖级联（传递闭包）与执行状态映射（Readme.md §7 / §10）。
 export * from './rules/dependency-rules.js'
 export * from './rules/status-mapping.js'
+// TASK-009：验证 allowlist 计算与权限解析（Readme.md §16 权限模型）。
+export * from './rules/verification-rules.js'
+export * from './rules/permission-rules.js'
