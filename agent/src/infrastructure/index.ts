@@ -7,4 +7,4 @@
  *
  * 后续任务（TASK-010 起）在此导出各仓储与适配器。
  */
-export {}
+export * from './fs/frontmatter-parser.js'
