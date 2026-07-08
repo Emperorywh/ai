@@ -1,0 +1,31 @@
+{
+  "name": "coding-agent-workflow",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "自研 Coding Agent 长任务工作流系统：以文档协议驱动任务的拆分、执行、审查、合并与恢复。",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "eslint --ext .ts --no-error-on-unmatched-pattern src test",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.5.0",
+    "commander": "^12.1.0",
+    "yaml": "^2.6.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^20.16.0",
+    "@typescript-eslint/eslint-plugin": "^7.18.0",
+    "@typescript-eslint/parser": "^7.18.0",
+    "eslint": "^8.57.1",
+    "typescript": "^5.5.4",
+    "vitest": "^2.1.0"
+  }
+}

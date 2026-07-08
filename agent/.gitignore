@@ -1,0 +1,24 @@
+# 依赖
+node_modules/
+
+# 构建产物
+dist/
+
+# 测试覆盖率
+coverage/
+
+# 日志与环境
+*.log
+npm-debug.log*
+.env
+.env.*
+!.env.example
+
+# 操作系统
+.DS_Store
+Thumbs.db
+
+# 编辑器
+.idea/
+.vscode/*
+!.vscode/settings.json
