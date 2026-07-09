@@ -21,3 +21,5 @@ export * from './git/worktree-adapter.js'
 // TASK-022：Task Executor 契约 + Claude Agent SDK 适配器（DryRun 兜底 + 注入式 SDK 骨架）。
 export * from './sdk/executor-contract.js'
 export * from './sdk/claude-sdk-adapter.js'
+// TASK-028：MCP 适配器骨架（注册机制 + 统一调用代理，具体 server 留空抛「未配置」错误）。
+export * from './mcp/mcp-adapter.js'
