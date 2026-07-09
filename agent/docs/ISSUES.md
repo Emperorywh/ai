@@ -195,3 +195,21 @@ recommended_action: |-
 ```
 
 提议自 `TASK-021-app-merge-recovery.result.md`。§3.2 明文合并进度不写 SQLite，恢复只能从 git 状态（branchMerged）重建合并进度，无法重建回写进度；故 recoverMerge 合并完成时一律重做 writebackGlobalDocs——decisions/issues/replace 幂等，但 progress append 在同一崩溃被多次恢复时会重复追加。低优先级，不阻塞验收（合并幂等由 branchMerged 守住，单次恢复内回写正确），待 Orchestrator 裁定（A 接受 + 一次崩溃一次恢复 / B 回写完成标记 / C append 幂等化）。关联 DEC-018。
+
+---
+
+## ISS-012 Claude Agent SDK 未安装 / API 未确认（R1）——ClaudeSdkInvocation 无真实实现，ClaudeSdkExecutor 需 SDK 就位才能调用模型
+
+```yaml
+id: ISS-012
+title: "Claude Agent SDK 未安装 / API 未确认（R1）——ClaudeSdkInvocation 无真实实现，ClaudeSdkExecutor 需 SDK 就位才能调用模型"
+status: open
+severity: medium
+scope: infrastructure/sdk
+created_from_task: TASK-022
+owner: ""
+recommended_action: |-
+  Readme §3.1 把 Claude Agent SDK 列为执行引擎适配层、§12 R1 明文「SDK API 未确认是本计划最高风险」、任务 §1 §2 要求「先确认 SDK 版本与接口，再以接口隔离方式实现」。但本仓库 package.json 无 `@anthropic-ai/claude-agent-sdk`、node_modules 无该包；AGENTS / 任务红线禁止新增 npm 依赖（确需新增须停下提议，不改 package.json）。故 TASK-022 无法在本任务安装 / 确认 SDK，以「接口 + DryRun + 注入骨架」交付：`ClaudeSdkInvocation` 为接口隔离的注入句柄但无真实实现，`ClaudeSdkExecutor` 构造注入 null 时 execute 抛 `ExecutorNotConfiguredError`（不伪造调用）；`DryRunLocalExecutor` 提供占位 .result.md 供前置链路联调。不阻塞验收（§11 允许 DryRun 交付、§12 R1 允许接口 + DryRun 收尾），但 TASK-026 task:run 真正调用模型前必须解决。建议（待 Orchestrator 裁定）：(A) 单独立一个 SDK 选型任务——确认 Claude Agent SDK 版本（当前最新 `@anthropic-ai/claude-agent-sdk`）、子 agent 派发方式、Context Pack 注入方式（system prompt / 文件注入 / tool use）、权限与 hooks 注入点，落 DECISIONS，并扩权新增依赖后实现真实 ClaudeSdkInvocation（推荐，符合「先确认再实现」）；(B) 暂以 DryRun 跑通全链路，SDK 接入延后到 CLI 全部就位后统一接入；(C) 若确认使用其他执行引擎（如直接 Claude API / 本地模型），改 ClaudeSdkInvocation 适配（契约不变）。本任务的 ClaudeSdkExecutor 编排逻辑 + DryRun + 契约均经测试（14 项），SDK 就位时只需补 invocation 实现。详见 DEC-019。
+```
+
+提议自 `TASK-022-infra-claude-sdk-adapter.result.md`。SDK 未安装（package.json 无 `@anthropic-ai/claude-agent-sdk`）且 API 未确认（§12 R1），红线禁新增依赖。TASK-022 以「接口 + DryRun + 注入骨架」交付：ClaudeSdkInvocation 无真实实现，ClaudeSdkExecutor 未注入 invocation 时抛 ExecutorNotConfiguredError 不伪造；DryRunLocalExecutor 提供占位 .result.md 供前置链路联调。中优先级，不阻塞验收（§11/§12 允许 DryRun 交付），但 TASK-026 task:run 真正跑模型前必须解决，待 Orchestrator 裁定 SDK 选型（A 单立选型任务 / B DryRun 跑通后统一接入 / C 换执行引擎）。关联 DEC-019。
