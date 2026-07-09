@@ -83,3 +83,7 @@ core 不反向依赖任何层
 ## 7. CLI 边界
 
 CLI 命令签名（`init / plan / task:create / task:run / task:review / status / rebuild-index`）由各 CLI 任务（`docs/tasks/TASK-023…027`）固化入参 / 出参与退出码，并回写本节。
+
+命令名统一为 `caw`（package.json `bin.caw` + `program.name()`，DEC-020）。命令入口为 `runCli(argv)`（`src/cli/framework.ts`），返回退出码（不 `process.exit`，bin 与测试共用）。已固化的命令签名：
+
+- `caw init [targetDir]`（TASK-023）：在 `targetDir`（默认当前工作目录）生成 §6 文档协议骨架（`AGENTS.md` + `docs/{SPEC,ARCHITECTURE,PLAN,PROGRESS,DECISIONS,ISSUES,TESTING}.md` + `docs/tasks/`），模板内嵌、幂等（已存在不覆盖）。入参：目标目录（可选）；出参：stdout 输出新建 / 跳过文件清单；退出码：0 成功（含幂等跳过）、1 业务错误（目标非目录等）、commander 用法错误透传。零领域依赖（不 import core/application/infrastructure）。
