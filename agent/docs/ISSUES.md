@@ -143,3 +143,19 @@ recommended_action: |-
 ```
 
 提议自 `TASK-018-infra-git-worktree.result.md`。WorktreeAdapter.reset 的基线 commit 存于内存 Map，跨 CLI 进程续跑（restart_on_retry）时丢失导致 reset 抛错。中等优先级——单进程内 create→reset 链路正确（已测试），但 §3.2 续跑通常跨 CLI 调用；建议 create 写 worktree git config 持久化基线（方案 A），待 Orchestrator 裁定。
+
+## ISS-009 合并用例 docs port 需按 taskId 路由到各 worktree/docs/tasks，TaskDocRepository 单 tasksDir 无法覆盖多 worktree，wiring 归 TASK-025/026
+
+```yaml
+id: ISS-009
+title: "合并用例 docs port 需按 taskId 路由到各 worktree/docs/tasks，TaskDocRepository 单 tasksDir 无法覆盖多 worktree，wiring 归 TASK-025/026"
+status: open
+severity: low
+scope: application/merge/rebase-ff
+created_from_task: TASK-019
+owner: ""
+recommended_action: |-
+  rebaseAndFastForward 处理一批任务时，各任务 .result.md 分布在各自 worktree 内（Executor 产出，§3.2「worktree 中只读引用全局文档，Task Executor 把更新写入 .result.md」），合并逐任务在各自 worktree 进行（rebase/commitAuditResult/ff 均操作 task/<id> worktree）。GitMergePort 天然按 taskId 经 WorktreePort/GitMergeAdapter.worktreePath(taskId) 寻址 worktree（单 GitMergeAdapter 实例覆盖所有任务）；但 TaskDocRepositoryPort 的 readResult(taskId)/writeResult(result) 经 TaskDocRepository 单一固定 tasksDir 寻址，无法区分多 worktree 的 docs/tasks。故 CLI composition root（TASK-025/026）wiring MergePorts.docs 时须组合一个按 taskId 路由的适配器（taskId → worktreesDir/<taskId>/docs/tasks 的 TaskDocRepository），而非直接注入单 tasksDir 的 TaskDocRepository。本任务测试用闭包路由夹具（worktreeDocs）模拟该 wiring 验证编排逻辑，wiring 本身归 TASK-025/026。不阻塞 TASK-019 验收（编排逻辑经 ports 接口正确，路由是组合层职责），但 TASK-025/026 落地 CLI 时须实现该路由适配器，否则多任务合并回填 execution_commits 会写错位置（主仓库 docs/tasks 而非 worktree）。关联 DEC-016（MergePorts 设计）。
+```
+
+提议自 `TASK-019-app-merge-rebase-ff.result.md`。合并用例的 docs port 需按 taskId 路由到各 worktree/docs/tasks，而 TaskDocRepository 单 tasksDir 无法覆盖多 worktree（GitMergePort 天然按 taskId 寻址 worktree）。低优先级——编排逻辑经 ports 接口正确（测试用路由夹具验证），路由适配器是 CLI wiring 层职责；建议 TASK-025/026 落地 CLI 时实现按 taskId 路由的 docs 适配器，待 Orchestrator 确认。
