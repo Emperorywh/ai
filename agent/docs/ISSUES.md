@@ -111,3 +111,35 @@ recommended_action: |-
 ```
 
 提议自 `TASK-017-app-state-orchestrator.result.md`。状态机流转表（TASK-007）与 §7 级联文字存在内在张力——流转代码块无 ready/draft→blocked 边，而级联文字要求后继自动 blocked。TASK-017 在 forbidden 约束下（不能改 core 状态机表）如实落地：cascadeIfBlocked 对运行中后继（running/reviewing）成功 blocked，对未启动 / 已终态后继返回 skipped 显式暴露。中等优先级，待 Orchestrator 裁定方向（A 补状态机边 / B 级联强制语义 / C 接受并回写 Readme）。
+
+## ISS-007 commitAuditResult 依赖 git user.name / user.email 已配置，本适配器不设 config（AGENTS §4 不隐藏兼容）
+
+```yaml
+id: ISS-007
+title: "commitAuditResult 依赖 git user.name / user.email 已配置，本适配器不设 config（AGENTS §4 不隐藏兼容）"
+status: open
+severity: low
+scope: infrastructure/git/worktree-adapter
+created_from_task: TASK-018
+owner: ""
+recommended_action: |-
+  commitAuditResult 内部执行 git commit，若仓库未配置 user.name / user.email，git 报错「Please tell me who you are」导致抛 GitAdapterError。本适配器不主动 git config 设置身份（AGENTS §4「运行时容错必须作为显式错误处理或能力声明，不作为隐藏兼容逻辑存在」）——commit 身份是仓库 / 全局环境配置，非适配器职责。当前测试夹具用 local config（git config user.email/name）保证可 commit。建议（待 Orchestrator 确认）：(A) CLI init（TASK-023）在 agent init 时检测并提示 / 写入仓库 user.name + user.email（推荐，init 是显式配置时机）；(B) 在 commitAuditResult 前用 git config user.name 检测缺失并抛带指引的领域错误（显式失败优于隐藏默认）；(C) 接受现状，文档约定使用方须确保 git 身份配置。不阻塞 TASK-018 验收（适配器语义正确，commit 身份是环境前置），但 TASK-023 / TASK-026 落地 CLI 时须处理，否则 task:run 回填 audit commit 会失败。关联 DEC-015。
+```
+
+提议自 `TASK-018-infra-git-worktree.result.md`。commitAuditResult 调 `git commit` 需 git 身份配置，本适配器不设 config（AGENTS §4）。低优先级——适配器语义正确，commit 身份是环境前置；建议 CLI init（TASK-023）显式配置，待 Orchestrator 确认方向。
+
+## ISS-008 reset 基线为内存 Map，跨 CLI 进程续跑（restart_on_retry）时丢失，reset 会抛错
+
+```yaml
+id: ISS-008
+title: "reset 基线为内存 Map，跨 CLI 进程续跑（restart_on_retry）时丢失，reset 会抛错"
+status: open
+severity: medium
+scope: infrastructure/git/worktree-adapter
+created_from_task: TASK-018
+owner: ""
+recommended_action: |-
+  WorktreeAdapter.reset 依赖 create 时记入 bases Map 的基线 commit hash。§7 续跑语义（rejected→ready / blocked→ready）保留已存在的 worktree，若 frontmatter 声明 restart_on_retry: true 则 reset 重跑。但每次 CLI 调用（task:run）是新进程、新适配器实例，bases Map 不跨进程持久——跨 CLI 续跑触发 reset 时 bases 无记录，抛「未由本适配器 create，无法确定重置基线」。当前实现单进程内 create→reset 有效（测试覆盖），但 §3.2 续跑通常跨 CLI 调用。建议（任选其一，待 Orchestrator 裁定）：(A) create 时把基线 hash 写入 worktree 的 git config（如 git config workflow.base <hash>，存于主仓库 .git/worktrees/<id>/config），reset 时读回——跨进程持久、与 worktree 生命周期绑定（推荐，worktree 删除即随 config 消失）；(B) reset 从 git 推断基线（worktree 分支首个 commit 的 parent，或与 main 的 merge-base），但 main 可能已变、worktree 可能无 commit，推断不可靠；(C) application 层（TASK-026）在跨进程续跑发现 worktree 已存在时，先 remove 旧 worktree 再 create 新 worktree（绕过 reset，但丢失「保留 worktree」语义）。不阻塞 TASK-018 验收（适配器在单进程 create→reset 链路正确，跨进程是组合层问题），但 TASK-026 task:run 落地续跑前须选定方案，否则 restart_on_retry 在跨 CLI 场景失效。关联 DEC-015（create 记录基线设计）。
+```
+
+提议自 `TASK-018-infra-git-worktree.result.md`。WorktreeAdapter.reset 的基线 commit 存于内存 Map，跨 CLI 进程续跑（restart_on_retry）时丢失导致 reset 抛错。中等优先级——单进程内 create→reset 链路正确（已测试），但 §3.2 续跑通常跨 CLI 调用；建议 create 写 worktree git config 持久化基线（方案 A），待 Orchestrator 裁定。
