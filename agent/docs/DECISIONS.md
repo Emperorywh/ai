@@ -418,3 +418,23 @@ consequences: |-
 ```
 
 提议自 `TASK-023-cli-framework-and-init.result.md`。CLI 框架（framework 值 import commander + 值 import ./commands/init.js）+ init（值 import commander + node:fs/node:path 内置）零反向依赖（不 import core/application/infrastructure，任务 §6 硬约束）、无边界冲突；六处 CLI/init 设计解释（命令名 caw / 退出码透传 commander exitCode + 业务错误统一 1 / exitOverride 取代 process.exit 使退出码可控可测 / 不设默认 action 避免吞未知命令 / init 幂等不覆盖 / init 零领域依赖）均为 §3.1 / §6 / §6.1 与任务 §2 §8 §11 §12 的合理落地；命令名 caw 与退出码约定影响后续 CLI 任务（TASK-024-027），待 Orchestrator 确认。
+
+---
+
+## DEC-021 CLI 索引库默认路径 <项目根>/.caw/index.db + status 命令以文档为权威不读 SQLite
+
+```yaml
+id: DEC-021
+title: "CLI 索引库默认路径 <项目根>/.caw/index.db + status 命令以文档为权威不读 SQLite"
+status: proposed
+scope: cli（status / rebuild-index）
+created_from_task: TASK-025
+decision: |-
+  TASK-025 对 Readme §3.1/§3.2 未明文的 CLI 索引库路径与 status 读取源作如下解释并落地：（1）rebuild-index 维护的 SQLite 索引库默认路径为 `<项目根>/.caw/index.db`（相对项目根，父目录 .caw/ 随首次重建由 mkdirSync recursive 建立），可经 `--db <path>` 覆盖、`--project-root <dir>` 指定项目根（默认 cwd）；全局文档假定位于 `<项目根>/docs/`（DECISIONS.md/ISSUES.md，§6 文档体系）。（2）status 命令一律以 docs/tasks frontmatter 为权威——collectStatus 经 TaskDocRepository.listTasks→readTask 取 id/title/status/layer，执行摘要经 readResult(+readReview)→buildExecutionSummary 综合，不读取 SQLite 索引；索引是派生存储，仅由 rebuild-index 全量重建维护。沿用「命令模块 + 纯函数 + registerXxxCommand + Result 抛错」模式（承接 DEC-020）。
+rationale: |-
+  索引库路径：§3.1/§3.2 把 SQLite 定为「派生存储」但未约定文件路径，需 CLI composition root 决定一个稳定默认。选 .caw/index.db：.caw/ 为工具私有目录（与 docs/ 文档协议目录平级、不污染文档）、index.db 语义明确；--db/--project-root 覆盖满足自定义部署（CI / 多项目）。status 文档权威：直接落地 §3.1 硬约束「索引不参与状态机判定、任何『读状态』的判断都不得只依赖 SQLite」——任务 status 属「读状态」，必须取自 frontmatter，索引仅加速；本骨架为保证正确性与验收「无索引可展示」不引入对索引文件的运行时读依赖，避免展示过期派生数据。执行摘要也走文档（buildExecutionSummary）而非索引 getExecution，保证与 frontmatter 一致、无过期风险。
+consequences: |-
+  .caw/ 目录进入项目工作区（建议各项目 .gitignore 忽略 .caw/，工具不自动改 .gitignore）。status 当前不利用索引加速（留作未来优化：可在保证状态回读 frontmatter 前提下用 queryTasks/getExecution 加速任务定位与执行摘要，索引缺失回退文档）。rebuild-index 假定全局文档位于 <项目根>/docs/（与 §6 一致）；全局文档缺失视为空集（readDecisions/readIssues 对无 fenced yaml 返回 []）。后续 CLI 命令沿用 DEC-020 + DEC-021：新命令在 src/cli/commands/<name>.ts 导出 register<Name>Command，于 createProgram()（framework.ts，ISS-013）追加注册。若 Orchestrator 认为：(1) 索引库应放他处（如 .git/caw/index.db 复用 .git、或用户级目录）——改 DEFAULT_DB_REL 一处即可；(2) status 应优先读索引加速——需在保证状态字段回读 frontmatter 前提下加索引快路径 + 回退文档（当前骨架未做，避免过期数据）；(3) 默认项目根应用 process.cwd() 之外的方式（如向上搜索含 docs/ 的目录）——可在 wiring 层加项目根探测。本任务 22 项单测覆盖：collectStatus 文档权威/过滤/空目录、formatStatus、status runCli（成功/无索引可展示/--status 过滤/非法枚举非零/目录缺失非零）、rebuildIndex（行数=文档全集/经 IndexRepository 校验/幂等/无全局文档零决策问题/自定义 db/目录缺失抛错）、rebuild-index runCli（成功+统计+破坏性提示/目录缺失非零）。
+```
+
+提议自 `TASK-025-cli-status-and-rebuild-index.result.md`。status/rebuild-index 命令（status 值 import core TaskStatusSchema/LayerSchema + 值 import infra TaskDocRepository/buildExecutionSummary；rebuild-index 值 import better-sqlite3 Database + 值 import infra IndexRepository/GlobalDocRepository/TaskDocRepository/表名常量）作为 cli composition root 直接 wiring infra（ARCHITECTURE §4 允许 cli→infra，application 不得直接 import infra 不影响 cli）、无边界冲突；两处 CLI 设计解释（索引库默认路径 .caw/index.db + status 文档权威不读 SQLite）均为 §3.1/§3.2 硬约束的合理落地，待 Orchestrator 确认。关联 ISS-013（framework.ts allowed_paths）。

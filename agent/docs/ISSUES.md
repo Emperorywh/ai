@@ -213,3 +213,21 @@ recommended_action: |-
 ```
 
 提议自 `TASK-022-infra-claude-sdk-adapter.result.md`。SDK 未安装（package.json 无 `@anthropic-ai/claude-agent-sdk`）且 API 未确认（§12 R1），红线禁新增依赖。TASK-022 以「接口 + DryRun + 注入骨架」交付：ClaudeSdkInvocation 无真实实现，ClaudeSdkExecutor 未注入 invocation 时抛 ExecutorNotConfiguredError 不伪造；DryRunLocalExecutor 提供占位 .result.md 供前置链路联调。中优先级，不阻塞验收（§11/§12 允许 DryRun 交付），但 TASK-026 task:run 真正跑模型前必须解决，待 Orchestrator 裁定 SDK 选型（A 单立选型任务 / B DryRun 跑通后统一接入 / C 换执行引擎）。关联 DEC-019。
+
+---
+
+## ISS-013 CLI 命令任务的 allowed_paths 应含 framework.ts
+
+```yaml
+id: ISS-013
+title: "CLI 命令任务的 allowed_paths 应含 framework.ts"
+status: open
+severity: low
+scope: docs/tasks（CLI 命令任务规格）
+created_from_task: TASK-025
+owner: ""
+recommended_action: |-
+  TASK-025 把 status.ts/rebuild-index.ts/index.ts/test 列为 allowed_paths，但 CLI 命令注册单一入口 createProgram 位于 src/cli/framework.ts（TASK-023 既定模式、ARCHITECTURE §7 文档化的注册点）——新增命令必须在此追加 register<Name>Command 调用，方能被 runCli（其内部 createProgram）识别，否则 caw status / caw rebuild-index 为未知命令。本任务已对 framework.ts 做同层 src/cli 增量改动（2 行 import + 2 行 register 调用 + 注释），未碰 forbidden_paths（src/core/application/infrastructure）。建议（任选其一，待 Orchestrator 裁定）：(A) TASK-026/027 等 CLI 命令任务的 allowed_paths 显式加入 src/cli/framework.ts（推荐，最小改动，匹配实际）；(B) 在 ARCHITECTURE §7 注明 framework.ts 为所有 CLI 命令任务的共享注册点、视为隐含 allowed（需放宽边界判定的实现）；(C) 重构为 index.ts 驱动注册（破坏 runCli 单一入口的既定模式，不推荐）。src/cli/index.ts（bin 入口）经评估无需改动（runCli 已统管，任务列入 allowed_paths 属冗余）。不阻塞验收（改动同层、非破坏性、与 TASK-023 模式一致）。
+```
+
+提议自 `TASK-025-cli-status-and-rebuild-index.result.md`。CLI 命令注册入口 createProgram 在 framework.ts，不在本任务 allowed_paths，但新增命令必须改它；已做同层增量未碰 forbidden_paths。低优先级，不阻塞验收，待 Orchestrator 裁定（A 后续 CLI 任务纳 framework.ts / B ARCHITECTURE 注明共享注册点 / C 重构 index.ts 驱动不推荐）。关联 DEC-021。
