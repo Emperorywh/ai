@@ -18,3 +18,6 @@ export * from './sqlite/schema.js'
 export * from './sqlite/index-repo.js'
 // TASK-018：Git worktree 生命周期与合并原语适配器（子进程调系统 git）。
 export * from './git/worktree-adapter.js'
+// TASK-022：Task Executor 契约 + Claude Agent SDK 适配器（DryRun 兜底 + 注入式 SDK 骨架）。
+export * from './sdk/executor-contract.js'
+export * from './sdk/claude-sdk-adapter.js'
