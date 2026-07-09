@@ -12,3 +12,5 @@ export * from './context-pack-generator.js'
 export * from './scheduler.js'
 // TASK-017：状态流转编排器（读 frontmatter → 校验转移 → 写回 status）。
 export * from './state-orchestrator.js'
+// TASK-019：合并编排——rebase + 回填 execution_commits + fast-forward（§3.2）。
+export * from './merge/rebase-ff.js'
