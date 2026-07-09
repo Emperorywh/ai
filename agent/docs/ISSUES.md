@@ -249,3 +249,39 @@ recommended_action: |-
 ```
 
 提议自 `TASK-026-cli-task-run.result.md`。TASK-018 fastForwardMain 的 update-ref 设计（避免 checkout / merge commit）天然不更新主工作区，与 TASK-026「status 权威在主仓库工作区文件」叠加产生 stale；task:run 以 syncMainWorktreeFile 补齐。低优先级，不阻塞验收，待 Orchestrator 裁定统一工作区同步策略。关联 DEC-022。
+
+---
+
+## ISS-015 task-review.ts 与 task-run.ts 重复合并逻辑（3 私有助手就地重实现）+ 跨命令 import，建议抽取 cli 共享助手模块
+
+```yaml
+id: ISS-015
+title: "task-review.ts 与 task-run.ts 重复合并逻辑（3 私有助手就地重实现）+ 跨命令 import，建议抽取 cli 共享助手模块"
+status: open
+severity: low
+scope: cli（task-review.ts / task-run.ts）
+created_from_task: TASK-027
+owner: ""
+recommended_action: |-
+  task-run.ts 的 rebaseAndFastForwardMerge / syncMainWorktreeFile / appendMergeConflictIssue 三个私有助手未导出，task-review.ts 因本任务 allowed_paths 不含 task-run.ts、且遵循既有 cli 命令 self-contained 惯例（status/rebuild-index/task-run 之间无跨命令 import），就地重实现了相同逻辑（AGENTS §3 重复逻辑）。另 task-review.ts 跨命令 import 了 task-run.ts 的 2 个导出助手（createFsGlobalDocRepo / sequentialIdAllocator）。建议（任选其一，待 Orchestrator 裁定）：(A) 后续任务扩 allowed_paths 把 task-run.ts 的合并助手导出并由 task-review.ts 复用（最小改动，但加深 task-run.ts 作为「共享助手库」的耦合）；(B) 抽取 cli 共享助手模块（如 src/cli/shared/merge-helpers.ts + fs-global-doc.ts），由 task-run.ts / task-review.ts 共同复用（推荐，收口合并机械与全局文档 fs 适配，需新任务的 allowed_paths 含该新模块 + task-run.ts 做迁移）；(C) 接受重复、文档化（违背 AGENTS §3，不推荐）。不阻塞本任务验收（逻辑一致、13 项单测覆盖;重复仅影响可维护性）。
+```
+
+提议自 `TASK-027-cli-task-review.result.md`。task-run.ts 的合并助手（rebaseAndFastForwardMerge 等）私有未导出、且 task-review.ts allowed_paths 不含 task-run.ts，导致合并机械重复实现;另跨命令 import 了 2 个导出助手。低优先级，不阻塞验收，待 Orchestrator 裁定抽取 cli 共享助手模块。关联 DEC-023。
+
+---
+
+## ISS-016 task:review 默认 LocalReviewer 确定性产 approved 不经真实审查，生产须注入真实 Reviewer
+
+```yaml
+id: ISS-016
+title: "task:review 默认 LocalReviewer 确定性产 approved 不经真实审查，生产须注入真实 Reviewer"
+status: open
+severity: medium
+scope: cli（task:review LocalReviewer）
+created_from_task: TASK-027
+owner: ""
+recommended_action: |-
+  task:review 默认 Reviewer 为 LocalReviewer，确定性产 approved（§12「SDK 未就位用本地审查器兜底，避免阻塞」，复用 TASK-022 DryRunLocalExecutor 产 completed 的哲学）。当前 caw task:review <id> 无注入时即自动放行 approve→done→合并，不经任何真实审查——与「独立 Reviewer 审查」的 §5.3/§15 设计意图存在张力（DryRunLocalExecutor 产 completed 至少不伪造「成功执行」，LocalReviewer 产 approved 则是直接放行合并）。SDK 就位（ISS-012/DEC-019）后应由上层注入真实 reviewer agent。建议（任选其一，待 Orchestrator 裁定）：(A) SDK 未就位期间在 framework 注册层对默认 LocalReviewer 输出显著 stderr 告警（如「warning: 使用本地审查器兜底，未做真实审查」），提示生产须注入 Reviewer；(B) 要求显式 --allow-local-reviewer 标志才启用默认 LocalReviewer，否则拒绝并提示注入 Reviewer（更安全，但增加摩擦）;（C）接受现状、文档化默认行为。不阻塞本任务验收（§12 明文允许本地兜底，reviewer 可注入）。关联 DEC-023 / ISS-012。
+```
+
+提议自 `TASK-027-cli-task-review.result.md`。task:review 默认 LocalReviewer 产 approved 系 §12「避免阻塞」落地，复用 DryRun 哲学;但 review 的「放行合并」语义比 execution 的「completed」更需谨慎。中优先级（安全/正确性关注），不阻塞验收（§12 明文允许、可注入），待 Orchestrator 裁定默认行为防护（告警 / 显式标志）。关联 DEC-023 / ISS-012。

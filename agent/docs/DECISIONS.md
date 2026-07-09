@@ -458,3 +458,23 @@ consequences: |-
 ```
 
 提议自 `TASK-026-cli-task-run.result.md`。task:run（值 import application StateOrchestrator/computeContextPack/refreshSourceFiles/rebaseAndFastForward/writebackGlobalDocs + 值 import core resolvePathScope/computeVerificationAllowlist + 值 import infra DryRunLocalExecutor/GitMergeAdapter/TaskDocRepository/WorktreeAdapter/GlobalDocRepository/buildStartupPrompt）作为 cli composition root 直接 wiring infra（ARCHITECTURE §4 允许 cli→infra/application/core，application 不得直接 import infra 不影响 cli）、无边界冲突；合并编排解释（新鲜合并走 019+020、021 留作崩溃续跑）是 §3.2 合并链路与 recoverMerge branchMerged 语义的合理落地，待 Orchestrator 确认。关联 ISS-014（fastForwardMain 工作区同步）。
+
+---
+
+## DEC-023 task:review 设计——Reviewer 注入式契约（复用 TASK-022 模式）+ LocalReviewer 兜底 + applyReview 经 cli 路由适配器 + 合并复用 019+020
+
+```yaml
+id: DEC-023
+title: "task:review 设计——Reviewer 注入式契约（复用 TASK-022 模式）+ LocalReviewer 兜底 + applyReview 经 cli 路由适配器 + 合并复用 019+020"
+status: proposed
+scope: cli（task:review 审查编排）
+created_from_task: TASK-027
+decision: |-
+  TASK-027 对 Readme §5.3/§15（审查映射）/§12（reviewer 可复用 TASK-022 契约、SDK 未就位本地兜底）/§3.2（合并）的审查编排作如下解释并落地：（1）审查引擎以注入式 `Reviewer` 契约承载（review(input)→ReviewOutcome，approved/rejected/needs-human-confirmation），复用 TASK-022 Executor 的「注入式句柄」模式；SDK 未就位（ISS-012）时默认 `LocalReviewer` 确定性产 approved 兜底（与 DryRunLocalExecutor 产 completed 同义，§12「避免阻塞」），真实 reviewer agent 待 SDK 选型后注入。（2）状态映射统一走 StateOrchestrator.applyReview（§15 四映射：approved→done / rejected→rejected / needs-human→blocked / skipped→产物校验三分）；applyReview 的 skipped 分支内部 readResult 需读 worktree 的 .result.md，而 task 状态权威在 main——经 cli 层 `reviewOrchestratorRepo(main, worktree)` 路由适配器组合双仓储（readTask/writeTask→main、readResult→worktree，ISS-009 路由细化）。（3）合并走 rebaseAndFastForward(019)+writebackGlobalDocs(020)（同 DEC-022，不调 recoverMerge）；approved→done 才合并，reviewing/rejected/blocked 一律不合并且保留 worktree（§8）。（4）审查结论写 main 仓库 .review.md（§5.3 与 .result.md 执行事实分离，不污染）。
+rationale: |-
+  Reviewer 与 Executor 同属「cli composition root 注入的执行引擎适配」（ARCHITECTURE §4：executor-contract 仅被 cli 依赖），故复用注入式句柄模式而非在 application 定义新端口（避免 application 感知 SDK）。applyReview 的 skipped 分支读 .result.md，而 .result.md 在 worktree（task:run 产物，尚未合并入 main）、task 状态权威在 main——单 TaskDocRepository（单 tasksDir）无法兼顾（ISS-009 细化），故在 cli 层组合双仓储做路由（application 层不感知，结构类型满足 TaskDocRepositoryPort）。LocalReviewer 默认 approved 系 §12「避免阻塞」的直接落地（needs-human/rejected 均阻塞，唯 approved 放行）。合并机械与 task:run 一致（DEC-022），021 仍仅作崩溃续跑——task:review 的 done 合并对 DryRun/未提交产物场景与 task:run 同构，recoverMerge 的 branchMerged 误判风险同样存在。
+consequences: |-
+  task:review 的审查能力当前依赖注入；默认 LocalReviewer 不做真实审查（ISS-016），生产须注入真实 Reviewer（SDK 就位后，ISS-012/DEC-019 延伸）。路由适配器为 cli 层组合，ISS-009 的「按 taskId 路由」在此细化为「按文档类型路由」（task→main / result→worktree），未来多 worktree 并行审查可沿用此模式。task-review.ts 与 task-run.ts 存在重复合并逻辑（3 私有助手就地重实现，ISS-015），建议后续抽取 cli 共享助手模块。合并机械复用 DEC-022，无新增合并入口。若 Orchestrator 认为：(1) Reviewer 契约应下沉 infrastructure（如 executor-contract 同级）——需扩 TASK-027 后续任务 allowed_paths，本任务以 cli 层契约交付不阻塞；(2) LocalReviewer 默认应更保守（如 needs-human）——与 §12「避免阻塞」冲突，需先改规格。本任务 13 项 e2e/单测覆盖：approved→done 合并 / rejected 保留 worktree / needs-human→blocked 保留 worktree / no_review skipped 产物校验双路径（done/blocked）/ 审查结论隔离（.review.md vs .result.md）/ 默认 LocalReviewer / 状态前置（非 reviewing 拒绝）/ worktree 缺失拒绝 / 合并冲突 blocked+ISSUES / runCli 退出码（成功 + 非零）。
+```
+
+提议自 `TASK-027-cli-task-review.result.md`。task:review（值 import application StateOrchestrator/rebaseAndFastForward/writebackGlobalDocs + type-only import application ports + 值 import core 无 + 值 import infra GitMergeAdapter/TaskDocRepository + 跨命令 import task-run.ts 导出助手 createFsGlobalDocRepo/sequentialIdAllocator）作为 cli composition root 直接 wiring infra（ARCHITECTURE §4 允许 cli→infra/application/core）、无边界冲突；审查编排解释（Reviewer 注入式契约复用 TASK-022 + applyReview 路由适配器 + 合并复用 019+020）是 §5.3/§15/§12/§3.2 的合理落地，待 Orchestrator 确认。关联 ISS-015（重复合并逻辑）/ ISS-016（LocalReviewer 默认 approved）/ DEC-022（合并机械复用）。
