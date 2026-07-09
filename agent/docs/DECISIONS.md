@@ -438,3 +438,23 @@ consequences: |-
 ```
 
 提议自 `TASK-025-cli-status-and-rebuild-index.result.md`。status/rebuild-index 命令（status 值 import core TaskStatusSchema/LayerSchema + 值 import infra TaskDocRepository/buildExecutionSummary；rebuild-index 值 import better-sqlite3 Database + 值 import infra IndexRepository/GlobalDocRepository/TaskDocRepository/表名常量）作为 cli composition root 直接 wiring infra（ARCHITECTURE §4 允许 cli→infra，application 不得直接 import infra 不影响 cli）、无边界冲突；两处 CLI 设计解释（索引库默认路径 .caw/index.db + status 文档权威不读 SQLite）均为 §3.1/§3.2 硬约束的合理落地，待 Orchestrator 确认。关联 ISS-013（framework.ts allowed_paths）。
+
+---
+
+## DEC-022 task:run 新鲜合并走 rebaseAndFastForward+writebackGlobalDocs，recoverMerge 留作崩溃续跑
+
+```yaml
+id: DEC-022
+title: "task:run 新鲜合并走 rebaseAndFastForward+writebackGlobalDocs，recoverMerge 留作崩溃续跑"
+status: proposed
+scope: cli（task:run 合并编排）
+created_from_task: TASK-026
+decision: |-
+  TASK-026 对 Readme §3.2（合并链路）/任务 §2（done 才合并、调 019/020/021、失败走恢复）的合并编排作如下解释并落地：task:run 的「done 免审合并」走 rebaseAndFastForward（TASK-019）+ writebackGlobalDocs（TASK-020）；recoverMerge（TASK-021）不作为新鲜合并入口，仅作为「合并链路崩溃后续跑 task:run 时」的恢复机制（由上层按 git 状态触发）。合并冲突（019 返回 conflicts）由 task:run 直接置 done→blocked（Orchestrator confirmed=true）+ appendMergeConflictIssue 登记进 docs/ISSUES.md，不经 021。
+rationale: |-
+  recoverMerge 以 GitMergePort.branchMerged（git merge-base --is-ancestor branch main）为唯一恢复分叉点。对 DryRun（及任何「产出未提交 .result.md」的执行器）的新鲜执行：worktree 分支从 main 基线创建、Executor 仅写出未提交产物、分支 HEAD == main 基线 → branchMerged 恒为真（commit 是自身的祖先），recoverMerge 会判「已合并」而 skipped-merged 跳过合并、仅补回写，导致未提交产物永不进入 main。rebaseAndFastForward 经 commitAuditResult（git add + commit）把未提交产物落盘后再 fast-forward，是新鲜合并的正确路径。021 的 branchMerged 语义假设「合并已被尝试过」，与新鲜执行的前置状态不兼容。
+consequences: |-
+  task:run 单次成功执行不调用 recoverMerge；崩溃续跑（重入 task:run 时任务可能已 running + 部分合并）需上层状态检测 + 021 假设对齐，本任务未实现（单次 e2e 不触发），留作后续。task:review（TASK-027）的合并可复用同一 019+020 路径。021 在「合并已部分完成（如已 commitAuditResult 但未 ff）」的崩溃续跑下仍可能因 branchMerged 假设而重复审计提交——续跑幂等性需进一步设计（本任务范围外）。若 Orchestrator 认为：(1) 应统一经 recoverMerge——需先在 worktree 内提交产物（如让 Executor 或 task:run 在合并前 commit）使分支领先基线，方能经 branchMerged==false 走重合并，但会与 commitAuditResult 重复提交冲突；(2) 新鲜合并应另起独立入口——本任务以 019+020 直接组合已满足。本任务 13 项 e2e/单测覆盖：DryRun reviewing 不合并 / DryRun done(no_review) 合并回收 / 产物未通过 blocked / 依赖未完成拒绝 / 依赖产物刷新 source_files / 非 ready 拒绝 / 路径重叠拒绝启动 / 合并冲突 blocked+ISSUES / parseTestingCommands / runCli 退出码。
+```
+
+提议自 `TASK-026-cli-task-run.result.md`。task:run（值 import application StateOrchestrator/computeContextPack/refreshSourceFiles/rebaseAndFastForward/writebackGlobalDocs + 值 import core resolvePathScope/computeVerificationAllowlist + 值 import infra DryRunLocalExecutor/GitMergeAdapter/TaskDocRepository/WorktreeAdapter/GlobalDocRepository/buildStartupPrompt）作为 cli composition root 直接 wiring infra（ARCHITECTURE §4 允许 cli→infra/application/core，application 不得直接 import infra 不影响 cli）、无边界冲突；合并编排解释（新鲜合并走 019+020、021 留作崩溃续跑）是 §3.2 合并链路与 recoverMerge branchMerged 语义的合理落地，待 Orchestrator 确认。关联 ISS-014（fastForwardMain 工作区同步）。

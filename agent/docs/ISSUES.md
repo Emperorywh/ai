@@ -230,4 +230,22 @@ recommended_action: |-
   TASK-025 把 status.ts/rebuild-index.ts/index.ts/test 列为 allowed_paths，但 CLI 命令注册单一入口 createProgram 位于 src/cli/framework.ts（TASK-023 既定模式、ARCHITECTURE §7 文档化的注册点）——新增命令必须在此追加 register<Name>Command 调用，方能被 runCli（其内部 createProgram）识别，否则 caw status / caw rebuild-index 为未知命令。本任务已对 framework.ts 做同层 src/cli 增量改动（2 行 import + 2 行 register 调用 + 注释），未碰 forbidden_paths（src/core/application/infrastructure）。建议（任选其一，待 Orchestrator 裁定）：(A) TASK-026/027 等 CLI 命令任务的 allowed_paths 显式加入 src/cli/framework.ts（推荐，最小改动，匹配实际）；(B) 在 ARCHITECTURE §7 注明 framework.ts 为所有 CLI 命令任务的共享注册点、视为隐含 allowed（需放宽边界判定的实现）；(C) 重构为 index.ts 驱动注册（破坏 runCli 单一入口的既定模式，不推荐）。src/cli/index.ts（bin 入口）经评估无需改动（runCli 已统管，任务列入 allowed_paths 属冗余）。不阻塞验收（改动同层、非破坏性、与 TASK-023 模式一致）。
 ```
 
-提议自 `TASK-025-cli-status-and-rebuild-index.result.md`。CLI 命令注册入口 createProgram 在 framework.ts，不在本任务 allowed_paths，但新增命令必须改它；已做同层增量未碰 forbidden_paths。低优先级，不阻塞验收，待 Orchestrator 裁定（A 后续 CLI 任务纳 framework.ts / B ARCHITECTURE 注明共享注册点 / C 重构 index.ts 驱动不推荐）。关联 DEC-021。
+提议自 `TASK-025-cli-status-and-rebuild-index.result.md`。CLI 命令注册入口 createProgram 在 framework.ts，不在本任务 allowed_paths，但新增命令必须改它；已做同层增量未碰 forbidden_paths。低优先级，不阻塞验收，待 Orchestrator 裁定（A 后续 CLI 任务纳 framework.ts / B ARCHITECTURE 注明共享注册点 / C 重构 index.ts 驱动不推荐）。关联 DEC-021。TASK-026（task:run）延续同一模式：allowed_paths 同样未含 framework.ts，做同层 src/cli 最小注册增量（1 行 import + 1 行 register 调用），未碰 forbidden_paths，进一步印证方案 A 的必要性。
+
+---
+
+## ISS-014 fastForwardMain 用 update-ref 不检出工作区，task:run 需手动同步主工作区结果文件
+
+```yaml
+id: ISS-014
+title: "fastForwardMain 用 update-ref 不检出工作区，task:run 需手动同步主工作区结果文件"
+status: open
+severity: low
+scope: cli（task:run）/ infrastructure（git worktree-adapter fastForwardMain）
+created_from_task: TASK-026
+owner: ""
+recommended_action: |-
+  GitMergeAdapter.fastForwardMain（TASK-018）以 git update-ref refs/heads/<mainRef> 移动主分支 ref、不更新主仓库工作区文件（update-ref 只动 ref，不 checkout）。task:run 合并回收后 .result.md 已在 main 历史中，但主工作区缺该文件（产物原本只在 worktree），caw status（经 TaskDocRepository 读工作区文件取执行摘要）会误判任务「未执行」。task:run 已以 syncMainWorktreeFile（git checkout <mainRef> -- <result_file>，仅检出结果文件到主工作区 + 索引、不动任务 status 的工作区写回）针对性补齐，使 status 能正确展示。建议（任选其一，待 Orchestrator 裁定）：(A) 在 fastForwardMain 内部或专门步骤统一处理工作区同步（ff 后 checkout 受影响路径），但需避免覆盖 Orchestrator 的 status 工作区写回；(B) status 命令在结果文件工作区缺失时从 git 历史回退读取（git show <mainRef>:<path>）；(C) 接受工作区 stale、文档化「合并后需 git checkout」。不阻塞验收（task:run 已针对性同步、单测验证结果文件主工作区可见）。
+```
+
+提议自 `TASK-026-cli-task-run.result.md`。TASK-018 fastForwardMain 的 update-ref 设计（避免 checkout / merge commit）天然不更新主工作区，与 TASK-026「status 权威在主仓库工作区文件」叠加产生 stale；task:run 以 syncMainWorktreeFile 补齐。低优先级，不阻塞验收，待 Orchestrator 裁定统一工作区同步策略。关联 DEC-022。
