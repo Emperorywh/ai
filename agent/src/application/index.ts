@@ -8,3 +8,5 @@
 // TASK-015：application → infrastructure 窄接口（Ports）与 Context Pack 生成器。
 export * from './ports.js'
 export * from './context-pack-generator.js'
+// TASK-016：拓扑排序与并行检测（调度计算）。
+export * from './scheduler.js'
