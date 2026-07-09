@@ -2,6 +2,7 @@ import { Command, CommanderError } from 'commander'
 import { registerInitCommand } from './commands/init.js'
 import { registerStatusCommand } from './commands/status.js'
 import { registerRebuildIndexCommand } from './commands/rebuild-index.js'
+import { registerTaskRunCommand } from './commands/task-run.js'
 
 /**
  * CLI 框架层：命令入口、命令注册、退出码约定与错误输出格式。
@@ -43,6 +44,7 @@ export function createProgram(): Command {
   registerInitCommand(program)
   registerStatusCommand(program)
   registerRebuildIndexCommand(program)
+  registerTaskRunCommand(program)
   return program
 }
 

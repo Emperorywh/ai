@@ -1,0 +1,715 @@
+import { spawnSync } from 'node:child_process'
+import { existsSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
+import { join, resolve } from 'node:path'
+import { Command } from 'commander'
+import { parse as parseYaml } from 'yaml'
+import {
+  StateOrchestrator,
+  computeContextPack,
+  refreshSourceFiles,
+  rebaseAndFastForward,
+  writebackGlobalDocs,
+  type DependencyResultSummary,
+  type IdAllocator,
+  type MergePorts,
+  type MergeTask,
+  type WritebackRequest,
+} from '../../application/index.js'
+import type {
+  GitMergePort,
+  GlobalDocName,
+  GlobalDocRepositoryPort,
+} from '../../application/ports.js'
+import {
+  computeVerificationAllowlist,
+  resolvePathScope,
+  type TestingCommand,
+} from '../../core/index.js'
+import type {
+  Layer,
+  Permission,
+  ResultFrontmatter,
+  TaskFrontmatter,
+  TaskId,
+  TaskStatus,
+} from '../../core/index.js'
+import {
+  DryRunLocalExecutor,
+  GitMergeAdapter,
+  GlobalDocRepository,
+  TaskDocRepository,
+  WorktreeAdapter,
+  buildStartupPrompt,
+  type ExecutorPermissionBoundary,
+  type TaskExecutor,
+} from '../../infrastructure/index.js'
+
+/**
+ * `task:run` 命令：单个任务的执行编排集成入口（Readme.md §11 / §3.2 / §17）。
+ *
+ * 职责：把 7 个下游能力（TASK-015/017/018/019/020/021/022）串联为一条完整执行链路——
+ *   依赖前置检查 → 刷新 context_pack 并回写 → ready→running → create worktree →
+ *   R7 恢复 node_modules → 组装权限边界 + §18 启动提示 → 选 Executor 执行 →
+ *   读 .result.md → applyResult 流转。
+ *
+ * 合并触发规则（§9 数据流 / 任务 §2）：
+ *   - 普通任务执行后停在 `reviewing`，**不合并**，提示运行 `task:review`。
+ *   - `no_review: true` 且 Orchestrator 校验产物通过、目标状态为 `done` 时，才触发合并回收
+ *     （rebase + 回填 + fast-forward，TASK-019）+ 全局文档 section 回写（TASK-020）。
+ *   - 合并冲突：`done → blocked`（Orchestrator 确认）+ 把冲突登记进 docs/ISSUES.md（§3.2/§8 不静默）。
+ *
+ * 分层定位（ARCHITECTURE.md §4 / 任务 §8）：CLI 是 composition root——只编排 application +
+ * infrastructure，不持有状态机、不重复领域规则。状态流转经 StateOrchestrator（TASK-017），
+ * 合并经 rebaseAndFastForward（TASK-019），回写经 writebackGlobalDocs（TASK-020）；对 infra 的
+ * 依赖在 ports 结构类型兼容下由本文件 wiring 注入。
+ *
+ * 幂等恢复（TASK-021 recoverMerge）：单次成功执行的新鲜合并走 019+020；recoverMerge 以
+ * `branchMerged` 为分叉点，对 DryRun 这类「产出未提交 .result.md」的新鲜执行，baseline 处
+ * branchMerged 恒真会误判为「已合并」而跳过合并，故 recoverMerge 留作**崩溃后续跑**入口
+ *（重入 task:run 时由上层按 git 状态触发），本命令的单次成功路径不调用它。
+ *
+ * 权威来源：根目录 Readme.md §11（执行流程）/ §3.2（worktree 合并策略）/ §17（失败恢复）。
+ */
+
+/** 默认主分支短名（§3.2）。 */
+const DEFAULT_MAIN_REF = 'main'
+/** 默认 worktree 根目录（相对项目根）。 */
+const DEFAULT_WORKTREES_REL = '.worktrees'
+/** .result.md 后缀（§9 约定，用于派生任务文件路径）。 */
+const RESULT_SUFFIX = '.result.md'
+
+/* ============================================================ *
+ * 结果与选项类型
+ * ============================================================ */
+
+/** `task:run` 的执行结果（供命令层输出 / 测试断言）。 */
+export interface TaskRunOutcome {
+  readonly taskId: TaskId
+  /** 执行 + 状态流转后的最终任务状态（reviewing / done / blocked / failed）。 */
+  readonly finalStatus: TaskStatus
+  /** 执行器名称（dry-run-local / claude-sdk，供日志区分）。 */
+  readonly executor: string
+  /** worktree 绝对路径。 */
+  readonly worktreePath: string
+  /** 是否触发了合并回收（仅 done 路径成功合并时为 true）。 */
+  readonly merged: boolean
+  /** 合并冲突文件清单（仅合并冲突时非空）。 */
+  readonly conflicts: readonly string[]
+}
+
+/**
+ * runTask 的可注入依赖。
+ *
+ * 默认全部接真实适配器（DryRunLocalExecutor / 真实 GitMergeAdapter / 文件系统全局文档仓储 /
+ * 顺序 id 分配器）；测试可注入 fake 以隔离 git / SDK / 全局文档（复用 TASK-025 / 021 测试模式）。
+ */
+export interface TaskRunOptions {
+  /** 项目根目录（默认当前工作目录）。 */
+  readonly projectRoot?: string
+  /** 主分支短名（默认 main）。 */
+  readonly mainRef?: string
+  /** worktree 根目录（默认 <项目根>/.worktrees）。 */
+  readonly worktreesDir?: string
+  /** Task Executor（默认 DryRunLocalExecutor；SDK 就位后由上层注入 ClaudeSdkExecutor）。 */
+  readonly executor?: TaskExecutor
+  /** 合并用 git 原语 Port（默认真实 GitMergeAdapter；测试可注入 fake 模拟冲突）。 */
+  readonly gitMergePort?: GitMergePort
+  /** 全局文档读写 Port（默认文件系统适配器；测试可注入内存版）。 */
+  readonly globalDocRepo?: GlobalDocRepositoryPort
+  /** DEC-XXX / ISS-XXX id 分配器（默认顺序分配）。 */
+  readonly idAllocator?: IdAllocator
+  /** R7 node_modules 恢复策略（默认 restoreNodeModules；测试可注入 no-op）。 */
+  readonly nodeModulesRestorer?: (
+    wtPath: string,
+    mainRepo: string,
+    permissions: readonly Permission[],
+  ) => void
+  /** 项目级验证命令声明（默认从 docs/TESTING.md 解析；测试可注入）。 */
+  readonly testingCommands?: readonly TestingCommand[]
+}
+
+/* ============================================================ *
+ * 公开 API：runTask
+ * ============================================================ */
+
+/**
+ * 执行单个任务（Readme.md §11 / §3.2）。
+ *
+ * 链路：
+ *   1. 读任务（main 仓库，frontmatter 权威）→ 状态须为 `ready`。
+ *   2. 依赖前置检查：全部 `depends_on` 须 `done`，否则拒绝运行（任务 §8）。
+ *   3. 刷新 `context_pack.source_files`（refreshSourceFiles）并回写 frontmatter（§11）。
+ *   4. 组装权限边界：resolvePathScope 检测路径重叠（deny 优先拒绝启动，§16）+
+ *      computeVerificationAllowlist（layer 裁剪 + 任务级并集）。
+ *   5. `ready → running`（StateOrchestrator，状态机校验后写回 main 仓库）。
+ *   6. create worktree（每个 running 任务独立 worktree + 分支 task/TASK-XXX，§3.2）。
+ *   7. R7：恢复 worktree 内 node_modules。
+ *   8. 组装 §18 启动提示 → Executor 在 worktree 内执行、产出 .result.md。
+ *   9. 读 .result.md（从 worktree —— 产物尚未合并入 main）→ applyResult 流转。
+ *  10. 目标状态为 `done`（免审校验通过）→ 合并回收 + 全局文档回写；冲突 → blocked + ISSUES。
+ *
+ * 状态权威在 main 仓库 frontmatter（TaskDocRepository 读写）；执行产物在 worktree（Executor 写、
+ * 合并经 rebase+ff 回收进 main）。任务 status 流转写回 main 工作区文件（§3.2 全局状态由 Orchestrator 维护）。
+ */
+export async function runTask(
+  taskId: TaskId,
+  options: TaskRunOptions = {},
+): Promise<TaskRunOutcome> {
+  const projectRoot = resolve(options.projectRoot ?? process.cwd())
+  const mainRef = options.mainRef ?? DEFAULT_MAIN_REF
+  const worktreesDir = resolve(options.worktreesDir ?? join(projectRoot, DEFAULT_WORKTREES_REL))
+  const executor = options.executor ?? new DryRunLocalExecutor()
+  const globalRepo = options.globalDocRepo ?? createFsGlobalDocRepo(projectRoot)
+  const idAllocator = options.idAllocator ?? sequentialIdAllocator()
+
+  const tasksDir = join(projectRoot, 'docs', 'tasks')
+  if (!existsSync(tasksDir)) {
+    throw new Error(`任务目录不存在: ${tasksDir}（请先在项目根运行 caw init）`)
+  }
+
+  // main 仓库文档仓储：任务状态权威（ready→running→reviewing/done 流转写回这里）。
+  const mainRepo = new TaskDocRepository(tasksDir)
+  const task = mainRepo.readTask(taskId)
+
+  // 1. 状态前置：必须 ready 才能运行（draft 需先经 plan/task:create 置 ready）。
+  if (task.status !== 'ready') {
+    throw new Error(
+      `任务 ${taskId} 当前状态为 ${task.status}，应为 ready 才能运行（先置 ready 后再执行）`,
+    )
+  }
+
+  // 2. 依赖前置检查：全部依赖必须 done（任务 §8「依赖未完成 → 拒绝运行」）。
+  const allTasks = readAllTasks(mainRepo)
+  checkDependenciesDone(taskId, task.depends_on, allTasks)
+
+  // 3. 刷新 context_pack.source_files（§11：依赖完成后用其实际产物替换预填）并回写 frontmatter。
+  const dependencyResults = readDependencyResults(mainRepo, task.depends_on)
+  const refreshedSourceFiles = refreshSourceFiles(task, dependencyResults)
+  const refreshedTask: TaskFrontmatter = {
+    ...task,
+    context_pack: { ...task.context_pack, source_files: refreshedSourceFiles },
+  }
+  mainRepo.writeTask(refreshedTask)
+  const contextPack = computeContextPack(refreshedTask, { dependencyResults })
+
+  // 4. 权限边界（路径重叠拒绝启动在 create worktree 之前，避免建了 worktree 再拒绝）。
+  const testingCommands =
+    options.testingCommands ?? parseTestingCommands(readOptional(join(projectRoot, 'docs', 'TESTING.md')))
+  const boundary = buildPermissionBoundary(task, testingCommands)
+
+  // 5. ready → running（confirmed 不需要：ready→running 无 confirmed 闸门，§7）。
+  const orchestrator = new StateOrchestrator(mainRepo)
+  orchestrator.transition(taskId, 'running', {
+    no_review: task.no_review,
+    confirmed: false,
+  })
+
+  // 6. worktree 创建（独立工作区 + 分支 task/TASK-XXX，§3.2）。
+  const worktreePort = new WorktreeAdapter(projectRoot, worktreesDir)
+  const wtPath = worktreePort.create(mainRef, taskId)
+
+  // 7. R7：恢复 worktree 内 node_modules。
+  const restorer = options.nodeModulesRestorer ?? restoreNodeModules
+  restorer(wtPath, projectRoot, task.permissions)
+
+  // 8. 组装 §18 启动提示并在 worktree 内执行（Executor 产出 .result.md）。
+  const resultFileRel = task.workflow_outputs.result_file
+  const resultFileAbs = join(wtPath, resultFileRel)
+  const startupPrompt = buildStartupPrompt({
+    taskId,
+    taskFile: taskFileFromResult(resultFileRel),
+    resultFile: resultFileRel,
+  })
+  await executor.execute({
+    task_id: taskId,
+    worktree_path: wtPath,
+    result_file: resultFileAbs,
+    context_pack: contextPack,
+    permission_boundary: boundary,
+    startup_prompt: startupPrompt,
+  })
+
+  // 9. 读 .result.md（worktree 内 —— 产物尚未合并入 main；applyResult 接收 result 作参数）。
+  const worktreeRepo = new TaskDocRepository(join(wtPath, 'docs', 'tasks'))
+  const result = worktreeRepo.readResult(taskId)
+
+  // 10. 状态流转：把 result 映射为目标状态（no_review + completed + review 时校验产物三分，§7/§10）。
+  // orchestratorVerified 镜像 StateOrchestrator.isResultAcceptable（验证结果无 failed）：
+  // 免审任务由 Orchestrator（本命令）校验产物，通过→done / 未通过→blocked。
+  const orchestratorVerified = isProductAcceptable(result)
+  orchestrator.applyResult(taskId, result, { orchestratorVerified })
+
+  // 11. done（免审校验通过）才合并回收；reviewing 不合并；冲突 / 失败不在此分支合并。
+  let merged = false
+  let conflicts: string[] = []
+  const statusAfterResult = mainRepo.readTask(taskId).status
+  if (statusAfterResult === 'done') {
+    const mergeOutcome = rebaseAndFastForwardMerge({
+      git: options.gitMergePort ?? new GitMergeAdapter(projectRoot, worktreesDir),
+      wtPath,
+      task: refreshedTask,
+      mainRef,
+    })
+    if (mergeOutcome.merged) {
+      // 合并成功 → 全局文档 section 回写（§3.2 串行回写 global_update_requests）。
+      const writebackRequest: WritebackRequest = {
+        task_id: taskId,
+        updates: result.global_update_requests,
+      }
+      writebackGlobalDocs(globalRepo, [writebackRequest], { idAllocator })
+      // fastForwardMain 用 update-ref 移动 ref、不检出工作区；把已进 main 历史的结果文件
+      // 同步到主工作区（仅该文件，不动任务 status 工作区写回）。
+      syncMainWorktreeFile(projectRoot, mainRef, resultFileRel)
+      merged = true
+    } else {
+      conflicts = [...mergeOutcome.conflicts]
+      // 合并冲突：done → blocked（Orchestrator 确认）+ 落 ISSUES（§3.2/§8 不静默）。
+      orchestrator.transition(taskId, 'blocked', {
+        no_review: task.no_review,
+        confirmed: true,
+      })
+      appendMergeConflictIssue(globalRepo, idAllocator, taskId, conflicts)
+    }
+  }
+
+  const finalStatus = mainRepo.readTask(taskId).status
+  return {
+    taskId,
+    finalStatus,
+    executor: executor.name,
+    worktreePath: wtPath,
+    merged,
+    conflicts,
+  }
+}
+
+/* ============================================================ *
+ * 合并回收（TASK-019 rebase-ff）
+ * ============================================================ */
+
+/** rebaseAndFastForwardMerge 的输入（git 原语 Port + worktree 路径 + 任务投影 + 主分支）。 */
+interface MergeInput {
+  readonly git: GitMergePort
+  readonly wtPath: string
+  readonly task: TaskFrontmatter
+  readonly mainRef: string
+}
+
+/**
+ * 在 worktree 内执行 rebase + 回填 + fast-forward 合并（TASK-019）。
+ *
+ * docs Port 路由到 worktree 的 docs/tasks（ISS-009：合并读 / 写 .result.md 在 worktree 内）。
+ * 返回 merged=true（已 ff 进 main）/ merged=false + 冲突清单（供调用方置 blocked + 落 ISSUES）。
+ */
+function rebaseAndFastForwardMerge(input: MergeInput): {
+  merged: boolean
+  conflicts: readonly string[]
+} {
+  const docs: MergePorts['docs'] = new TaskDocRepository(join(input.wtPath, 'docs', 'tasks'))
+  const ports: MergePorts = { git: input.git, docs }
+  const mergeTask: MergeTask = {
+    id: input.task.id,
+    depends_on: input.task.depends_on,
+    workflow_outputs: { result_file: input.task.workflow_outputs.result_file },
+  }
+  const outcome = rebaseAndFastForward(ports, [mergeTask], { mainRef: input.mainRef })
+  const own = outcome.results.find((r) => r.taskId === input.task.id)
+  if (own === undefined) {
+    // 单任务合并必产出本任务结果；到此处属异常，不静默。
+    throw new Error(`合并未产出 ${input.task.id} 的结果`)
+  }
+  if (own.ok) return { merged: true, conflicts: [] }
+  return { merged: false, conflicts: own.conflicts }
+}
+
+/* ============================================================ *
+ * 权限边界组装（§16）
+ * ============================================================ */
+
+/**
+ * 组装 Executor 权限边界（§16）。
+ *
+ * resolvePathScope 检测 allowed/forbidden 重叠（deny 优先拒绝启动，不静默取并集）；
+ * computeVerificationAllowlist 按 layer 裁剪项目级命令 + 任务级并集，产出验证 allowlist。
+ */
+function buildPermissionBoundary(
+  task: TaskFrontmatter,
+  testingCommands: readonly TestingCommand[],
+): ExecutorPermissionBoundary {
+  const scope = resolvePathScope(task.allowed_paths, task.forbidden_paths)
+  if (!scope.ok) {
+    const overlapText = scope.overlaps
+      .map((o) => `${o.allowed} ⋂ ${o.forbidden}`)
+      .join('; ')
+    throw new Error(
+      `任务 ${task.id} 启动前权限检测失败：${scope.reason}（重叠: ${overlapText}）`,
+    )
+  }
+  const verificationCommands = computeVerificationAllowlist({
+    taskLayer: task.layer,
+    testingCommands,
+    taskVerification: task.verification,
+  })
+  return {
+    allowed_paths: task.allowed_paths,
+    forbidden_paths: task.forbidden_paths,
+    permissions: task.permissions,
+    verification_commands: verificationCommands,
+  }
+}
+
+/* ============================================================ *
+ * 依赖前置检查与产物读取
+ * ============================================================ */
+
+/** 读取全部任务 frontmatter，按 id 索引（供依赖状态检查）。 */
+function readAllTasks(repo: TaskDocRepository): Map<TaskId, TaskFrontmatter> {
+  const map = new Map<TaskId, TaskFrontmatter>()
+  for (const id of repo.listTasks()) {
+    map.set(id, repo.readTask(id))
+  }
+  return map
+}
+
+/**
+ * 检查全部依赖是否 done（任务 §8：依赖未完成 → 拒绝运行并提示）。
+ *
+ * 依赖不在任务集合内（无法确认完成）或状态非 done 均视为未完成，抛错不静默。
+ */
+function checkDependenciesDone(
+  taskId: TaskId,
+  dependsOn: readonly TaskId[],
+  allTasks: Map<TaskId, TaskFrontmatter>,
+): void {
+  if (dependsOn.length === 0) return
+  const pending: string[] = []
+  for (const dep of dependsOn) {
+    const depTask = allTasks.get(dep)
+    if (depTask === undefined) {
+      pending.push(`${dep}（不在任务集合内，无法确认完成）`)
+    } else if (depTask.status !== 'done') {
+      pending.push(`${dep}（当前 ${depTask.status}）`)
+    }
+  }
+  if (pending.length > 0) {
+    throw new Error(
+      `任务 ${taskId} 的前置依赖未全部完成，拒绝运行（§8）：${pending.join('; ')}`,
+    )
+  }
+}
+
+/**
+ * 读取各依赖 .result.md 的产物清单（modified_files ∪ created_files）。
+ *
+ * 调用前依赖已确认 done（checkDependenciesDone）；done 依赖无 .result.md（异常但非致命）
+ * 按空产物计入，使 refreshSourceFiles 仍能刷新（all-or-nothing：全部依赖在 map 内即刷新）。
+ */
+function readDependencyResults(
+  repo: TaskDocRepository,
+  dependsOn: readonly TaskId[],
+): ReadonlyMap<TaskId, DependencyResultSummary> {
+  const map = new Map<TaskId, DependencyResultSummary>()
+  for (const dep of dependsOn) {
+    let modified_files: string[] = []
+    let created_files: string[] = []
+    try {
+      const r = repo.readResult(dep)
+      modified_files = [...r.modified_files]
+      created_files = [...r.created_files]
+    } catch (err) {
+      // 依赖 done 但 .result.md 缺失：按空产物计入；其余错误（损坏）冒泡。
+      if (!isDocMissing(err)) throw err
+    }
+    map.set(dep, { task_id: dep, modified_files, created_files })
+  }
+  return map
+}
+
+/* ============================================================ *
+ * R7：node_modules 恢复
+ * ============================================================ */
+
+/**
+ * R7 策略：恢复 worktree 内 node_modules（PLAN R7 / 任务 §2）。
+ *
+ * 串行默认复用主工作区 node_modules（避免每个 worktree 重装的昂贵代价）；仅当任务声明
+ * `install_dependencies` 能力时在 worktree 内重装（npm install）。复用优先用 junction / symlink
+ * 把主工作区 node_modules 暴露给 worktree（不复制，避免慢与磁盘占用）。
+ *
+ * 不静默兜底：主工作区无 node_modules 且未声明 install_dependencies 时不做操作（后续验证命令
+ * 若因缺依赖失败，由执行器 / 验证结果如实记录，本层不伪造依赖就绪）。
+ */
+export function restoreNodeModules(
+  wtPath: string,
+  mainRepo: string,
+  permissions: readonly Permission[],
+): void {
+  const mainNm = join(mainRepo, 'node_modules')
+  const wtNm = join(wtPath, 'node_modules')
+
+  // 声明 install_dependencies → 在 worktree 内重装（R7「否则按 install_dependencies 重装」）。
+  if (permissions.includes('install_dependencies')) {
+    const r = spawnSync('npm', ['install'], { cwd: wtPath, stdio: 'ignore' })
+    if (r.status !== 0) {
+      throw new Error(
+        `worktree 内 npm install 失败（退出码 ${r.status ?? 'null'}），路径: ${wtPath}`,
+      )
+    }
+    return
+  }
+
+  // 串行默认：复用主工作区 node_modules（主工作区存在且 worktree 尚无时建立链接）。
+  if (!existsSync(mainNm) || existsSync(wtNm)) return
+  // junction：Windows 目录链接（无需管理员权限；POSIX 上 type 被忽略，创建常规 symlink）。
+  try {
+    symlinkSync(mainNm, wtNm, 'junction')
+    return
+  } catch {
+    // junction 失败（非 Windows 或权限不足）→ 回退常规目录 symlink。
+  }
+  try {
+    symlinkSync(mainNm, wtNm, 'dir')
+  } catch (err) {
+    throw new Error(
+      `无法为 worktree 链接 node_modules（${wtNm} → ${mainNm}）：` +
+        `${err instanceof Error ? err.message : String(err)}。` +
+        '请声明 install_dependencies 能力由 worktree 内重装，或预置 node_modules。',
+    )
+  }
+}
+
+/* ============================================================ *
+ * 全局文档（fs 适配器 + 冲突 ISSUES 登记 + 主工作区同步）
+ * ============================================================ */
+
+/**
+ * 文件系统版 GlobalDocRepositoryPort：文件 I/O 走 docs/{PROGRESS,DECISIONS,ISSUES}.md，
+ * 正文变换委托真实 GlobalDocRepository（复用 TASK-012 原语，不重复实现，DEC-012）。
+ */
+export function createFsGlobalDocRepo(projectRoot: string): GlobalDocRepositoryPort {
+  const paths: Record<GlobalDocName, string> = {
+    progress: join(projectRoot, 'docs', 'PROGRESS.md'),
+    decisions: join(projectRoot, 'docs', 'DECISIONS.md'),
+    issues: join(projectRoot, 'docs', 'ISSUES.md'),
+  }
+  const repo = new GlobalDocRepository()
+  return {
+    readGlobalDoc: (name) => readOptional(paths[name]),
+    writeGlobalDoc: (name, content) => {
+      writeFileSync(paths[name], content, 'utf8')
+    },
+    applyProgressUpdate: (doc, update) => repo.applyProgressUpdate(doc, update),
+    appendDecision: (doc, decision) => repo.appendDecision(doc, decision),
+    appendIssue: (doc, issue) => repo.appendIssue(doc, issue),
+    readDecisions: (doc) => repo.readDecisions(doc),
+    readIssues: (doc) => repo.readIssues(doc),
+  }
+}
+
+/**
+ * 把合并冲突登记进 docs/ISSUES.md（§3.2 / 任务 §8 不静默）。
+ *
+ * 经 idAllocator 分配 ISS-XXX（既有非空 id ∪ 本批次去重）后 appendIssue 写回。
+ * 冲突清单（unmerged 文件）记入 recommended_action 供人工定位。
+ */
+function appendMergeConflictIssue(
+  globalRepo: GlobalDocRepositoryPort,
+  idAllocator: IdAllocator,
+  taskId: TaskId,
+  conflicts: readonly string[],
+): void {
+  const issuesDoc = globalRepo.readGlobalDoc('issues')
+  const usedIds = collectExistingIds(globalRepo.readIssues(issuesDoc))
+  const id = idAllocator.nextIssueId(usedIds)
+  const updated = globalRepo.appendIssue(issuesDoc, {
+    id,
+    title: `${taskId} 合并冲突`,
+    status: 'open',
+    severity: 'high',
+    scope: taskId,
+    created_from_task: taskId,
+    owner: '',
+    recommended_action: `解决 rebase 合并冲突后重跑 caw task:run ${taskId}；冲突文件: ${conflicts.join(', ')}`,
+  })
+  globalRepo.writeGlobalDoc('issues', updated)
+}
+
+/** 合并后把已进入 main 历史的结果文件同步到主工作区（fastForwardMain 用 update-ref，工作区不自动检出）。 */
+function syncMainWorktreeFile(mainRepoDir: string, mainRef: string, resultFileRel: string): void {
+  // 仅检出该文件到主工作区 + 索引；不动其余工作区改动（如任务 status 写回）。
+  const r = spawnSync('git', ['checkout', mainRef, '--', resultFileRel], {
+    cwd: mainRepoDir,
+    stdio: 'ignore',
+  })
+  if (r.status !== 0) {
+    // 同步失败不阻断（合并已成功进 main 历史），但显式告警（AGENTS §4 不静默）。
+    console.warn(
+      `warning: 同步主工作区结果文件失败（${resultFileRel}，退出码 ${r.status ?? 'null'}）；` +
+        '该文件已在 main 历史中，可经 git checkout 手动检出。',
+    )
+  }
+}
+
+/* ============================================================ *
+ * 纯辅助函数
+ * ============================================================ */
+
+/**
+ * no_review 任务的「产物齐全」校验（§7 / §15）。
+ *
+ * 镜像 StateOrchestrator.isResultAcceptable（私有）：.result.md 可读（readResult 不抛即结构合法）+
+ * 验证结果无失败项（verification 无 result === 'failed'）。通过 → 免审直 done，未通过 → blocked。
+ */
+function isProductAcceptable(result: ResultFrontmatter): boolean {
+  return result.verification.every((v) => v.result !== 'failed')
+}
+
+/** 从 workflow_outputs.result_file 派生任务文件路径（去 .result.md 加 .md，§9 共用 slug）。 */
+function taskFileFromResult(resultFile: string): string {
+  if (!resultFile.endsWith(RESULT_SUFFIX)) return resultFile
+  return resultFile.slice(0, resultFile.length - RESULT_SUFFIX.length) + '.md'
+}
+
+/** 从既有条目数组收集非空 id 集合（id 分配去重基线，镜像 section-writeback.collectExistingIds）。 */
+function collectExistingIds(entries: ReadonlyArray<{ id: string }>): Set<string> {
+  const set = new Set<string>()
+  for (const e of entries) {
+    if (e.id !== '') set.add(e.id)
+  }
+  return set
+}
+
+/** 顺序 id 分配器：同前缀（DEC / ISS）现有最大编号 +1，三位补零（与 recovery 测试一致）。 */
+export function sequentialIdAllocator(): IdAllocator {
+  const next = (used: ReadonlySet<string>, prefix: 'DEC' | 'ISS'): string => {
+    const re = prefix === 'DEC' ? /^DEC-(\d+)$/ : /^ISS-(\d+)$/
+    let max = 0
+    for (const id of used) {
+      const m = re.exec(id)
+      if (m?.[1] !== undefined) max = Math.max(max, Number(m[1]))
+    }
+    return `${prefix}-${String(max + 1).padStart(3, '0')}`
+  }
+  return {
+    nextDecisionId: (used) => next(used, 'DEC'),
+    nextIssueId: (used) => next(used, 'ISS'),
+  }
+}
+
+/** 读取文件内容；不存在返回空串（readDecisions / readIssues 对无 fenced yaml 返回空数组）。 */
+function readOptional(filePath: string): string {
+  return existsSync(filePath) ? readFileSync(filePath, 'utf8') : ''
+}
+
+/** 判定错误是否为「文档不存在」（TaskDocRepository 抛错的稳定前缀，DEC-008）。 */
+function isDocMissing(err: unknown): boolean {
+  return err instanceof Error && err.message.startsWith('文档不存在')
+}
+
+/**
+ * 解析 docs/TESTING.md 的 fenced ```yaml 块为项目级验证命令声明（§6.8 / §16）。
+ *
+ * TESTING.md 每条命令以 ```yaml 围栏声明 {command, layers?, requires_permissions?, notes}；
+ * 本函数提取前三个字段（notes 忽略），不能解析的块跳过。无 TESTING.md 时返回空数组。
+ */
+export function parseTestingCommands(raw: string): TestingCommand[] {
+  if (raw.length === 0) return []
+  const lines = raw.split(/\r?\n/)
+  const commands: TestingCommand[] = []
+  let i = 0
+  while (i < lines.length) {
+    if ((lines[i] ?? '').trim().toLowerCase() === '```yaml') {
+      // 找配对闭围栏；无闭围栏则跳过残缺块。
+      let j = i + 1
+      while (j < lines.length && (lines[j] ?? '').trim() !== '```') j++
+      if (j >= lines.length) {
+        i += 1
+        continue
+      }
+      const yamlText = lines.slice(i + 1, j).join('\n')
+      i = j + 1
+      let obj: unknown
+      try {
+        obj = parseYaml(yamlText)
+      } catch {
+        continue
+      }
+      const cmd = toTestingCommand(obj)
+      if (cmd !== null) commands.push(cmd)
+    } else {
+      i += 1
+    }
+  }
+  return commands
+}
+
+/** 把单个 YAML 解析对象窄化为 TestingCommand（command 必填且为字符串；layers / permissions 过滤为字符串数组）。 */
+function toTestingCommand(obj: unknown): TestingCommand | null {
+  if (obj === null || typeof obj !== 'object' || !('command' in obj)) return null
+  const o = obj as { command?: unknown; layers?: unknown; requires_permissions?: unknown }
+  if (typeof o.command !== 'string') return null
+  return {
+    command: o.command,
+    layers: toStringArray(o.layers) as Layer[] | undefined,
+    requires_permissions: toStringArray(o.requires_permissions) as Permission[] | undefined,
+  }
+}
+
+/** 把未知值窄化为字符串数组（非数组 → undefined；数组 → 过滤出字符串）。 */
+function toStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  return value.filter((x): x is string => typeof x === 'string')
+}
+
+/* ============================================================ *
+ * commander 注册
+ * ============================================================ */
+
+/** commander 解析后的 task:run 选项。 */
+interface TaskRunCommandOptions {
+  mainRef?: string
+  worktreesDir?: string
+  projectRoot?: string
+}
+
+/**
+ * 向 commander program 注册 task:run 命令。
+ * 退出码与错误输出归 framework.runCli 统一处理；本函数只负责命令签名与执行。
+ */
+export function registerTaskRunCommand(program: Command): void {
+  program
+    .command('task:run')
+    .description(
+      '执行单个任务：ready→running→Executor→状态流转（done 免审合并；reviewing 待 task:review）',
+    )
+    .argument('<taskId>', '任务 id（TASK-XXX）')
+    .option('--main-ref <ref>', '主分支短名（默认 main）')
+    .option('--worktrees-dir <dir>', 'worktree 根目录（默认 <项目根>/.worktrees）')
+    .option('--project-root <dir>', '项目根目录（默认当前工作目录）')
+    .action(async (taskId: string, options: TaskRunCommandOptions) => {
+      const outcome = await runTask(taskId, {
+        projectRoot: options.projectRoot,
+        mainRef: options.mainRef,
+        worktreesDir: options.worktreesDir,
+      })
+      printOutcome(outcome)
+    })
+}
+
+/** 按最终状态输出执行结果（退出码统一由 framework.runCli 处理）。 */
+function printOutcome(outcome: TaskRunOutcome): void {
+  console.log(
+    `任务 ${outcome.taskId} 执行完成（executor=${outcome.executor}）→ 状态: ${outcome.finalStatus}`,
+  )
+  if (outcome.finalStatus === 'reviewing') {
+    console.log(`任务进入审查，请运行: caw task:review ${outcome.taskId}`)
+  } else if (outcome.merged) {
+    console.log('已合并回主分支并回写全局文档（§3.2）')
+  } else if (outcome.conflicts.length > 0) {
+    console.log(
+      `合并冲突，已置 blocked 并登记 ISSUES；冲突文件: ${outcome.conflicts.join(', ')}`,
+    )
+  } else {
+    console.log('任务未进入 done，未触发合并（详情见 .result.md / ISSUES）')
+  }
+}
