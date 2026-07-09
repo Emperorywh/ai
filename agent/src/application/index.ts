@@ -4,7 +4,7 @@
  * 职责：编排用例流程（规划、Context Pack 生成、调度、状态编排、合并）。
  * 硬约束：不直接 import infrastructure 实现类，
  * 一律经 src/application/ports.ts 中的窄接口（Port）依赖基础设施。
- *
- * 后续任务（TASK-015 起）在此导出各用例。
  */
-export {}
+// TASK-015：application → infrastructure 窄接口（Ports）与 Context Pack 生成器。
+export * from './ports.js'
+export * from './context-pack-generator.js'
