@@ -285,3 +285,21 @@ recommended_action: |-
 ```
 
 提议自 `TASK-027-cli-task-review.result.md`。task:review 默认 LocalReviewer 产 approved 系 §12「避免阻塞」落地，复用 DryRun 哲学;但 review 的「放行合并」语义比 execution 的「completed」更需谨慎。中优先级（安全/正确性关注），不阻塞验收（§12 明文允许、可注入），待 Orchestrator 裁定默认行为防护（告警 / 显式标志）。关联 DEC-023 / ISS-012。
+
+---
+
+## ISS-017 MCP 配置文件格式与 init 衔接未落地，createMcpAdapterFromConfig 只接受 raw 对象
+
+```yaml
+id: ISS-017
+title: "MCP 配置文件格式与 init 衔接未落地，createMcpAdapterFromConfig 只接受 raw 对象"
+status: open
+severity: low
+scope: infrastructure（mcp-adapter 配置加载）
+created_from_task: TASK-028
+owner: ""
+recommended_action: |-
+  TASK-028 落地的 MCP 适配器骨架中，createMcpAdapterFromConfig(raw) 只接受「已解析的 raw 对象」（用 McpServersConfigSchema 校验后构造 McpAdapter），不读文件、不绑定具体配置文件路径。但 init（TASK-023）生成的项目骨架（AGENTS.md + docs/{SPEC,ARCHITECTURE,PLAN,PROGRESS,DECISIONS,ISSUES,TESTING}.md + docs/tasks/）尚无 MCP 配置文件——任务 §8 明文「依赖配置文件格式（与 init 生成的项目配置衔接）」目前无对接对象。SPEC 范围亦无具体 MCP server 清单（R5「无具体 server 清单」）。故配置文件格式（建议如项目根 .caw/mcp.json 或在 AGENTS/docs 内声明 server 清单）+ CLI wiring（读配置 → createMcpAdapterFromConfig → 构造 McpAdapter → 注入 Executor / 具体调用方）+ 具体 server 接入（浏览器/设计/项目管理等）均留待后续任务。不阻塞 TASK-028 验收（§8/§12 明文避免过度设计，骨架只交付结构与注册机制，可单测）。建议：待具体 MCP server 需求出现时，新增任务定义配置文件格式 + init 模板追加 MCP 配置占位 + CLI 注入链路。关联 DEC-024。
+```
+
+提议自 `TASK-028-infra-mcp-adapter-skeleton.result.md`。MCP 配置加载只接受 raw 对象、不读文件，系 §12「避免过度设计」落地（init 无 MCP 配置文件、SPEC 无 server 清单 R5，过早绑定文件格式属臆测）。低优先级（前瞻性 TODO，非缺陷），不阻塞验收（骨架结构 + 注册机制可单测）。关联 DEC-024。

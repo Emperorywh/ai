@@ -478,3 +478,23 @@ consequences: |-
 ```
 
 提议自 `TASK-027-cli-task-review.result.md`。task:review（值 import application StateOrchestrator/rebaseAndFastForward/writebackGlobalDocs + type-only import application ports + 值 import core 无 + 值 import infra GitMergeAdapter/TaskDocRepository + 跨命令 import task-run.ts 导出助手 createFsGlobalDocRepo/sequentialIdAllocator）作为 cli composition root 直接 wiring infra（ARCHITECTURE §4 允许 cli→infra/application/core）、无边界冲突；审查编排解释（Reviewer 注入式契约复用 TASK-022 + applyReview 路由适配器 + 合并复用 019+020）是 §5.3/§15/§12/§3.2 的合理落地，待 Orchestrator 确认。关联 ISS-015（重复合并逻辑）/ ISS-016（LocalReviewer 默认 approved）/ DEC-022（合并机械复用）。
+
+---
+
+## DEC-024 MCP 适配器骨架设计——transport 判别联合 + 零 core 依赖 + 骨架恒抛错 + 配置加载接受 raw
+
+```yaml
+id: DEC-024
+title: "MCP 适配器骨架设计——transport 判别联合 + 零 core 依赖 + 骨架恒抛错 + 配置加载接受 raw"
+status: proposed
+scope: infrastructure（mcp-adapter 骨架）
+created_from_task: TASK-028
+decision: |-
+  TASK-028 对 Readme §3.1（MCP 工具扩展职责边界：接入外部工具能力，不承载核心工作流领域逻辑）/任务 §2/§7/§8/§12 的 MCP 适配骨架作如下解释并落地：（1）`McpServerConfigSchema` 用 `z.discriminatedUnion('transport', stdio/http/sse)` 表达 transport 判别联合（stdio 含 command 必填 + args/env 默认 [] / {}，http/sse 含 url），类型安全且 TS 可正确收窄，避免 flat 可选字段无法区分 stdio 的 command 与 http 的 url。（2）`register(name, config)` 把注册名与 transport 配置分离（name 是注册表 key、config 不含 name），配置条目 `McpServerEntry = {name, config}` 嵌套结构避免 flat intersection 与判别联合的解析歧义；同名覆盖更新（便于配置重载）。（3）骨架阶段 `callTool(server, tool, args)` 恒抛错——未注册抛 McpServerNotRegisteredError（含已注册清单）、已注册抛 McpServerNotConfiguredError（连接未实现），声明为 async 匹配真实 MCP 调用契约，不伪造 McpToolResult（呼应 TASK-022 DryRun 哲学）。（4）错误体系 McpAdapterError（base）+ 两子类，复用 TASK-022 ExecutorError 模式。（5）`createMcpAdapterFromConfig(raw)` 只做「Zod 校验 + 构造」、不读文件 / 不绑定路径（init 尚无 MCP 配置文件，§12 避免过度设计）。（6）MCP 配置 schema 就近用 zod 定义在 infrastructure/mcp，不污染 core（§3.1 MCP 属 infra 关注点，且本任务 forbidden core），实现零 core 依赖。
+rationale: |-
+  判别联合是表达「不同 transport 有不同连接参数」的正确抽象（stdio 需 command/args/env、http/sse 需 url），且本仓库 Core Schema 一贯追求精度（task-schema/result-schema 等），flat 可选字段会让 TS 无法区分 stdio 与 http 的专属字段、收窄失效。name 与 config 分离让注册表 key 与 server 配置解耦，便于别名 / 重载；嵌套 entry（{name, config}）比 flat intersection 更稳健（判别联合 + intersection 在 Zod 解析层有歧义风险）。骨架恒抛错遵循 §7「具体 server 实现留空并抛『未配置』错误」且不伪造（与 TASK-022 不伪造 SDK 调用同源）。配置加载只接受 raw 对象而非文件，避免为不存在的配置文件格式过度设计（init 未生成 MCP 配置文件，R5 无 server 清单）。零 core 依赖是 forbidden_paths 的自然结果且最干净——MCP 配置 schema 是外部系统适配关注点（§3.1），不必上升为领域模型。
+consequences: |-
+  骨架可直接用于「注册 + 列举 + 调用代理」联调与测试；真实 server 接入时需：实现具体 transport 连接（替换 callTool 抛错为真实调用，stdio 起子进程 / http/sse 建连）、`_args` 去前缀消费为调用参数、定义配置文件格式与 CLI wiring（读配置→createMcpAdapterFromConfig→注入调用方）。具体 MCP server 清单未定（SPEC R5），后续按需另立任务（浏览器/设计/项目管理等）。ISS-017 记录「配置文件格式与 init 衔接未落地」留待后续。本任务 34 项单测覆盖：schema 正反例（判别联合 transport / http url 格式 / 未知 transport / 默认值 / entry name 非空）+ 注册/注销/列举（插入序 / 同名覆盖 / 空 name 拒绝 / list 不泄露 env）+ callTool 骨架（未注册 / 已注册未实现两路径 / 错误信息含名 / 错误类继承）+ 配置加载（合法 / mcp_servers 缺失默认 / 非法 entry / 非数组）+ 端到端。详见 ISS-017。
+```
+
+提议自 `TASK-028-infra-mcp-adapter-skeleton.result.md`。MCP 适配器骨架（仅依赖既有 zod，零反向依赖——不 import core/application/cli，MCP 配置 schema 属 infra 关注点就近定义；不依赖具体 MCP server SDK，SPEC 无 server 清单 R5）作为 infrastructure 适配层骨架、无边界冲突；设计解释（transport 判别联合 + 注册表 name/config 分离 + 骨架恒抛错不伪造 + 配置加载接受 raw 不绑定文件 + 零 core 依赖）是 §3.1/§7/§8/§12 的合理落地，待 Orchestrator 确认。关联 ISS-017（配置文件格式与 init 衔接未落地）/ DEC-019（TASK-022 注入式句柄 + DryRun 不伪造哲学，本骨架 callTool 恒抛错同源）。
