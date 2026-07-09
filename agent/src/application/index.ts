@@ -10,3 +10,5 @@ export * from './ports.js'
 export * from './context-pack-generator.js'
 // TASK-016：拓扑排序与并行检测（调度计算）。
 export * from './scheduler.js'
+// TASK-017：状态流转编排器（读 frontmatter → 校验转移 → 写回 status）。
+export * from './state-orchestrator.js'
