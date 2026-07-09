@@ -16,3 +16,5 @@ export * from './fs/global-doc-repo.js'
 export * from './sqlite/schema.js'
 // TASK-014：SQLite 索引仓储（upsert / query / rebuildFromDocs，写入容错不阻断）。
 export * from './sqlite/index-repo.js'
+// TASK-018：Git worktree 生命周期与合并原语适配器（子进程调系统 git）。
+export * from './git/worktree-adapter.js'
