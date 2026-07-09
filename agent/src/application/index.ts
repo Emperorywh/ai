@@ -16,3 +16,5 @@ export * from './state-orchestrator.js'
 export * from './merge/rebase-ff.js'
 // TASK-020：合并编排——全局文档 section 回写与冲突（§3.2 串行回写 + id 分配去重）。
 export * from './merge/section-writeback.js'
+// TASK-021：合并编排——幂等恢复（§3.2 合并崩溃后按 git 状态判定 skip/重合并 + 补回写）。
+export * from './merge/recovery.js'
