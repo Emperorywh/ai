@@ -1,10 +1,10 @@
+#!/usr/bin/env node
 /**
- * CLI 交互层入口。
- *
- * 职责：作为命令入口与 composition root，把 infrastructure 实现注入 application 用例。
- * 硬约束：不拥有核心状态机与任务规则，只编排 application / infrastructure。
- *
- * 后续任务（TASK-023 起）在此注册
- * init / plan / task:create / task:run / task:review / status / rebuild-index 命令。
+ * CLI bin 入口（package.json 的 bin.caw 指向编译产物 dist/cli/index.js）。
+ * 本文件不含命令逻辑，仅经 framework.runCli 编排命令并以退出码结束进程。
  */
-export {}
+import { runCli } from './framework.js'
+
+runCli(process.argv.slice(2))
+  .then((exitCode) => process.exit(exitCode))
+  .catch(() => process.exit(1))

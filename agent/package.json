@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "description": "自研 Coding Agent 长任务工作流系统：以文档协议驱动任务的拆分、执行、审查、合并与恢复。",
+  "bin": {
+    "caw": "./dist/cli/index.js"
+  },
   "engines": {
     "node": ">=20"
   },
