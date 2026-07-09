@@ -177,3 +177,21 @@ recommended_action: |-
 ```
 
 提议自 `TASK-020-app-merge-section-writeback.result.md`。§3.2 仅明文「多条 replace 命中同一 section」为冲突场景，append/replace 混合语义未明文。TASK-020 在 forbidden 约束下按字面落地（append 不计冲突，replace 逐条 apply 覆盖 append 为顺序结果）。低优先级，不阻塞验收（核心冲突场景已覆盖），待 Orchestrator 裁定方向（A 接受并回写 Readme / B 纳入冲突检测 / C replace 恒优先）。关联 DEC-017。
+
+---
+
+## ISS-011 「补做回写」无法判定全局文档回写是否已部分完成——progress append 在同一崩溃被多次恢复时会重复追加（合并进度不写 SQLite 的必然结果）
+
+```yaml
+id: ISS-011
+title: "「补做回写」无法判定全局文档回写是否已部分完成——progress append 在同一崩溃被多次恢复时会重复追加（合并进度不写 SQLite 的必然结果）"
+status: open
+severity: low
+scope: application/merge/recovery
+created_from_task: TASK-021
+owner: ""
+recommended_action: |-
+  Readme §3.2 line 125 明文合并操作幂等可恢复、合并进度不写 SQLite（可从 git 状态加 frontmatter status 完全重建），并把恢复分两路：「已进入则跳过合并、仅补做未完成的全局文档回写；未进入则丢弃中间态重新 rebase」。但「仅补做未完成」隐含一个判定：回写是否已（部分）完成。由于合并进度（含回写进度）不写 SQLite，恢复只能从 git 状态（branchMerged）重建「合并」进度，无法重建「回写」进度——branchMerged==true 仅说明合并已完成，不说明回写是否已落盘。故 TASK-021 recoverMerge 合并完成时一律重新执行 writebackGlobalDocs：对 decisions/issues（按 id 去重）与 progress replace（后写者覆盖）幂等，但 progress append（按拓扑序拼接）在同一崩溃被多次恢复调用时会重复追加同一 content。不阻塞验收（合并的幂等保证由 branchMerged 守住，单次恢复内回写正确；append 重复仅在异常的「同一崩溃多次 recoverMerge」时发生）。建议（任选其一，待 Orchestrator 裁定）：(A) 接受现状 + 规定 Orchestrator「一次崩溃一次恢复」（推荐，最简，契合 §3.2 不写进度）；(B) 引入回写完成标记（如 .result.md frontmatter 增 writeback_applied 字段，但与 §3.2「合并进度不写 SQLite」精神需权衡——frontmatter 非 SQLite，可接受）；(C) writebackGlobalDocs 对 append 也做幂等化（如按 content 去重，但 append 语义本就是叠加，去重会破坏合法的重复 append）。详见 DEC-018。
+```
+
+提议自 `TASK-021-app-merge-recovery.result.md`。§3.2 明文合并进度不写 SQLite，恢复只能从 git 状态（branchMerged）重建合并进度，无法重建回写进度；故 recoverMerge 合并完成时一律重做 writebackGlobalDocs——decisions/issues/replace 幂等，但 progress append 在同一崩溃被多次恢复时会重复追加。低优先级，不阻塞验收（合并幂等由 branchMerged 守住，单次恢复内回写正确），待 Orchestrator 裁定（A 接受 + 一次崩溃一次恢复 / B 回写完成标记 / C append 幂等化）。关联 DEC-018。
