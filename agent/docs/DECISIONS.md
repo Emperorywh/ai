@@ -280,3 +280,23 @@ consequences: |-
 ```
 
 提议自 `TASK-016-app-scheduler.result.md`。调度器仅 type-only import 既有 core 的 `TaskId`、零运行时依赖、零反向依赖、无边界冲突；七处设计解释（mergeOrder 同向 / 可并行批次语义 / 保守重叠 / 环自包含 / SchedulerTask 投影 / 空 allowed_paths 不冲突 / 确定性）均为 §3.2/§11/任务 §7/§8 的合理落地，待 Orchestrator 回写确认。
+
+---
+
+## DEC-014 StateOrchestrator 设计——四方法职责切分、applyResult/applyReview 共享私有转移、cascadeIfBlocked 逐个过状态机+不能则 skipped、产物校验清单、confirmed 取 false
+
+```yaml
+id: DEC-014
+title: "StateOrchestrator 设计——四方法职责切分、applyResult/applyReview 共享私有转移、cascadeIfBlocked 逐个过状态机+不能则 skipped、产物校验清单、confirmed 取 false"
+status: proposed
+scope: application/state-orchestrator
+created_from_task: TASK-017
+decision: |-
+  TASK-017 对 §5.1/§7/§10/§15 与 ARCHITECTURE §4 未明文的编排设计作如下解释并落地：（1）四方法职责——transition 是显式入口（context 全由调用方构造，含 confirmed）；applyResult 按 §10 映射并转移；applyReview 按 §15 映射；cascadeIfBlocked 按 §7 级联。（2）applyResult/applyReview 共享私有 applyResultForTask+applyTransition——transition 读 task 后调 applyTransition，applyResult 读 task 后调 applyResultForTask，applyReview 读 task 后按 review_result 分派（skipped 读 result 后调 applyResultForTask），避免重复读取。（3）applyResult 对 mapResultToStatus 的 ok:false（§10 非法组合）抛错转人工——DEC-005 consequences 明示「TASK-017 须对 ok:false 记 issue 并转人工（不得静默）」，单方法层面抛错是最明确的「不静默」，上层 catch 记 issue。（4）applyReview 的 skipped 分支委托 applyResult 复用 no_review 三分逻辑——读 .result.md → isResultAcceptable 校验产物 → applyResultForTask(task, result, verified)，避免重复实现 completed+review+no_review 的 done/blocked 分支（DEC-005）。（5）cascadeIfBlocked 逐个过 validateTransition，能流转者 writeTask blocked、不能者记 skipped 返回 CascadeOutcome——不抛错中断（级联是批量推进，单个后继无法流转不应阻断其余）、不静默跳过（skipped 显式返回让调用方知情转人工）。（6）产物校验清单 isResultAcceptable——.result.md 可读（readResult 不抛错即 Schema 通过）+ verification 无 result==='failed'（passed/skipped 放行）+ global_update_requests 三子项结构（ResultFrontmatterSchema 强制），内容非空不强制；对应 §7/§15「Orchestrator 校验 .result.md、验证结果和全局更新建议齐全」。（7）confirmed 在 applyResult/applyReview/cascadeIfBlocked 内部取 false——这三类从 running/reviewing 出发的合法转移均不依赖 confirmed（failed→* 与 done→blocked 的 confirmed 闸门由 transition 显式入口承载）；任何非法 from 都被 validateTransition 拦截抛错。
+rationale: |-
+  四方法切分对齐任务 §2 的四个用例，各自语义独立。共享私有方法遵循 AGENTS §3「不复制粘贴重复逻辑」——applyTransition（校验+写回）被 transition/applyResult/applyReview 复用，applyResultForTask（映射+转移）被 applyResult/applyReview-skipped 复用。ok:false 抛错：DEC-005 把「记录 issue 并转人工」的职责放在 TASK-017，单方法抛错让上层 Orchestrator 在 catch 中记 issue + 标 blocked/needs-human，比返回判别联合更直接（本类不是批量收集器）。skipped 委托 applyResult：§15 明示 skipped 时「Orchestrator 仍必须检查 .result.md、验证结果和全局更新建议是否齐全，才能置 done；不通过则走 blocked/failed」——这正是 mapResultToStatus 在 completed+review+noReview 的三分（DEC-005），复用避免两套产物校验逻辑漂移。cascadeIfBlocked 不抛错：级联针对一前置的全部后继，若某后继（如已 done）无法流转就抛错会阻断对其余后继的级联，且「无法级联」是状态机约束的如实反映而非异常；返回 CascadeOutcome 让调用方显式处理 skipped（AGENTS §3「不静默」=显式可追踪，非=抛错）。产物清单对应 §7/§15 明文三项；verification 无 failed 是「验证结果齐全」的最小判定（Executor 自报 passed/skipped 均可接受，failed 表示任务未真正通过验证）。confirmed=false 安全：mapResultToStatus 从 running 出发的合法目标（reviewing/done/blocked/failed/cancelled）经 validateTransition 时，仅 running→done 需 no_review（由 task.no_review 满足），confirmed 不参与；非法 from（如对已 done 任务 applyResult）被 validateTransition 拦截抛错，confirmed 取值不影响安全性。
+consequences: |-
+  TASK-019/020 合并回写不在此类（状态编排与合并解耦）；TASK-029 规划用例经本类驱动任务流转；CLI（TASK-026 task:run）在 Executor 返回后调 applyResult/applyReview、前置失败时调 cascadeIfBlocked。ISS-006：级联对 ready/draft 后继返回 skipped（状态机表无对应边），与 Readme §7 级联文字张力，待 Orchestrator 裁定。若 Orchestrator 认为：(a) applyResult 对 ok:false 应返回结果而非抛错（便于批量编排收集多任务问题）——改 applyResultForTask 返回判别联合（届时同步改 DEC-014 + 测试）；(b) cascadeIfBlocked 对 skipped 应抛错而非返回——改 skipped 分支为 throw（但中断批量级联）；(c) isResultAcceptable 应校验 global_update_requests 非空——改校验逻辑（但任务可能确实无更新，会误判）；(d) 级联应强制 blocked 绕过状态机——需先扩状态机表补 ready/draft→blocked 边（改 core，见 ISS-006）。新增 ReviewResult / TaskStatus 取值时 switch 穷尽性检查（applyReview default never）强制补全。
+```
+
+提议自 `TASK-017-app-state-orchestrator.result.md`。状态编排器仅 type-only import core 类型 + 值 import core 纯函数 + type-only import `./ports.js`、零反向依赖、无边界冲突；七处编排设计解释（四方法职责 / 共享私有转移 / ok:false 抛错转人工 DEC-005 落地 / skipped 委托 applyResult / cascadeIfBlocked 逐个过状态机+不能则 skipped / 产物校验清单 / confirmed 取 false）均为 §5.1/§7/§10/§15 与 ARCHITECTURE §4 的合理落地；级联张力见 ISS-006，待 Orchestrator 回写确认。
