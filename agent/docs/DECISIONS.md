@@ -338,3 +338,23 @@ consequences: |-
 ```
 
 提议自 `TASK-019-app-merge-rebase-ff.result.md`。合并编排仅 type-only import core 的 ExecutionCommit / TaskId / TaskStatus + 值 import core 纯函数 transitiveDependents + 值 import 同层 mergeOrder + type-only import `../ports.js`、零反向依赖（不 import infrastructure/cli 实现类，ARCHITECTURE §4）、无边界冲突；八处合并编排设计解释（批量拓扑序合并 / 冲突用 listConflicts 探测 / 冲突传递后继 skipped / 回填时序 audit 前 collect / 回填仅改 frontmatter / MergePorts 聚合 / 只产出不仲裁 / 沿用 Result 判别联合模式）均为 §3.2 / 任务 §2/§7/§8/§12 与 ARCHITECTURE §4 的合理落地；多 worktree docs 路由见 ISS-009，待 Orchestrator 回写确认。
+
+---
+
+## DEC-017 section-writeback 合并编排设计——progress 冲突仅 replace-replace、IdAllocator 无状态注入、串行读→合并→写、docs 完整 Record、只产出不仲裁
+
+```yaml
+id: DEC-017
+title: "section-writeback 合并编排设计——progress 冲突仅 replace-replace、IdAllocator 无状态注入、串行读→合并→写、docs 完整 Record、只产出不仲裁"
+status: proposed
+scope: application/merge/section-writeback
+created_from_task: TASK-020
+decision: |-
+  TASK-020 对 §3.2 / §10 与任务 §2/§7/§8/§9/§12 与 ARCHITECTURE §4 未明文的回写编排设计作如下解释并落地：（1）progress 冲突检测仅针对同一 section 的多条 replace——§3.2 字面「多条 replace 命中同一 section 时按拓扑序后写者覆盖先写者，先写者落选」，append 不参与冲突（多条 append 视为按拓扑序叠加），故 detectProgressConflicts 按 section 分组 replace、拓扑序最后一条为 winner、其余每条生成 ProgressWritebackConflict{section, task_id, content, superseded_by} 并记入落选序号集合；apply 阶段落选 replace 跳过、append 与未落选 replace 总 apply。（2）append 与 replace 混合（同 section 既 append 又 replace）按 applyProgressUpdate 逐条变换的自然顺序处理——replace 在 append 之后则覆盖 append、append 在 replace 之后则追加到 replace 结果，二者均不计冲突（§3.2 未明文，见 ISS-010）。（3）IdAllocator 无状态注入式——接口 {nextDecisionId(usedIds), nextIssueId(usedIds)} 接收当前已用 id 集合返回一个不冲突新 id（DEC-XXX/ISS-XXX），编号策略由实现决定（典型现有最大编号+1）；writebackGlobalDocs 维护 usedIds（既有非空 id ∪ 本批次已分配）在每次分配前传入，保证不撞既有且批次内唯一，单一分配点。（4）decisions/issues 提议项 id 非空则沿用（appendDecision/appendIssue 按 id 去重：命中既有则替换标题+yaml block、否则文末追加），空则分配。（5）串行回写——单次调用内对每份文档读一次 → 逐条纯变换合并 → 写一次（§3.2 明确串行、§12 不引入并发；逐条 apply 到内存文档等价于「每条重读最新主分支」）。（6）docs 返回完整 Record<GlobalDocName,string>——有请求才合并+写盘、无请求保留读取原文不写盘（避免无变更的空提交）；docs 始终含三份（读取的或合并后的），消费方无需处理可选。（7）只产出不仲裁——返回 WritebackOutcome{docs, progress_conflicts, assigned_decision_ids, assigned_issue_ids}，不直接置 blocked（§7 仲裁归 Orchestrator）、不回写 .result.md 提议项 id（assigned ids 交 Orchestrator 经 TaskDocRepositoryPort.writeResult 回填，不在本函数）。沿用「纯编排 + 结构类型投影」模式（承接 DEC-014/016）。
+rationale: |-
+  progress 冲突仅 replace-replace：§3.2 字面把冲突场景限定为「多条 replace 命中同一 section」，append 是「按拓扑序拼接」（叠加语义非覆盖），故 append 不入冲突清单；同 section 多 replace 才是「多个任务都想独占该 section 内容」的真冲突。落选 replace 跳过不 apply：若 apply 了会被后写者立即覆盖（apply 顺序 = 拓扑序，winner 在 loser 之后），徒增中间态；直接跳过让 winner 的 apply 成为该 section 的最终写入，干净。IdAllocator 无状态：号段生成集中在 allocator（单一分配点，§8），本编排只维护 usedIds（既有 ∪ 批次内），二者职责清晰；无状态便于测试注入 fake（不必构造有状态对象的种子），且 allocator 可被任意编号策略复用。id 非空沿用：Task Executor 理论上可预填 id（Schema 允许非空），沿用其 id 经 appendDecision 去重（命中替换）是对提议方既定 id 的尊重，不强行重分配。串行读→合并→写：§3.2 明文串行、§12 明文不引入并发合并；读一次后在内存逐条 apply（纯变换）再写一次，与「每条重读最新主分支」在无并发下等价且更高效，避免每条都触发文件 I/O。docs 完整 Record：消费方（Orchestrator / 测试）拿到三份完整文档（有变更的是合并后、无变更的是原文），类型干净（Record 非 Partial）无需可选处理；无请求不写盘避免 git 产生无 diff 的空提交（§3.2 回写应只在有变更时落盘）。只产出不仲裁：§7 明文「不直接把任务置 blocked（产出冲突清单，由编排/CLI 决策）」，本函数返回冲突清单 + assigned ids 即完成职责，置 blocked 归 TASK-017 StateOrchestrator、写 ISSUES 由 Orchestrator 据冲突清单执行（§3.2「先写者落选并由 Orchestrator 将冲突项写入 docs/ISSUES.md」）、回填 .result.md id 由 Orchestrator 据 assigned ids 经 TaskDocRepositoryPort 执行。
+consequences: |-
+  TASK-021 幂等恢复在合并链路崩溃后，对分支已 ff 进 main 的任务跳过合并、仅补做未完成的 section 回写（调 writebackGlobalDocs）；未进入则 abortOrCleanRebase + 重走 rebaseAndFastForward。TASK-026 task:run 在合并回收后调 writebackGlobalDocs 回写全局文档，并据 progress_conflicts 置 blocked + 写 ISSUES、据 assigned ids 回填 .result.md。Orchestrator wiring：GlobalDocRepositoryPort 由 CLI（TASK-025）组合 fs + GlobalDocRepository 满足全契约（readGlobalDoc/writeGlobalDoc 读盘 + 委托正文变换，DEC-009/012），IdAllocator 由 CLI 提供（现有最大编号+1 的 sequential 实现）。若 Orchestrator 认为：(a) append 与 replace 混合应也计入冲突——改 detectProgressConflicts 把同 section 的 append+replace 组合也纳入（届时同步改 ISS-010 + 测试）；(b) IdAllocator 应有状态（内部计数器）——改接口为无参 nextXxxId + 构造时传入种子（但失去 usedIds 推断的纯度）；(c) docs 应为 Partial（只含变更文档）——改返回类型（消费方需处理可选）；(d) 无请求文档也应写盘（保持统一写）——去掉 if (length>0) 守卫直接写（但产生空提交）；(e) assigned ids 应由本函数直接回写 .result.md——需注入 TaskDocRepositoryPort（增加端口依赖，但回写 .result.md 是 Orchestrator 编排职责，不推荐）。新增 GlobalDocName 取值时 Record<GlobalDocName,string> 强制补全 docs 初始化。
+```
+
+提议自 `TASK-020-app-merge-section-writeback.result.md`。section 回写编排仅 type-only import core 类型 + type-only import `../ports.js`、零反向依赖（不 import infrastructure/cli 实现类，ARCHITECTURE §4）、无边界冲突；七处回写编排设计解释（progress 冲突仅 replace-replace / append·replace 混合按逐条 apply 自然顺序 / IdAllocator 无状态注入 / id 非空沿用 / 串行读→合并→写 / docs 完整 Record 无请求不写盘 / 只产出不仲裁）均为 §3.2 / §10 / 任务 §2/§7/§8/§9/§12 与 ARCHITECTURE §4 的合理落地；append·replace 混合语义张力见 ISS-010，待 Orchestrator 回写确认。

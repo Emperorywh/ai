@@ -159,3 +159,21 @@ recommended_action: |-
 ```
 
 提议自 `TASK-019-app-merge-rebase-ff.result.md`。合并用例的 docs port 需按 taskId 路由到各 worktree/docs/tasks，而 TaskDocRepository 单 tasksDir 无法覆盖多 worktree（GitMergePort 天然按 taskId 寻址 worktree）。低优先级——编排逻辑经 ports 接口正确（测试用路由夹具验证），路由适配器是 CLI wiring 层职责；建议 TASK-025/026 落地 CLI 时实现按 taskId 路由的 docs 适配器，待 Orchestrator 确认。
+
+---
+
+## ISS-010 §3.2 未明文 append 与 replace 混合（同 section 既 append 又 replace）时的冲突语义，本任务按字面落地（append 不算冲突，replace 在 apply 阶段逐条变换时覆盖此前 append）
+
+```yaml
+id: ISS-010
+title: "§3.2 未明文 append 与 replace 混合（同 section 既 append 又 replace）时的冲突语义，本任务按字面落地（append 不算冲突，replace 在 apply 阶段逐条变换时覆盖此前 append）"
+status: open
+severity: low
+scope: application/merge/section-writeback
+created_from_task: TASK-020
+owner: ""
+recommended_action: |-
+  Readme §3.2 line 122 仅明文「append 按拓扑序拼接，不同 section 互不影响直接合并；多条 replace 命中同一 section 时按拓扑序后写者覆盖先写者，先写者落选」，未涉及「同一 section 既 append 又 replace」的混合场景。TASK-020 按字面落地：append 不参与冲突检测（多条 append 视为叠加），replace 与 append 混合时按 applyProgressUpdate 逐条变换的自然顺序处理——拓扑序上 replace 在 append 之后则 replace 覆盖此前 append 的内容、append 在 replace 之后则 append 追加到 replace 结果上，二者均不计入冲突清单（视为「后写者覆盖先写者」总体精神的逐条 apply 自然结果）。该解释合理但规格未明文，可能与其他 Orchestrator 期望（如「同 section 的 append+replace 也应算冲突」）不符。建议（任选其一，待 Orchestrator 裁定）：(A) 接受现状并回写 Readme §3.2 澄清「混合时按逐条 apply 的自然顺序，不计冲突」；(B) 把同 section 的 append+replace 组合也纳入冲突检测（改 detectProgressConflicts）；(C) 规定混合时 replace 恒优先（先 apply 所有 replace 再 apply append）。不阻塞 TASK-020 验收（核心 replace-replace 冲突 + append 叠加 + replace 覆盖 append 已测试覆盖），详见 DEC-017。
+```
+
+提议自 `TASK-020-app-merge-section-writeback.result.md`。§3.2 仅明文「多条 replace 命中同一 section」为冲突场景，append/replace 混合语义未明文。TASK-020 在 forbidden 约束下按字面落地（append 不计冲突，replace 逐条 apply 覆盖 append 为顺序结果）。低优先级，不阻塞验收（核心冲突场景已覆盖），待 Orchestrator 裁定方向（A 接受并回写 Readme / B 纳入冲突检测 / C replace 恒优先）。关联 DEC-017。
