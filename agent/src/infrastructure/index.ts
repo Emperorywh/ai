@@ -23,3 +23,5 @@ export * from './sdk/executor-contract.js'
 export * from './sdk/claude-sdk-adapter.js'
 // TASK-028：MCP 适配器骨架（注册机制 + 统一调用代理，具体 server 留空抛「未配置」错误）。
 export * from './mcp/mcp-adapter.js'
+// TASK-030：Claude Agent SDK 会话工厂（query 装配 + 流式消费 + abort + cost/usage 采集，供 invocation/reviewer 复用）。
+export * from './sdk/sdk-client.js'
