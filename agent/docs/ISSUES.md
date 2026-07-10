@@ -303,3 +303,19 @@ recommended_action: |-
 ```
 
 提议自 `TASK-028-infra-mcp-adapter-skeleton.result.md`。MCP 配置加载只接受 raw 对象、不读文件，系 §12「避免过度设计」落地（init 无 MCP 配置文件、SPEC 无 server 清单 R5，过早绑定文件格式属臆测）。低优先级（前瞻性 TODO，非缺陷），不阻塞验收（骨架结构 + 注册机制可单测）。关联 DEC-024。
+
+## ISS-018 validatePlanningInputs 的 specReviewed/architectureReviewed 判定来源未机器化定义
+
+```yaml
+id: ISS-018
+title: "validatePlanningInputs 的 specReviewed/architectureReviewed 判定来源未机器化定义"
+status: open
+severity: low
+scope: application（planning-workflow 前置校验）
+created_from_task: TASK-029
+owner: ""
+recommended_action: |-
+  TASK-029 的 validatePlanningInputs 接收 specReviewed / architectureReviewed 布尔（DEC-025：application 不读文件，文件状态作显式输入），但 Readme §11 第 4 步要求 Reviewer 独立审查 SPEC / ARCHITECTURE 后才进入第 5 步（生成 PLAN），「审查通过」的机器化判据未在工作流中明确——即「CLI 如何判定 specReviewed=true」无标准。可选方案：(A) 要求显式 `--reviewed` / `--bootstrap <source_spec>` 命令行标志由人工声明；(B) 检查 docs/ISSUES.md 无 created_from_task 为 SPEC / ARCHITECTURE 的 open 项；(C) 检查 docs/DECISIONS.md 是否有 SPEC / ARCHITECTURE 阶段审查通过的决策记录；(D) 检查 docs/SPEC.md / docs/ARCHITECTURE.md frontmatter 是否有 reviewed 标志（需扩文档协议）。当前 application 层只消费布尔（不读文件，§7），不阻塞 TASK-029 验收（纯逻辑三态可单测）。建议 TASK-024（cli-plan-and-task-create）plan 命令落地时确定判据并固化（推荐 A 人工显式声明最简单、最不易误判，或 B 基于 ISSUES 记录）。关联 DEC-025。
+```
+
+提议自 `TASK-029-app-planning-workflow.result.md`。validatePlanningInputs 的「已审查」判定来源未机器化定义，系 application 层「只消费布尔、不读文件」（DEC-025）与 §11「Reviewer 审查 SPEC/ARCHITECTURE」之间的衔接 gap——判据属 CLI composition root（TASK-024）职责，非 application 缺陷。低优先级，不阻塞本任务验收（application 层纯逻辑三态可单测）。关联 DEC-025。

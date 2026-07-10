@@ -498,3 +498,57 @@ consequences: |-
 ```
 
 提议自 `TASK-028-infra-mcp-adapter-skeleton.result.md`。MCP 适配器骨架（仅依赖既有 zod，零反向依赖——不 import core/application/cli，MCP 配置 schema 属 infra 关注点就近定义；不依赖具体 MCP server SDK，SPEC 无 server 清单 R5）作为 infrastructure 适配层骨架、无边界冲突；设计解释（transport 判别联合 + 注册表 name/config 分离 + 骨架恒抛错不伪造 + 配置加载接受 raw 不绑定文件 + 零 core 依赖）是 §3.1/§7/§8/§12 的合理落地，待 Orchestrator 确认。关联 ISS-017（配置文件格式与 init 衔接未落地）/ DEC-019（TASK-022 注入式句柄 + DryRun 不伪造哲学，本骨架 callTool 恒抛错同源）。
+
+## DEC-025 规划用例纯逻辑校验——application 不读文件，文件存在性 / 审查状态作显式输入
+
+```yaml
+id: DEC-025
+title: "规划用例纯逻辑校验——application 不读文件，文件存在性 / 审查状态作显式输入"
+status: proposed
+scope: application（planning-workflow 前置校验）
+created_from_task: TASK-029
+decision: |-
+  TASK-029 的 validatePlanningInputs 接收显式布尔输入（specExists / architectureExists / specReviewed / architectureReviewed + 可选 sourceSpec），application 层不读文件、不做 I/O。文件存在性与「已审查」状态由 CLI composition root（TASK-024 plan 命令）判定后传入。返回 PlanningValidationResult 判别联合三态：standard（SPEC + ARCHITECTURE 均存在且已审查）/ bootstrap（自举 source_spec 替代 + needsHumanConfirmation 固定 true）/ failed（missing 清单）；标准模式优先（即便同时声明 source_spec，只要 SPEC + ARCHITECTURE 审查通过就走标准）；空白 sourceSpec 视为未声明。
+rationale: |-
+  application 层定位是「产出领域模型」（ARCHITECTURE §3），文件 I/O 与存在性判定属 CLI / infra 职责。任务 §7「不写文件」精神延伸至读：规划前置校验的「文件存在 / 已审查」更适合 CLI 直接判定后传布尔，避免为前置校验在 ports 引入新的 fs 接口（现有 ports 面向任务 / 全局文档读写，不含通用「文件存在性」探测）。判别联合（standard/bootstrap/failed，非抛错）让调用方据 failed.missing 把缺失项展示给人工，不静默。标准优先符合 §6「目标项目通过 docs/SPEC.md + docs/ARCHITECTURE.md 承载长期协议」——自举例外（§6 / §11）只用于新系统实现本工作流自身。自举 needsHumanConfirmation 固定 true 落实 §11 验收「自举 source_spec 输入可通过，但必须返回需要人工 / Reviewer 确认的标记」。
+consequences: |-
+  TASK-024 plan 命令须在 CLI 层判定文件存在 + 审查状态后传布尔——需定义「已审查」机器化判据（见 ISS-018：可选显式标志 / 检查 ISSUES 无 SPEC|ARCHITECTURE open 项 / 检查 DECISIONS 审查记录）。本用例可在纯单元测试中覆盖三态（无需临时目录 / 文件夹具，与 context-pack-generator / scheduler 同为纯计算）。validatePlanningInputs 不依赖任何 port，零 I/O 副作用，零反向依赖（仅 import core 类型）。关联 DEC-026 / DEC-027（同任务另两设计）/ ISS-018（审查判据待定）。
+```
+
+提议自 `TASK-029-app-planning-workflow.result.md`。规划前置校验作纯逻辑（显式布尔输入、判别联合输出）是 application 层「只产领域模型」定位的合理落地，无边界冲突；standard / bootstrap / failed 三态 + 标准优先 + 自举 needsHumanConfirmation 落实 §6 / §11 与任务 §7 / §11 验收。待 Orchestrator 确认。关联 ISS-018（specReviewed 判定来源待 TASK-024 定义）。
+
+## DEC-026 createTaskDrafts 的 source_files 预填 + context_pack 双层存储
+
+```yaml
+id: DEC-026
+title: "createTaskDrafts 的 source_files 预填 + context_pack 双层存储"
+status: proposed
+scope: application（planning-workflow 任务草案）
+created_from_task: TASK-029
+decision: |-
+  TASK-029 的 createTaskDrafts 对 source_files 采用预填规则（Readme §8）：TaskDraftSpec.source_files 显式提供则用之，否则按 depends_on 各依赖任务（同一批 drafts）的 allowed_paths 并集预填（依赖指向集合外任务时跳过，存在性校验归 validateTaskGraph）。context_pack 双层存储：（1）frontmatter.context_pack 存「裁剪声明」——required_docs / optional_doc_excerpts 来自 spec + 预填 source_files，不含必读核心（AGENTS / ARCHITECTURE / PROGRESS）与当前任务文件；（2）TaskDraftResult.contextPack 存 computeContextPack 产出的「完整注入清单」——必读核心 ∪ 当前任务文件 ∪ 声明。所有任务 status 固定 draft（任务 §8：任务拆分必须先生成 draft，不得直接 ready），经 TaskFrontmatterSchema.parse 校验（任务 §11 验收「通过 Schema」）。
+rationale: |-
+  §8 明文「拆分阶段依赖尚未执行，先按依赖任务的 allowed_paths 预填 source_files；任务转入 running 前若依赖已完成，Orchestrator 用实际 .result.md 清单刷新该字段」——故默认按依赖 allowed_paths 并集预填；spec.source_files 显式提供时尊重调用方精确控制（如纯计算任务无写路径但需读特定源码，或调用方已知更精确范围）。双层存储符合 context-pack-generator 设计（CORE_REQUIRED_DOCS 是运行时下限、frontmatter 省略也补齐）+ §8「当前任务文件是 Context Pack 入口载体、本身不计入 required_docs 数组」——故 frontmatter 不存任务文件 / 必读核心；而 TaskDraftResult.contextPack 调 computeContextPack 产出完整清单，供调用方预览实际注入范围，同时落实任务 §2「调用 computeContextPack 生成初始 context_pack」。frontmatter 裁剪声明也与现有项目任务文件一致（required_docs 仅 AGENTS / ARCHITECTURE / PROGRESS，不含任务文件）。
+consequences: |-
+  TASK-024 落盘任务文件时写 frontmatter（裁剪声明）；TaskDraftResult.contextPack 供 CLI 预览 / 日志，不落盘。后续 ready→running 时 refreshSourceFiles 读 frontmatter.context_pack.source_files（预填值）用依赖 .result.md 实际产物替换，链路自洽（computeContextPack 内部 refreshSourceFiles 对空 dependencyResults 保留预填）。非法 result_file（不以 .result.md 结尾）在 computeContextPack 阶段抛错（computeContextPack 内 taskFilePath 校验 §9 约定），重复 id 抛错。关联 DEC-012（result_file→任务文件路径派生）/ DEC-025（同任务前置校验）/ DEC-027（同任务图校验）。
+```
+
+提议自 `TASK-029-app-planning-workflow.result.md`。source_files 按依赖 allowed_paths 预填是 §8 的直接落地；context_pack 双层存储（frontmatter 裁剪声明 + TaskDraftResult 完整清单）兼顾 §8「任务文件不计入 required_docs」与任务 §2「调用 computeContextPack」，无边界冲突。待 Orchestrator 确认。关联 DEC-012（context-pack-generator result_file 派生）/ ISS-018。
+
+## DEC-027 validateTaskGraph 完全复用 scheduler 公开 API 检测环与路径冲突，零重复私有逻辑
+
+```yaml
+id: DEC-027
+title: "validateTaskGraph 完全复用 scheduler 公开 API 检测环与路径冲突，零重复私有逻辑"
+status: proposed
+scope: application（planning-workflow 任务图校验）
+created_from_task: TASK-029
+decision: |-
+  TASK-029 的 validateTaskGraph 完全复用已有公开 API，不重新实现 scheduler 私有路径判定逻辑。依赖环检测：scheduler.topologicalOrder（遇环抛错 → hasCycle:true）+ core detectDependencyCycle 取闭合环路径（诊断用）。allowed_paths 路径冲突检测：scheduler.detectParallelizable——对每对「互无依赖」任务 (A,B) 单独喂 detectParallelizable([A,B])，返回两单元素批次 [[A],[B]] 即判冲突（单批次 [[A,B]] = 可并行）。重复 id 先单独检测（避免 topologicalOrder 内 assertUniqueIds 抛错被误判为「依赖环」）。TaskGraphValidationResult.ok = 无重复 id 且无依赖环；路径冲突为 warning 不阻断规划（§3.2 默认串行，冲突只影响并行度）。detectPathConflicts 对同 id 对与有依赖关系对（A→B 或 B→A）跳过——前者已由 duplicateIds 报告，后者本就串行不计路径冲突。
+rationale: |-
+  任务 §2「复用调度器检测依赖环和 allowed_paths 并行冲突」字面要求复用 scheduler。scheduler 的 pathsOverlap / literalPrefix / normalizePath / isAncestorOrSame / GLOB_CHARS 为模块私有未导出，本任务 allowed_paths 不含 scheduler.ts（无法改其导出），重新实现这 ~50 行路径判定属复制粘贴（违反 AGENTS §3，且会产生 ISS-015 类技术债）。通过对每对无依赖任务单独喂 detectParallelizable([A,B])，用其「单批次 = 可并行 / 两单元素批次 = 路径冲突」语义反推冲突对，零重复 scheduler 私有逻辑，判定一致性天然保证（同一公开函数）。代价是 O(n²) 次 detectParallelizable 调用（每次内部建图），但规划期一次性校验、任务数有限（本项目 29 个，通常项目数十量级），完全可接受。环路径用 core detectDependencyCycle（返回闭合路径，比 topologicalOrder 的抛错形态更具诊断价值，且 detectDependencyCycle 不抛错、返回结构化结果，适合校验场景）；hasCycle 用 topologicalOrder catch 满足 §2「复用调度器」字面。重复 id 先检测避免 topologicalOrder 内 assertUniqueIds 抛错被误判为环（两种「图不合法」原因分开报告）。
+consequences: |-
+  validateTaskGraph 零路径判定重复逻辑（规避 ISS-015 类技术债）；路径冲突检测不暴露具体重叠路径对（PathConflict 仅 taskA / taskB），调用方可自行查两任务 allowed_paths 定位重叠。detectPathConflicts 对同 id 对跳过（避免 detectParallelizable 内 assertUniqueIds 抛错）。大任务集（数百）下 O(n²) detectParallelizable 可能有性能开销，届时可优化为单次全图 detectParallelizable + 层内配对（当前不做，避免过度设计）。关联 DEC-013（scheduler 路径重叠保守判定）/ DEC-025 / DEC-026（同任务）。
+```
+
+提议自 `TASK-029-app-planning-workflow.result.md`。validateTaskGraph 完全复用 scheduler（topologicalOrder / detectParallelizable）+ core（detectDependencyCycle）公开 API、零重复私有路径逻辑，是任务 §2「复用调度器」与 AGENTS §3「不复制粘贴」的兼顾落地，无边界冲突。待 Orchestrator 确认。关联 DEC-013（scheduler 路径重叠保守判定，本任务路径冲突复用其 detectParallelizable 分组语义）。
