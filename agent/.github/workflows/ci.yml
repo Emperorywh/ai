@@ -1,0 +1,52 @@
+# CI —— 基础回归 + 真实 API 契约（SPEC §11 / §14，TASK-035 立项）。
+#
+# baseline job：类型 + lint + 全量单测（含 fake SDK 装配测试，零真实 API），每次 push / PR 跑。
+# real-api-contract job：受 secret 控制——有 ANTHROPIC_API_KEY / ZHIPU_API_KEY 时跑最小审查任务
+#   断言契约（review_result ∈ 合法枚举 + system init model 反映档位映射，不断言文本，SPEC §14-7/8）；
+#   无 secret 时该 job 仍跑，真实 API 子集经 describe.skipIf 自动 skip 并显式标注（不静默通过）。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  baseline:
+    name: 基础回归（typecheck + lint + test）
+    runs-on: ubuntu-latest
+    env:
+      # ISS-019: @anthropic-ai/claude-agent-sdk peer 要 zod ^4，项目锁 zod ^3，
+      # 安装须 --legacy-peer-deps（.npmrc 未持久化此约束，CI 经环境变量显式声明）。
+      npm_config_legacy_peer_deps: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # ISS-005: better-sqlite3 原生模块需 Node 22（ABI 127）预编译。
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+
+  real-api-contract:
+    name: 真实 API 契约（anthropic + glm，无 key 自动 skip）
+    runs-on: ubuntu-latest
+    env:
+      npm_config_legacy_peer_deps: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - name: 真实 API 契约（受 secret 控制，无 key 自动 skip 且显式标注）
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
+        # 真实 API 子集用最小固定审查任务控成本（SPEC §11/§15 R-COST）。
+        # 无 secret 时 describe.skipIf 跳过真实调用、跑 skip 标注测试，不静默通过。
+        run: npm test -- claude-sdk-real-api
