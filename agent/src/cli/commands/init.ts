@@ -1,6 +1,7 @@
 import { Command } from 'commander'
 import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
+import { DEFAULT_PROFILE_CONFIG } from '../config/provider-profile.js'
 
 /**
  * `init` 命令：在目标目录初始化文档协议骨架。
@@ -8,6 +9,8 @@ import { dirname, join, resolve } from 'node:path'
  * 职责（见 docs/tasks/TASK-023 §2 / Readme §6 文档体系）：
  *  - 生成根目录 `AGENTS.md` 与 `docs/` 下的 SPEC / ARCHITECTURE / PLAN / PROGRESS /
  *    DECISIONS / ISSUES / TESTING 八份文档骨架，以及 `docs/tasks/` 目录。
+ *  - 生成 `.caw/config.json`：预置 Provider Profile（anthropic + glm，TASK-031 / SPEC §6），
+ *    内容取自同层 `config/provider-profile.ts` 的 `DEFAULT_PROFILE_CONFIG` 单一来源。
  *  - 模板内嵌，已存在的文件**一律不覆盖**（幂等）。
  *  - 只写模板文件，**不依赖** core / application / infrastructure 任何领域逻辑
  *    （TASK-023 §6 / §12：init 生成的是「目标项目」骨架，不是本项目自身的约束副本）。
@@ -346,8 +349,15 @@ const GITKEEP_TEMPLATE = `# 该目录用于存放任务文档：TASK-XXX-*.md（
 `
 
 /**
+ * `caw init` 预置的 Provider Profile 配置（SPEC §6）：anthropic（官方端点）+ glm（智谱兼容端点）。
+ * 内容来自 provider-profile.ts 的 DEFAULT_PROFILE_CONFIG 单一来源（JSON pretty 文本），
+ * token 只含环境变量名（authTokenEnv），不落明文（§7）。
+ */
+const CONFIG_JSON_TEMPLATE = `${JSON.stringify(DEFAULT_PROFILE_CONFIG, null, 2)}\n`
+
+/**
  * init 生成的全部文件清单（相对项目根），单一来源。
- * docs/ 与 docs/tasks/ 目录随首个文件写入由 mkdirSync recursive 一并建立。
+ * docs/ 与 docs/tasks/ 与 .caw/ 目录随首个文件写入由 mkdirSync recursive 一并建立。
  */
 export const DOC_FILES: readonly ScaffoldFile[] = [
   { path: 'AGENTS.md', content: AGENTS_TEMPLATE },
@@ -359,6 +369,7 @@ export const DOC_FILES: readonly ScaffoldFile[] = [
   { path: 'docs/ISSUES.md', content: ISSUES_TEMPLATE },
   { path: 'docs/TESTING.md', content: TESTING_TEMPLATE },
   { path: 'docs/tasks/.gitkeep', content: GITKEEP_TEMPLATE },
+  { path: '.caw/config.json', content: CONFIG_JSON_TEMPLATE },
 ]
 
 /** 确保项目根存在且为目录；已存在但非目录则抛错（非法目标，不静默）。 */
