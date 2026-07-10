@@ -25,3 +25,5 @@ export * from './sdk/claude-sdk-adapter.js'
 export * from './mcp/mcp-adapter.js'
 // TASK-030：Claude Agent SDK 会话工厂（query 装配 + 流式消费 + abort + cost/usage 采集，供 invocation/reviewer 复用）。
 export * from './sdk/sdk-client.js'
+// TASK-032：ClaudeSdkInvocation 真实实现（自主 SDK 会话 + JSON 提取重试降级 + 容错分类 + 中断）。
+export * from './sdk/claude-sdk-invocation-impl.js'
