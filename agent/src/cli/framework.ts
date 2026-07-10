@@ -1,5 +1,7 @@
 import { Command, CommanderError } from 'commander'
 import { registerInitCommand } from './commands/init.js'
+import { registerPlanCommand } from './commands/plan.js'
+import { registerTaskCreateCommand } from './commands/task-create.js'
 import { registerStatusCommand } from './commands/status.js'
 import { registerRebuildIndexCommand } from './commands/rebuild-index.js'
 import { registerTaskRunCommand } from './commands/task-run.js'
@@ -32,7 +34,7 @@ const ERROR_PREFIX = 'error:'
  *    CommanderError，而非直接 process.exit，使 runCli 能统一管控退出码、且测试可注入。
  *  - 不给 program 设默认 action：否则 commander 会把「未知命令」当作默认命令的参数吞掉
  *    而不报错；空 argv 的帮助展示由 runCli 显式处理，未知命令交回 commander 默认报错。
- *  - 注册全部子命令（init / status / rebuild-index / task:run / task:review；后续命令在各自 CLI 任务追加 registerXxxCommand）。
+ *  - 注册全部子命令（init / plan / task:create / status / rebuild-index / task:run / task:review；后续命令在各自 CLI 任务追加 registerXxxCommand）。
  */
 export function createProgram(): Command {
   const program = new Command()
@@ -43,6 +45,8 @@ export function createProgram(): Command {
       throw err
     })
   registerInitCommand(program)
+  registerPlanCommand(program)
+  registerTaskCreateCommand(program)
   registerStatusCommand(program)
   registerRebuildIndexCommand(program)
   registerTaskRunCommand(program)
