@@ -590,3 +590,39 @@ consequences: |-
 ```
 
 提议自 `PLAN_claude-sdk-integration`（规划产出）。把 TASK-022 的 SDK 适配器骨架落地为真实执行引擎，多 provider 接入（env 注入）为 P0 核心、扩权独立立项。SPEC §12 字段名已对照官方类型参考校准。待 Orchestrator 确认。
+
+## DEC-030 扩权新增 Claude Agent SDK 依赖 + zod peer 冲突处理
+
+```yaml
+id: DEC-030
+title: "扩权新增 @anthropic-ai/claude-agent-sdk 依赖 + zod peer 冲突处理（--legacy-peer-deps + 显式声明 peer + zod 保持 3.x）"
+status: proposed
+scope: package.json + infrastructure/sdk
+created_from_task: TASK-030
+decision: |-
+  TASK-030 扩权新增 `@anthropic-ai/claude-agent-sdk@^0.3.206`（PLAN §0-2 扩权独立立项、SPEC §13.2）。安装时发现 SDK 把 zod / @anthropic-ai/sdk / @modelcontextprotocol/sdk 全外部化为 peerDependencies（dependencies 为空），其中 zod peer 要 ^4.0.0 与项目锁定 zod ^3.23.8（实际 3.25.76）冲突；SDK 0.3.206 为唯一版本（无兼容 zod 3 的旧版）。处置决策：(1) zod 保持 ^3.23.8 不升级——升级 zod 4 是破坏性变更，波及全项目 core/application/infrastructure 的 zod 代码（core/schemas 的 z.string().datetime()/z.discriminatedUnion 等），远超 TASK-030 allowed_paths 边界，须独立任务（ISS-019）；(2) 以 `npm install --legacy-peer-deps` 绕过 peer 检查装 SDK——zod 3.25.76 是 zod 3→4 过渡版（@anthropic-ai/sdk peerOptional `^3.25.0 || ^4.0.0` 印证兼容意图），实测 typecheck 0 错误 + 全量 692 项测试全绿，证明 SDK .d.ts 在 zod 3.25.76 下完全可用；(3) 显式声明 SDK 的 2 个 peer（@anthropic-ai/sdk@^0.110.0、@modelcontextprotocol/sdk@^1.29.0）入 package.json dependencies——SDK 把它们外部化为 peer，消费者须自行声明以保证可重现（fresh install 不带 --legacy-peer-deps 时，peer 缺失/冲突仍报错，故安装约束持久，见 ISS-019）。沿用 DEC-029 扩权立项结论落地。
+rationale: |-
+  扩权是 PLAN §0-2 / SPEC §16 显式立项（TASK-001 红线），本任务即承担。zod 不升级：(a) 升级波及面远超 TASK-030 边界（forbidden_paths 含 src/core/application，core/schemas 大量 zod 代码可能需适配）；(b) 3.25.76 经实测兼容 SDK（typecheck + 全量测试全绿），无需升级即可工作；(c) zod 4 升级应作为独立任务充分评估（ISS-019）。--legacy-peer-deps：npm 标准安装选项（非代码 hack），在 AGENTS §3「不引入临时 patch」语境下属可接受的安装约束（非隐藏兼容逻辑，已在 ISS-019/DECISIONS 显式记录 + SPEC/任务约束可追溯）。显式声明 peer：SDK 设计要求消费者提供 peer，声明入 dependencies 保证 package.json 完整可重现（package-lock 已记录）。安装约束（须 --legacy-peer-deps）持久——.npmrc 不在本任务 allowed，留 ISS-019 提议 Orchestrator 加 .npmrc 或立 zod 4 任务。
+consequences: |-
+  package.json dependencies 现 7 项（+SDK +2 peer，zod 不变）。安装命令须 `npm install --legacy-peer-deps`（持久约束，ISS-019）：fresh checkout / CI 须同样方式。后续 SDK 升级若 peer 放宽 zod 要求或 SDK 出兼容 zod 3 的版本，可去除 --legacy-peer-deps。zod 4 升级（若 Orchestrator 采纳）须独立任务全量适配 core/application/infrastructure zod 代码后，改用正经 `npm install`（无 flag）。关联 DEC-029（PLAN 立项）/ DEC-031（sdk-client 设计 + R-API）/ ISS-019（zod peer 冲突）/ ISS-020（传递依赖漏洞）。
+```
+
+提议自 `TASK-030-infra-sdk-dependency-and-client.result.md`。扩权新增 SDK 依赖遇 zod peer 冲突（SDK 要 ^4、项目 ^3），以 --legacy-peer-deps + 显式声明 peer + zod 保持 3.x（过渡版兼容）解决，经实测 typecheck + 全量测试全绿。不升级 zod 因波及面超本任务边界（独立任务 ISS-019）。沿用 DEC-029 扩权立项。待 Orchestrator 确认。
+
+## DEC-031 sdk-client 会话工厂设计 + §12 字段对照安装版 .d.ts 校准
+
+```yaml
+id: DEC-031
+title: "sdk-client 会话工厂设计——query 注入 + 流式 + abort + cost 采集 + §12 字段对照安装版 .d.ts 校准（R-API 差异回写 SPEC）"
+status: proposed
+scope: infrastructure/sdk/sdk-client.ts
+created_from_task: TASK-030
+decision: |-
+  sdk-client 集中 query() 装配 + 流式消费 + abort + cost/usage 采集为可复用工厂（SPEC §13.1），供 032/033 复用。设计五要点：(1) 注入式 query 句柄 SdkQueryFn——把真实 SDK query 隔离为可替换注入点（承接 DEC-019 哲学），runSdkSession 默认 defaultSdkQuery（真实 SDK），测试注入 fake query 流零真实 API（SPEC §11）；(2) buildSdkOptions 按 §12 装配——全部字段名对照安装版 0.3.206 .d.ts 校准通过（abortController/cwd/env/model/permissionMode/systemPrompt(preset+append)/settingSources/includePartialMessages/stderr），不传 canUseTool(F3)/maxTurns(F4)/resume·continue·forkSession(§2.2)；(3) §12 R-API 三处差异已回写 SPEC §12——(a) permissionMode 'bypassPermissions' 必须同时 allowDangerouslySkipPermissions:true（.d.ts 1695/1707-1711 硬性要求，§12 原未列），(b) SDKResultError.subtype 扩展 error_max_budget_usd/error_max_structured_output_retries（§12 原只列 3 个），sdk-client 把 subtype 当 string 透传不穷举枚举，(c) SDKMessage 联合成员大幅扩展（0.3.206 含 status/auth_status/task_*/hook_*/rate_limit_event 等数十种），sdk-client 只对 §12 列举的 type(system-init/assistant/user/stream_event/result/compact_boundary) 关注、其余经 onMessage 透传不阻断；(4) collectResult 纯结构化采集（subtype/cost/usage/turns/duration/isError/resultText + raw resultMessage），不判 executionStatus（归 032 据 subtype+is_error+JSON 综合判定）；(5) abort 不捕获——abortController.abort() 后 SDK 经流抛 AbortError 向上传播，调用方（032）catch 据此产降级 result（§9 保留 worktree）。sdk-client 不 import core（输入输出均 SDK/基础类型），不承载领域逻辑（JSON 提取/重试/降级归 032）。
+rationale: |-
+  集中工厂避免 032/033 两处重复装配 query/流式/cost（SPEC §13.1 明列 sdk-client 为可选复用件）。注入式 query 承接 DEC-019（编排与 SDK API 解耦、测试 fake），runSdkSession 默认真实 query 开箱即用、测试 fake 覆盖编排逻辑。§12 R-API 回写：SPEC §12「校准来源」明言「实现时仍以安装版 .d.ts 为最终准绳（R-API），差异回写本节」——本任务实证三处差异并回写，使 §12 与安装版 0.3.206 一致（bypassPermissions 的 allowDangerouslySkipPermissions 是阻塞性差异，不设 SDK 拒绝）。subtype 当 string 透传：避免穷举枚举与 SDK 版本耦合（subtype 随版本扩展），sdk-client 只采集不解释。abort 不捕获：§9 要求调用方据中断产降级 result，sdk-client 传播 AbortError 让调用方决策（容错分类归 032）。不判 executionStatus：sdk-client 是通用会话工厂（execution + review 共用），executionStatus 判定含领域语义（结合 JSON 产出）归 032。
+consequences: |-
+  SPEC §12 已据本任务 R-API 差异回写（bypassPermissions+allowDangerouslySkipPermissions、subtype 扩展、SDKMessage 联合扩展说明）。sdk-client 为 032/033 共用入口，两者只组装 SdkSessionInput + 处理 SdkSessionReport/异常。SDK 升级时须重新对照 .d.ts 校准（§12 R-API 持续约束），重点核 allowDangerouslySkipPermissions 是否仍需、subtype/SDKMessage 是否再扩展。defaultSdkQuery 经 value import query 加载真实 SDK（模块加载即 import，纯 JS 无 native 依赖，安全）。关联 DEC-019（注入式句柄）/ DEC-029（PLAN 立项 §12 校准）/ DEC-030（扩权）/ ISS-012（SDK 就位——包已装，真实调用留 032/035）。
+```
+
+提议自 `TASK-030-infra-sdk-dependency-and-client.result.md`。sdk-client 作 SDK 会话工厂供 032/033 复用，§12 字段对照安装版 0.3.206 .d.ts 校准并回写三处 R-API 差异（bypassPermissions 须 allowDangerouslySkipPermissions / subtype 扩展 / SDKMessage 联合扩展）。沿用 DEC-019 注入式句柄哲学。待 Orchestrator 确认。

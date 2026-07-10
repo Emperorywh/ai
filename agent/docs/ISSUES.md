@@ -349,3 +349,35 @@ recommended_action: |-
 提议自 `TASK-029-app-planning-workflow.result.md`。validatePlanningInputs 的「已审查」判定来源未机器化定义，系 application 层「只消费布尔、不读文件」（DEC-025）与 §11「Reviewer 审查 SPEC/ARCHITECTURE」之间的衔接 gap——判据属 CLI composition root（TASK-024）职责，非 application 缺陷。低优先级，不阻塞本任务验收（application 层纯逻辑三态可单测）。关联 DEC-025。
 
 **Resolution（TASK-024，2026-07-10）**：采用原方案 A——TASK-024 plan 命令以 `--reviewed` 布尔标志作「SPEC/ARCHITECTURE 已通过 Reviewer 独立审查」的机器判据，CLI composition root 判定 docs/SPEC.md / docs/ARCHITECTURE.md 存在性 + 该标志后传入 validatePlanningInputs（standard 模式硬性前置）。最简单、最不易误判（不依赖启发式 / 不读 ISSUES-DECISIONS 推断审查状态）。关联 DEC-028。
+
+## ISS-019 zod peer 版本冲突——SDK 要 zod ^4，项目 zod ^3，须 --legacy-peer-deps 安装
+
+```yaml
+id: ISS-019
+title: "zod peer 版本冲突——SDK 要 zod ^4，项目 zod ^3，须 --legacy-peer-deps 安装"
+status: open
+severity: medium
+scope: package.json + 安装流程
+created_from_task: TASK-030
+owner: ""
+recommended_action: |-
+  `@anthropic-ai/claude-agent-sdk@0.3.206`（唯一版本，无旧版可选）peerDependencies 要 zod ^4.0.0，项目锁定 zod ^3.23.8（实际 3.25.76）。TASK-030 以 `npm install --legacy-peer-deps` + 显式声明 SDK 的 2 个 peer（@anthropic-ai/sdk、@modelcontextprotocol/sdk）解决：zod 保持 3.25.76（3→4 过渡版兼容 SDK .d.ts，typecheck + 全量 692 项测试全绿印证 @anthropic-ai/sdk peerOptional `^3.25.0 || ^4.0.0` 兼容意图）。不阻塞本任务验收（包就位 + 全绿）。代价：安装命令须带 --legacy-peer-deps（fresh install 不带会因 zod peer 报错），此约束持久。建议 Orchestrator 裁定：(A) 加项目根 .npmrc 设 legacy-peer-deps=true 持久化安装约束（.npmrc 不在 TASK-030 allowed_paths，需独立动作）；(B) 独立 zod 4 升级任务（破坏性，波及全项目 core/application/infrastructure zod 代码，须全量适配后改用正经 npm install 无 flag）；(C) 维持现状 + 文档/CI 标注安装命令。推荐 A（最小侵入持久化）或 C（现状可用），B 为长期清洁方案但成本高。关联 DEC-030。
+```
+
+提议自 `TASK-030-infra-sdk-dependency-and-client.result.md`。zod peer 冲突系 SDK 0.3.206 把 zod 外部化为 peer 且要求 ^4.0.0、与项目锁定 ^3.23.8 不兼容（SDK 无旧版可选）；本任务以 --legacy-peer-deps + 显式声明 peer + zod 保持 3.x（过渡版 3.25.76 兼容）解决，安装约束持久。medium 优先级（不阻塞本任务，但影响 fresh install 流程 / CI），待 Orchestrator 裁定 A/B/C。关联 DEC-030。
+
+## ISS-020 SDK 及其 peer 引入 4 个传递依赖安全漏洞
+
+```yaml
+id: ISS-020
+title: "SDK 及其 peer 引入 4 个传递依赖安全漏洞（npm audit：2 moderate/1 high/1 critical）"
+status: open
+severity: low
+scope: package.json 传递依赖
+created_from_task: TASK-030
+owner: ""
+recommended_action: |-
+  扩权安装 @anthropic-ai/claude-agent-sdk + @anthropic-ai/sdk + @modelcontextprotocol/sdk 后，npm audit 报 4 个传递依赖漏洞（2 moderate / 1 high / 1 critical，来自上述包的子依赖链）。TASK-030 范围仅为装 SDK + 建 sdk-client，不处理传递依赖漏洞（不在 allowed_paths，且处置需评估升级/替换/override 影响）。不阻塞本任务验收（不影响 typecheck/test/sdk-client 功能；漏洞多在开发期/CLI 子进程上下文，非运行时数据面）。建议后续任务或人工 `npm audit` 评估：若漏洞涉及实际可达路径，用 npm overrides 钉补丁版本或升级 SDK/peer；若为不可达传递依赖，文档标注接受。关联 DEC-030。
+```
+
+提议自 `TASK-030-infra-sdk-dependency-and-client.result.md`。SDK 及 peer 的传递依赖漏洞系扩权引入，本任务不处理（范围外 + 需评估影响）。low 优先级（非运行时数据面），建议后续 npm audit 评估处置。关联 DEC-030。

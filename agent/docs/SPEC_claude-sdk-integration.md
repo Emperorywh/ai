@@ -336,6 +336,20 @@ owner: Orchestrator
 
 实现任务交付前,把实际安装版 `.d.ts` 与本节字段名核对一次,差异回写本节(R-API)。
 
+### 12.1 R-API 差异(TASK-030 实证,对照安装版 0.3.206 .d.ts)
+
+> TASK-030 装入 `@anthropic-ai/claude-agent-sdk@0.3.206` 后实证下列与「本节上方描述(据类型参考写作)」的差异,已据实证回写。后续 SDK 升级须重新核对。
+
+1. **`permissionMode: 'bypassPermissions'` 必须同时设 `allowDangerouslySkipPermissions: true`**:安装版 Options 注释(.d.ts 1695 / 1707-1711)明文「'bypassPermissions' - Bypass all permission checks (requires `allowDangerouslySkipPermissions`)」「Must be set to `true` when using `permissionMode: 'bypassPermissions'`」——不设则 SDK 拒绝该模式。sdk-client(TASK-030 buildSdkOptions)据此同时设置两者。本节上方 permissionMode 项未列此配套字段,实现须补。
+
+2. **`SDKResultError.subtype` 枚举扩展**:本节第 5 条列 `subtype: 'success' | 'error_max_turns' | 'error_during_execution'`;安装版 SDKResultError.subtype 实为 `'error_during_execution' | 'error_max_turns' | 'error_max_budget_usd' | 'error_max_structured_output_retries'`(新增后两者,对应 `maxBudgetUsd` 超限 / outputFormat 结构化输出重试上限)。sdk-client 把 subtype 当 string 透传不穷举枚举(避免与版本耦合);§8 容错分类据 subtype 值判定时须覆盖新增值。
+
+3. **`SDKMessage` 联合成员大幅扩展**:本节第 3 条按 §12 列举的 type(`system`+`init` / `assistant` / `user` / `stream_event` / `result` / `compact_boundary`)是 sdk-client / 调用方关注的子集;安装版 0.3.206 的 SDKMessage 联合含数十种成员(`status` / `auth_status` / `task_*` / `hook_*` / `rate_limit_event` / `prompt_suggestion` / `informational` 等)。sdk-client 对 §12 列举 type 做关注处理、其余经 onMessage 回调透传不阻断;§7 实时流式渲染可按需扩展关注更多 type。
+
+4. **`SDKPartialAssistantMessage.type === 'stream_event'`**(本节第 3/4 条 stream_event 描述准确):`includePartialMessages:true` 时收到的 partial 消息 type 值确为 `'stream_event'`(`event: BetaRawMessageStreamEvent`),与本节描述一致,无需修正。
+
+5. **安装版新增大量 Options**(`thinking` / `effort` / `outputFormat` / `maxBudgetUsd` / `sandbox` / `skills` / `plugins` / `agent` / `agents` / `hooks` / `mcpServers` / `forkSession` / `fallbackModel` 等):本规格 F1-F5 下不使用(sdk-client 不传),列此备查。其中 `maxThinkingTokens` 在安装版标记 `@deprecated`(建议用 `thinking`)、`allowedTools` 语义变为「免授权自动允许的工具列表」(控制工具集改用 `tools`),F3 下两者均不传(用默认全集),不影响本规格。
+
 ---
 
 ## 13. 改动点(文件级)
