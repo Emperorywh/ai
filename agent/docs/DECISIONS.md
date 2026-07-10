@@ -572,3 +572,21 @@ consequences: |-
 ```
 
 提议自 `TASK-024-cli-plan-and-task-create.result.md`。plan / task:create 命令设计为「显式计划定义 + PlanningWorkflow 校验 + 先校验后写盘」的可一次闭环骨架，ISS-018 以 --reviewed 标志落地、ISS-013 随 CLI 命令任务全部完成而 resolved。沿用 DEC-020 CLI 退出码约定与 framework.ts 注册模式。待 Orchestrator 确认。
+
+## DEC-029 Claude Agent SDK 真实接入——扩权立项 + Provider Profile 多 provider（env 注入）+ 6 任务拆分
+
+```yaml
+id: DEC-029
+title: "Claude Agent SDK 真实接入——扩权立项 + Provider Profile 多 provider（env 注入）+ 6 任务拆分"
+status: proposed
+scope: docs/SPEC_claude-sdk-integration.md + docs/PLAN_claude-sdk-integration.md + docs/tasks/TASK-030~035
+created_from_task: PLAN_claude-sdk-integration（规划产出）
+decision: |-
+  基于 SPEC_claude-sdk-integration（2026-07-10 访谈 + §12 字段名校准）把 TASK-022 的 ClaudeSdkInvocation 骨架落地为真实 @anthropic-ai/claude-agent-sdk 调用。三条关键决策：(1) 扩权独立成 TASK-030——新增 SDK 依赖违反 TASK-001 红线（PLAN_coding-agent-workflow §0-8），须显式立项、不在其他任务越权改 package.json。(2) 多 provider 接入（SPEC §6 提升为 P0）经 options.env 注入：第三方端点注入 ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL + 三档 ANTHROPIC_DEFAULT_{HAIKU,SONNET,OPUS}_MODEL 映射（Claude Code 内部按任务复杂度自动选档，三档必须全映射），官方走 ANTHROPIC_API_KEY；caw init 预置 anthropic + glm 两 profile；env 整体替换子进程环境须 ...process.env 展开。(3) provider 配置经 invocation/reviewer 实现类构造函数注入，SdkRunInput 契约不改（SPEC §3）。§12 字段名已对照官方类型参考校准：abortController（非 abortControllerSignal）、systemPrompt（非 customSystemPrompt/appendSystemPrompt，用 {type:'preset',preset:'claude_code',append}）、env / settingSources（默认 []，须显式 'project' 才加载 CLAUDE.md）/ maxThinkingTokens。拆 6 任务（030 sdk-client+扩权 / 031 provider-profile / 032 invocation 实现 / 033 reviewer / 034 task:run 接线 / 035 task:review 接线+CI），030/031 可并行，core/application 零改动，新增点全在 infrastructure/sdk + cli。
+rationale: |-
+  SPEC §0 F1-F5 哲学（自主执行 / 全 JSON 产 frontmatter / 纯软约束不挂 canUseTool / 无硬上限 / 软件只做可见性+校验+容错）贯穿；扩权独立因红线要求显式、不可藏在实现任务里；env 注入是接入第三方 Anthropic 兼容端点的唯一手段（options.model 只换模型 id 不换端点），经用户 GLM 接入示例验证；构造注入 provider 配置避免改 SdkRunInput 契约（SPEC §3 锁定）；§12 校准消除原 TASK-022「待 SDK 确认」的 R1 风险，字段名落地为可编码级。
+consequences: |-
+  TASK-030~035 为 v0.2.0 阶段，推进 ISS-012（SDK 就位）/ ISS-016（真实 Reviewer，解除 LocalReviewer 自动放行）；PROGRESS 恢复 status: active。provider 配置文件（.caw/config.json）schema 为最小定义，正式 schema 化校验留 P1。deepseek profile / SDK mock / cost 累计告警为 P1 不在本 PLAN。关联 DEC-019（TASK-022 SDK 适配器接口隔离）/ ISS-012 / ISS-016。
+```
+
+提议自 `PLAN_claude-sdk-integration`（规划产出）。把 TASK-022 的 SDK 适配器骨架落地为真实执行引擎，多 provider 接入（env 注入）为 P0 核心、扩权独立立项。SPEC §12 字段名已对照官方类型参考校准。待 Orchestrator 确认。

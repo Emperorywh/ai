@@ -1,6 +1,6 @@
 ---
 doc: PROGRESS
-status: complete
+status: active
 ---
 
 # PROGRESS — 当前项目状态
@@ -10,6 +10,8 @@ status: complete
 ## 项目终态快照（2026-07-10）
 
 > **本项目已按 Readme §11 第 10 步完成收尾。** 全部 29 个任务（TASK-001 ~ TASK-029）已实现并合并回主分支 `main`，无后续任务待执行。下方各 section 为最终交付记录（能力全集 / 架构状态 / 复用要点），当前有效；仅在本文件恢复为 `status: active` 时再滚动更新。
+>
+> **2026-07-10 起 v0.2.0 阶段**：启动 Claude Agent SDK 真实接入（推进 ISS-012 / ISS-016），新建 `PLAN_claude-sdk-integration`（source_spec: `SPEC_claude-sdk-integration.md`）+ TASK-030~035，本文件恢复 `status: active`；下方各 section 暂保留 v0.1.0 终态快照，随 SDK 接入任务执行滚动更新（见末节「建议下一个任务」）。
 
 - **交付范围**：四层架构（core / application / infrastructure / cli）全部就位——Core 领域原语 + 状态机 + 规则、application 用例（Context Pack / 调度 / 状态编排 / 合并 rebase-ff / section 回写 / 幂等恢复 / 规划工作流）、infrastructure 适配器（frontmatter / 文档仓储 / SQLite 索引 / git worktree / Claude SDK 适配器 / MCP 骨架）、CLI 全部命令（init / plan / task:create / status / rebuild-index / task:run / task:review）。
 - **全量验证**（`docs/TESTING.md`）全绿：`npm run typecheck` 通过（`strict` + `noUncheckedIndexedAccess`，src + test）、`npm test` 28 个测试文件 / 680 项单测全部通过、`npm run lint` 通过（ESLint 覆盖 src + test）、`npm run build` 通过（tsc 编译产 `dist/`，已 gitignore）。
@@ -181,4 +183,4 @@ status: complete
 
 ## 建议下一个任务
 
-- **无后续任务**：全部 29 个任务已完成，项目收尾（Readme §11 第 10 步）已执行——全量验证四项全绿、本文件已置终态快照（`status: complete`）、遗留项已归档（见上方「项目终态快照」与 `docs/ISSUES.md`）。后续若启动新工作（如 ISS-012 Claude Agent SDK 选型接入、ISS-006 级联完备性、ISS-015 cli 共享助手抽取），新建 PLAN 并把本文件恢复为 `status: active`。tag / 发版（当前 `0.1.0` / `private: true`）由人工决定。
+- **TASK-030（扩权新增 Claude Agent SDK 依赖 + sdk-client 会话工厂）** —— `PLAN_claude-sdk-integration` 的第一个任务，把 TASK-022 的 `ClaudeSdkInvocation` 骨架落地为真实 SDK 调用。全套 6 个任务（TASK-030~035）覆盖：SDK 依赖 + sdk-client（030）→ Provider Profile 配置（031，多 provider 经 `options.env` 接 GLM/DeepSeek）→ invocation 真实实现（032）→ SDK 版 Reviewer（033）→ task:run 接线 + 可观测性（034）→ task:review 接线 + CI 契约（035）。**030 / 031 可并行起步**（无相互依赖）。推进 ISS-012（SDK 就位）/ ISS-016（真实 Reviewer，解除 LocalReviewer 自动放行）。v0.1.0 终态快照保留于上方各 section；SPEC §12 字段名已对照官方类型校准（DEC-029）。tag / 发版（当前 `0.1.0` / `private: true`）由人工决定。
