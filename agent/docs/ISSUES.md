@@ -381,3 +381,19 @@ recommended_action: |-
 ```
 
 提议自 `TASK-030-infra-sdk-dependency-and-client.result.md`。SDK 及 peer 的传递依赖漏洞系扩权引入，本任务不处理（范围外 + 需评估影响）。low 优先级（非运行时数据面），建议后续 npm audit 评估处置。关联 DEC-030。
+
+## ISS-021 init.test.ts 测试标题/注释语义过时——TASK-031 扩展 init 产物加 .caw/config.json 后「不创建 docs/ 以外」名不副实（断言全绿，仅文档张力）
+
+```yaml
+id: ISS-021
+title: "init.test.ts 测试标题/注释语义过时——TASK-031 扩展 init 产物加 .caw/config.json 后「不创建 docs/ 以外」名不副实（断言全绿，仅文档张力）"
+status: open
+severity: low
+scope: test/cli/init.test.ts（不在 TASK-031 allowed_paths，未改）
+created_from_task: TASK-031
+owner: ""
+recommended_action: |-
+  TASK-031 往 init.ts 的 DOC_FILES 追加 .caw/config.json（SPEC §6/§13.2 要求 caw init 预置 provider profile），init 产物现含 docs/ 以外的配置文件。test/cli/init.test.ts（不在本任务 allowed，未改）的「仅写文档骨架，不创建 docs/ 以外的无关文件」测试（第 69 行）标题 + 第 75 行注释「docs/ 下文件数恰为清单声明数（SPEC/ARCHITECTURE/...+ tasks/.gitkeep）」现语义过时——.caw/config.json 是 docs/ 以外的「有关」文件。断言本身全绿不阻塞验收：(1) 第 9 行 EXPECTED_PATHS 动态派生自 DOC_FILES（自动含 .caw/config.json）；(2) 第 33/59 行 created/skipped 比对 EXPECTED_PATHS（动态跟上）；(3) 第 72-74 行 created 中每个路径都在 EXPECTED_PATHS 白名单内（toContain）通过；(4) 第 76 行 DOC_DOC_PATHS.length===8 只过滤 docs/ 前缀（.caw/config.json 不计入，仍 8）。仅测试标题/注释文档张力。建议后续任务（更新 init 测试时）把标题改为「仅写 DOC_FILES 清单内文件」等准确表述，注释补「.caw/config.json 是 SPEC §6 要求的 provider profile 配置」。关联 DEC-032。
+```
+
+提议自 `TASK-031-cli-provider-profile.result.md`。init.test.ts 测试标题/注释因 init 产物扩展（加 .caw/config.json）语义过时，断言全绿不阻塞（EXPECTED_PATHS 动态派生自 DOC_FILES + DOC_DOC_PATHS 只数 docs/），low 优先级（仅文档张力），建议后续更新测试表述。关联 DEC-032。

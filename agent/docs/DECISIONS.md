@@ -626,3 +626,21 @@ consequences: |-
 ```
 
 提议自 `TASK-030-infra-sdk-dependency-and-client.result.md`。sdk-client 作 SDK 会话工厂供 032/033 复用，§12 字段对照安装版 0.3.206 .d.ts 校准并回写三处 R-API 差异（bypassPermissions 须 allowDangerouslySkipPermissions / subtype 扩展 / SDKMessage 联合扩展）。沿用 DEC-019 注入式句柄哲学。待 Orchestrator 确认。
+
+## DEC-032 Provider Profile schema + SDK env 组装规则——token 注入键按 baseUrl 推断 + 三档强制全映射 + DEFAULT_PROFILE_CONFIG 单一来源供 init
+
+```yaml
+id: DEC-032
+title: "Provider Profile schema + SDK env 组装规则——token 注入键按 baseUrl 推断 + 三档强制全映射 + DEFAULT_PROFILE_CONFIG 单一来源供 init"
+status: proposed
+scope: src/cli/config（provider-profile.ts）+ src/cli/commands/init.ts
+created_from_task: TASK-031
+decision: |-
+  provider-profile.ts 按 SPEC §6 落地多 provider 配置读取 + SDK env 组装。四项关键设计：(1) token 注入键判定——SPEC §6 表格 + ⚠ 注释明文「官方 anthropic 注入 ANTHROPIC_API_KEY；第三方注入 ANTHROPIC_AUTH_TOKEN」但未给判定字段，本任务据 §6 示例（anthropic.baseUrl=null 官方默认端点 / glm.baseUrl=智谱端点）+ env 公式（baseUrl 三元决定 ANTHROPIC_BASE_URL）推断：baseUrl==null→ANTHROPIC_API_KEY（官方）/ 非空→ANTHROPIC_AUTH_TOKEN（第三方 bearer）。官方端点用默认 baseUrl（null），第三方必然指向兼容端点（非空），故 baseUrl 是否存在与官方/第三方天然对应，无需额外声明字段（schema 保持 baseUrl/authTokenEnv/modelMapping/extraEnv 四字段），也未硬编码 profile name（更灵活）。(2) env 组装严格按 §6 公式 { ...process.env, [tokenKey]:token, ...(baseUrl?{ANTHROPIC_BASE_URL}:{}), ANTHROPIC_DEFAULT_{HAIKU,SONNET,OPUS}_MODEL, ...extraEnv }——必须展开 ...process.env（SDK env 整体替换子进程环境 §12）、extraEnv 最后展开（后写者覆盖，SPEC 公式顺序）、token 从 authTokenEnv 指定的环境变量读不落配置明文（§7）；stringEnv 辅助把 NodeJS.ProcessEnv 剔除 undefined 规范化为 Record<string,string>（运行时 process.env 自有属性值皆 string，类型标注的 undefined 仅在访问不存在 key 时，展开前剔除保证类型与运行时一致，SDK Dict<string> 兼容）。(3) 三档强制全映射——ModelMappingSchema haiku/sonnet/opus 各 z.string().min(1) + .strict() 拒多余键，缺档/空串 parseProfileConfig 抛 ProviderConfigError（R-PROVIDER：Claude Code 内部按复杂度自动选档，漏档致内部调用失败）。(4) DEFAULT_PROFILE_CONFIG 作为 caw init 产物与默认值单一来源（DRY，AGENTS §3）——init.ts import 同层 DEFAULT_PROFILE_CONFIG + JSON.stringify 生成 .caw/config.json 模板，避免模板与配置模块两处定义漂移；预置 anthropic（baseUrl null/ANTHROPIC_API_KEY/claude-haiku-4-5·sonnet-5·opus-4-8）+ glm（智谱端点/ZHIPU_API_KEY/glm-4.7·5.2·5.2/extraEnv 含 API_TIMEOUT_MS=3000000 传输层长超时 + CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1），deepseek 留 P1。错误体系三态（ProviderProfileError base / ProviderConfigError 配置非法含缺档 / ProviderTokenMissingError token 缺失），显式不静默（AGENTS §3）。
+rationale: |-
+  token 注入键 baseUrl 推断：SPEC §6 未给显式判定字段，但示例 + 公式把 baseUrl null/非空与官方/第三方强绑定（官方用默认端点=baseUrl null，第三方必须指兼容端点=非空），baseUrl 是天然且充分的判据，无需新增 schema 字段或硬编码 profile name（硬编码 name 会限制用户自定义无 baseUrl 的非 anthropic profile）。env 公式逐字段对照 §6 表格 + §12 env 项落地，未自行增减。三档 min(1)+strict：R-PROVIDER 明文「三档必须全部映射」，schema 层强制比运行期检测更早失败（parse 即报错）。DEFAULT_PROFILE_CONFIG 单一来源供 init：SPEC §6「caw init 预置 anthropic+glm」+ §13.2「init 产物新增 provider profile 配置」，模板数据与配置模块同源避免漂移；init import 同层 cli 模块的纯数据常量不违反「init 不依赖 core/application/infrastructure 领域逻辑」（provider-profile 是 cli 层，且只 import 数据常量非逻辑）。zod 最小校验就近 cli/config（任务 §8）：P1 再考虑提升 core 正式 schema 化（如 TaskFrontmatterSchema 同级），当前 P0 够用。token 缺失抛错不静默承接 SPEC §6「key 缺失报错」+ AGENTS §3。
+consequences: |-
+  provider-profile 为 032/033/034/035 共同依赖：034/035 调 composeProviderEnv 组装 env 注入 sdk-client SdkSessionInput.env；032/033 经 sdk-client runSdkSession 消费。新增 provider（deepseek P1）只扩 DEFAULT_PROFILE_CONFIG + init 自动跟上（单一来源）。token 注入键判定绑定 baseUrl：若未来出现「无 baseUrl 的第三方端点」或「有 baseUrl 的官方端点」profile，须重新评估判定字段（可能需加显式 authMode 字段）——当前 P0 两预置 profile 不触发此情况。配置 schema 未提升 core：第三方/外部复用 ProfileConfigSchema 需从 cli/config import（P1 若提升 core 则迁移）。init 产物扩展使 init.test.ts 标题/注释语义过时（ISS-021，断言全绿不阻塞）。关联 DEC-030/031（SDK 依赖 + sdk-client）/ ISS-012（SDK 就位）/ ISS-019（zod peer 冲突，本任务复用已装 zod 3.25.76 不触发）/ ISS-021（init 测试注释）。
+```
+
+提议自 `TASK-031-cli-provider-profile.result.md`。provider-profile.ts 按 SPEC §6 落地多 provider 配置 + SDK env 组装（token 注入键 baseUrl 推断 + 三档强制全映射 + DEFAULT_PROFILE_CONFIG 单一来源供 init）。待 Orchestrator 确认。
