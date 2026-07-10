@@ -682,3 +682,39 @@ consequences: |-
 ```
 
 提议自 `TASK-033-infra-sdk-reviewer.result.md`。claude-sdk-reviewer.ts 按 SPEC §5 / Readme §15 / §4.3 / §8 / §9 落地真实 ClaudeSdkReviewer（独立审查会话 + snake_case 模型 JSON 对齐 ReviewOutcome + review-frontmatter 标记 + 复用 classifyFault + 结构类型兼容 Reviewer 契约不 import cli），Reviewer 契约（task-review.ts）不改、靠结构类型兼容；SPEC §5「§15 审查清单」经核实为 Readme §15。待 Orchestrator 确认。
+
+## DEC-035 task:run composition root 装配策略——assembleExecutor 分层 + executor 优先注入保 runTask 可测 + executorKind 三态（dry-run/sdk/auto）+ --model 具体模型直写 invocation.model
+
+```yaml
+id: DEC-035
+title: "task:run composition root 装配策略——assembleExecutor 分层 + executor 优先注入保 runTask 可测 + executorKind 三态（dry-run/sdk/auto）+ --model 具体模型直写 invocation.model"
+status: proposed
+scope: src/cli/commands/task-run.ts（assembleExecutor / runTaskWithAssembly / registerTaskRunCommand）
+created_from_task: TASK-034
+decision: |-
+  TASK-034 把 SDK 装配收敛为独立 assembleExecutor(input) → { executor, observability }（SPEC §6/§13.2 composition root），与 runTask 编排解耦。四项关键设计：(1) 装配与编排分层——runTask（TASK-026）仍只接受 options.executor（既有注入点不变，主体零改动），CLI action 经 runTaskWithAssembly（assembleExecutor → runTask → observability.getCost() 合并入 TaskRunOutcome，finally observability.close()）串联；装配逻辑全在 assembleExecutor 内可单测（注入 invocationFactory fake + env）。(2) executorKind 三态装配策略（SPEC §14.3）：dry-run 不读 token 直接 DryRunLocalExecutor（仍建可观测性，无 SDK 会话则 cost=undefined）；sdk 或省略=auto 走 readProfileConfig → composeProviderEnv（token 缺失由 buildProviderEnv 抛 ProviderTokenMissingError 不静默，§6 key 缺失）→ 构造 ClaudeSdkInvocationImpl + ClaudeSdkExecutor；非法 executorKind 抛错不静默。(3) --model 作具体模型名直接写入 invocation.model（SPEC §6「覆盖具体模型，写入 options.model」），省略则 invocation.model 为 undefined → SDK 经 ANTHROPIC_DEFAULT_*_MODEL env 按档位自选（Claude Code 内部按任务复杂度选 haiku/sonnet/opus）。(4) executor 优先注入——options.executor 显式提供时跳过装配（保留 runTask 可测性，既有 13 项测试直接注入 executor / fake 不破；legacy 无 executor 无装配选项时 runTask 仍 ?? DryRunLocalExecutor 兜底）。
+rationale: |-
+  装配与编排分层：runTask 是纯编排（依赖检查→worktree→执行→状态流转，TASK-026 已稳定 + 13 测试覆盖），把 profile 读取 / env 组装 / invocation 构造塞进去会破坏其纯编排定位且全量改既有测试；assembleExecutor 独立可单测装配（fake invocationFactory + 注入 env 验三态 + provider/model 透传），runTaskWithAssembly 串联两者 + cost 合并。executorKind 三态：SPEC §14.3 明文「--executor dry-run 显式回退 / token 缺失未 dry-run 报错不静默」，auto（省略）默认读 profile 是生产路径（caw init 预置 .caw/config.json）；buildProviderEnv 抛 ProviderTokenMissingError 已含「请设置变量或 --executor dry-run 兜底」提示语（TASK-031），直接向上传播经 runCli 错误输出不静默。--model 直写：SPEC §6 表格「--model 覆盖具体模型（写入 options.model）」明文具体模型名，非档位名（档位经 env 三档映射由 SDK 内部选）；省略用 SDK 默认是合理默认（用户无需指定即可用 profile 配置）。executor 优先注入：测试隔离原则——fake executor/fake invocation 直接注入绕过真实 SDK + 真实 git，与 TASK-026 既有可注入模式一致。
+consequences: |-
+  task-run.ts 新增 ~250 行（装配 + 可观测 + CLI 选项），runTask 主体零改动（向后兼容既有测试）。CLI 默认行为变化：caw task:run <id>（无 --executor）从 TASK-026 的静默 DryRun 默认变为 auto（读 .caw/config.json，token 就位走 SDK，缺失报错）；既有 2 个 runCli 测试补 --executor dry-run 绕过装配直测 runTask 编排（测试意图不变）。TASK-035（task:review 接线）可对称复用本 assembleExecutor 模式（provider-profile 复用 + reviewer 工厂注入 + 可观测性上下文复用 createObservability）。cost 字段为可选（DryRun undefined），printOutcome 仅 SDK 路径打印 cost 行。关联 DEC-036（§7 可观测性实现）/ DEC-032（provider-profile 组装）/ DEC-031（sdk-client 回调）/ DEC-033（ClaudeSdkInvocationImpl 注入对象）/ ISS-012（SDK 真实调用，本任务推进执行侧接线）/ ISS-023（frontmatter 路径笔误）。
+```
+
+提议自 `TASK-034-cli-task-run-wiring.result.md`。task-run.ts 把 SDK 装配收敛为 assembleExecutor（与 runTask 编排解耦，executor 优先注入保既有测试）+ executorKind 三态（dry-run/sdk/auto，token 缺失不静默）+ --model 直写 invocation.model；CLI 默认从静默 DryRun 变为 auto 读 profile。待 Orchestrator 确认。
+
+## DEC-036 §7 可观测性统一上下文（createObservability）+ §9 SIGINT 中断——onMessage 三合一（终端流式/惰性日志/cost 采集）+ abortController wire SIGINT + cost 经 runTaskWithAssembly 入 TaskRunOutcome
+
+```yaml
+id: DEC-036
+title: "§7 可观测性统一上下文（createObservability）+ §9 SIGINT 中断——onMessage 三合一（终端流式/惰性日志/cost 采集）+ abortController wire SIGINT + cost 经 runTaskWithAssembly 入 TaskRunOutcome"
+status: proposed
+scope: src/cli/commands/task-run.ts（createObservability / Observability / CostSummary / renderMessage / printOutcome）
+created_from_task: TASK-034
+decision: |-
+  §7 三项可见性（实时流式 / 完整日志 / cost 摘要）+ §9 SIGINT 中断经单一 createObservability 上下文汇集，onMessage 回调注入 ClaudeSdkInvocationImpl（TASK-033 经 sdk-client for-await 透传 SDKMessage 流）一次回调驱动三事：(1) 终端流式渲染——renderMessage 把 assistant 消息（text 截断 / tool_use 打印工具名+输入摘要优先 file_path/command/path/pattern）+ user 消息（tool_result ✓/✗ 状态+内容截断）打印 console.log；stream_event/system 等仅入日志不渲染保持终端可读。(2) 完整日志——惰性 appendFileSync（首条消息 mkdirSync .caw/logs/<task>-<ts>.log + 追加，DryRun 无消息不产空文件），逐消息记 ISO 时间戳 + turn（assistant 计轮）+ type + JSON（safeJson 容不可序列化值）；stderr 回调亦追加日志。(3) cost 采集——result 消息到达时 extractCost 取 total_cost_usd/usage(input/output/cache_*)/num_turns/duration_ms 存 CostSummary，经 observability.getCost() 由 runTaskWithAssembly 合并入 TaskRunOutcome.cost（SDK 路径非空、DryRun undefined），printOutcome 打印 cost 行。§9 中断：abortController wire process SIGINT（Ctrl+C → controller.abort() → invocation catch AbortError 产降级 result 保留 worktree 不回滚 §9），close() 移除 SIGINT 监听防跨命令泄漏。stream/wireSigInt 经 assembleExecutor 可关闭（测试 stream:false 避免 console 噪声 / wireSigInt:false 避免进程监听干扰）。
+rationale: |-
+  统一上下文：§7 三项可见性 + §9 中断都经 SDKMessage 流驱动，单一 onMessage 回调汇集避免调用方组装多回调易漏；createObservability 封装 logFile 惰性创建 + abortController + SIGINT wiring + cost 状态，调用方（assembleExecutor）只取 onMessage/stderr/abortController 注入 invocation。cost 从 result 消息采集而非 .result.md summary 反解析：summary 是模型自由文本（含 cost 行但非结构化），不可靠；result 消息（SdkSessionReport）是 SDK 结构化终止信息（§12），直接采集字段名对照安装版 .d.ts。惰性日志：DryRun 不产 SDK 消息，惰性创建避免空日志文件噪声；appendFileSync 简单可靠（§7「日志经文件流追加」）。终端渲染仅 assistant/user：stream_event（partial delta）噪声大、renderMessage 选择性渲染完整 turn 保持终端可读，全量留日志供审计（§7.2「逐消息日志」含 stream_event）。SIGINT wire：SPEC §9 明文「经 abortController option 接入进程 SIGINT」，createObservability 持 controller + wire + close 三位一体避免泄漏。cost 入 outcome：SPEC §7.3 明文「写入 TaskRunOutcome 供 CLI 输出与测试断言（需扩展 TaskRunOutcome）」，故 TaskRunOutcome 增可选 cost。
+consequences: |-
+  TaskRunOutcome 增可选 cost?: CostSummary（DryRun undefined，向后兼容；printOutcome 仅 SDK 路径打印 cost 行）。终端输出在 SDK 路径含流式工具调用行 + 末尾 cost 摘要行。SIGINT 单次 abort 后不支持二次强退（Node 注册 handler 后 Ctrl+C 不退出进程，graceful 降级为 SPEC §9 既定取舍——abort 后 invocation 产降级 result、runTask 走完、进程正常退出；未来可加二次 SIGINT → process.exit 强退增强，本任务不做）。日志路径 <projectRoot>/.caw/logs/<task>-<ts>.log（SPEC §7.2 建议 <root>/.caw/logs/，worktree 内路径因 worktree 在 runTask 内创建、装配在其外而用 projectRoot）。TASK-035 task:review 可复用 createObservability（审查侧同样需流式/日志/cost/SIGINT）。真实 API 流式 / cost 字段实测留 TASK-035 CI（本任务用 fake invocation 驱动 onMessage 验装配 + outcome 字段）。关联 DEC-035（装配策略，cost 经 runTaskWithAssembly 合并）/ DEC-031（sdk-client onMessage 透传）/ DEC-033（invocation 注入回调）/ ISS-012（SDK 真实调用推进）。
+```
+
+提议自 `TASK-034-cli-task-run-wiring.result.md`。task-run.ts 落地 §7 可观测性统一上下文 createObservability（onMessage 三合一：终端流式/惰性日志/cost 采集）+ §9 SIGINT wire abortController + cost 入 TaskRunOutcome；真实 API 流式/cost 实测留 TASK-035 CI。待 Orchestrator 确认。

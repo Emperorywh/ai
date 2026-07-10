@@ -413,3 +413,19 @@ recommended_action: |-
 ```
 
 提议自 `TASK-032-infra-sdk-invocation-impl.result.md`。classifyFault 启发式错误分类是显式可审规则（§8 + AGENTS §3），fake 单测全绿不阻塞验收；真实 API（GLM/DeepSeek）错误措辞未经实证可能漏判（unknown 仍降级不静默），low 优先级，建议 TASK-035 CI 观测后细化。关联 DEC-033。
+
+## ISS-023 TASK-034 frontmatter allowed_paths test 路径笔误（test/cli/commands/ 实际为 test/cli/）
+
+```yaml
+id: ISS-023
+title: "TASK-034 frontmatter allowed_paths test 路径笔误（test/cli/commands/ 实际为 test/cli/）"
+status: open
+severity: low
+scope: docs/tasks/TASK-034-cli-task-run-wiring.md
+created_from_task: TASK-034
+owner: ""
+recommended_action: |-
+  TASK-034 frontmatter allowed_paths 列 `test/cli/commands/task-run.test.ts`，但本项目 test 目录无 commands/ 子目录，全部 CLI 测试直接在 test/cli/ 下（init.test.ts / status-rebuild.test.ts / task-run.test.ts / task-review.test.ts / plan.test.ts / config/provider-profile.test.ts）。实际存在的文件是 test/cli/task-run.test.ts。本任务在真实存在的 test/cli/task-run.test.ts 上修改——任务意图明显为「task-run 测试文件」，若机械按 allowed_paths 创建 test/cli/commands/task-run.test.ts 副本会是重复且有害（同套 CLI 测试分裂两处）。建议后续修正该 frontmatter 路径为 test/cli/task-run.test.ts；TASK-035（task:review 接线，allowed_paths 含 test/cli/commands/task-review.test.ts）同此约定，建议一并核实修正。不阻塞本任务验收（修改的 test/cli/task-run.test.ts 是 task-run 测试的唯一真实文件，23 项全绿）。
+```
+
+提议自 `TASK-034-cli-task-run-wiring.result.md`。TASK-034 frontmatter allowed_paths test 路径（test/cli/commands/）与实际（test/cli/）不符，本任务在真实文件上修改，建议后续修正 frontmatter（TASK-035 同约定）。low 优先级，不阻塞验收。关联 DEC-035。
