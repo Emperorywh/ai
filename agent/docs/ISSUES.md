@@ -221,7 +221,7 @@ recommended_action: |-
 ```yaml
 id: ISS-013
 title: "CLI 命令任务的 allowed_paths 应含 framework.ts"
-status: open
+status: resolved
 severity: low
 scope: docs/tasks（CLI 命令任务规格）
 created_from_task: TASK-025
@@ -231,6 +231,8 @@ recommended_action: |-
 ```
 
 提议自 `TASK-025-cli-status-and-rebuild-index.result.md`。CLI 命令注册入口 createProgram 在 framework.ts，不在本任务 allowed_paths，但新增命令必须改它；已做同层增量未碰 forbidden_paths。低优先级，不阻塞验收，待 Orchestrator 裁定（A 后续 CLI 任务纳 framework.ts / B ARCHITECTURE 注明共享注册点 / C 重构 index.ts 驱动不推荐）。关联 DEC-021。TASK-026（task:run）延续同一模式：allowed_paths 同样未含 framework.ts，做同层 src/cli 最小注册增量（1 行 import + 1 行 register 调用），未碰 forbidden_paths，进一步印证方案 A 的必要性。
+
+**Resolution（TASK-024，2026-07-10）**：TASK-024（plan / task:create）延续同一先例——allowed_paths 未含 framework.ts，做同层 src/cli 最小注册增量（2 行 import + 2 行 register 调用 + 注释更新），未碰 forbidden_paths。至此 CLI 命令任务（TASK-023/024/025/026/027）全部完成，无后续任务需套用本建议，ISS-013 不再可操作，标记 resolved（实际采纳方案 A 的精神，但因无后续 CLI 任务而不需再改任务规格）。关联 DEC-028。
 
 ---
 
@@ -309,7 +311,7 @@ recommended_action: |-
 ```yaml
 id: ISS-018
 title: "validatePlanningInputs 的 specReviewed/architectureReviewed 判定来源未机器化定义"
-status: open
+status: resolved
 severity: low
 scope: application（planning-workflow 前置校验）
 created_from_task: TASK-029
@@ -319,3 +321,5 @@ recommended_action: |-
 ```
 
 提议自 `TASK-029-app-planning-workflow.result.md`。validatePlanningInputs 的「已审查」判定来源未机器化定义，系 application 层「只消费布尔、不读文件」（DEC-025）与 §11「Reviewer 审查 SPEC/ARCHITECTURE」之间的衔接 gap——判据属 CLI composition root（TASK-024）职责，非 application 缺陷。低优先级，不阻塞本任务验收（application 层纯逻辑三态可单测）。关联 DEC-025。
+
+**Resolution（TASK-024，2026-07-10）**：采用原方案 A——TASK-024 plan 命令以 `--reviewed` 布尔标志作「SPEC/ARCHITECTURE 已通过 Reviewer 独立审查」的机器判据，CLI composition root 判定 docs/SPEC.md / docs/ARCHITECTURE.md 存在性 + 该标志后传入 validatePlanningInputs（standard 模式硬性前置）。最简单、最不易误判（不依赖启发式 / 不读 ISSUES-DECISIONS 推断审查状态）。关联 DEC-028。

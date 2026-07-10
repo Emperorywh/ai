@@ -552,3 +552,23 @@ consequences: |-
 ```
 
 提议自 `TASK-029-app-planning-workflow.result.md`。validateTaskGraph 完全复用 scheduler（topologicalOrder / detectParallelizable）+ core（detectDependencyCycle）公开 API、零重复私有路径逻辑，是任务 §2「复用调度器」与 AGENTS §3「不复制粘贴」的兼顾落地，无边界冲突。待 Orchestrator 确认。关联 DEC-013（scheduler 路径重叠保守判定，本任务路径冲突复用其 detectParallelizable 分组语义）。
+
+---
+
+## DEC-028 plan / task:create CLI 命令设计——计划定义经 --from 配置文件、ISS-018 用 --reviewed 标志、task-create 拥有共享 writeTaskFile/buildTaskBody/slugify、先校验任务图后写盘、task:create 拒绝覆盖
+
+```yaml
+id: DEC-028
+title: "plan / task:create CLI 命令设计——计划定义经 --from 配置文件、ISS-018 用 --reviewed 标志、task-create 拥有共享 writeTaskFile/buildTaskBody/slugify、先校验任务图后写盘、task:create 拒绝覆盖"
+status: proposed
+scope: cli/commands/plan.ts + task-create.ts
+created_from_task: TASK-024
+decision: |-
+  plan 命令经 `--from <YAML/JSON>` 接受显式计划定义（title+phases+tasks），`parsePlanDefinition(raw)` 经本地 `PlanDefinitionSchema`（任务子 schema 复用 core TaskIdSchema/LayerSchema/PermissionSchema）校验后交 TASK-029 PlanningWorkflow（不在 CLI 实现智能拆分，§7/§12）。ISS-018「已审查」机器判据采用显式 `--reviewed` 布尔标志传入 validatePlanningInputs（standard 模式硬性前置，未携带且无 sourceSpec → 拒绝生成）。planProject 顺序：判 SPEC/ARCHITECTURE 存在 → validatePlanningInputs → createPlanDraft（模型）→ createTaskDrafts（模型）→ validateTaskGraph（先校验后写盘——依赖环/重复 id 抛错、路径冲突 warning）→ 落盘 PLAN.md + 任务文件。task-create.ts 拥有共享 `writeTaskFile(tasksDir, draft)`（serializeDocument + §9 十三节正文模板）/ `buildTaskBody` / `slugify`，plan.ts 跨命令 import 复用（延续 ISS-015）；`taskFileFromResult` 就地重实现（task-run.ts 私有未导出）。task:create 拒绝覆盖既有任务文件（创建已存在任务几乎总是 id 冲突误操作）；slug 从 title 派生或 `--slug` 显式提供，纯中文标题派生空时要求显式 --slug。
+rationale: |-
+  §7 明令不在 CLI 实现智能拆分、§12 限本任务为可一次闭环骨架，故计划定义显式提供而非模型生成（智能拆分留独立后续任务）；ISS-018 要求机器化「已审查」判据，--reviewed 标志最明确（AGENTS §3 显式能力声明，不依赖启发式 / 不读 ISSUES-DECISIONS 推断审查状态，避免误判）；共享 writeTaskFile 落 task-create 因「新建任务文件 + 正文模板」是 task:create 的天然职责、plan 批量复用顺理成章，避免重复 §9 正文模板；先校验任务图后写盘避免依赖环/重复 id 留下半成品任务文件污染 docs/tasks（planProject 抛错时 docs/tasks 不被触碰）；task:create 拒绝覆盖因创建已存在任务几乎总是 id 冲突误操作，静默覆盖会丢失既有任务定义。
+consequences: |-
+  智能拆分（SPEC/ARCHITECTURE → 任务草案）仍需独立后续任务（§7/§12，当前以显式配置文件闭环骨架交付）；taskFileFromResult 三处重实现（task-run / task-create）待 ISS-015 提议的 cli 共享助手模块（如 src/cli/shared/）收口；--reviewed 标志为 standard 模式硬性前置，未携带且无 sourceSpec 时 plan 拒绝生成（ISS-018 落地）；task:create 不覆盖既有文件，重生成任务须经 plan 命令或先删除既有文件。关联 DEC-020（CLI 命令名 caw + 退出码约定）/ DEC-025/026/027（TASK-029 PlanningWorkflow）/ ISS-015（cli 共享助手）/ ISS-018（resolved）/ ISS-013（resolved）。
+```
+
+提议自 `TASK-024-cli-plan-and-task-create.result.md`。plan / task:create 命令设计为「显式计划定义 + PlanningWorkflow 校验 + 先校验后写盘」的可一次闭环骨架，ISS-018 以 --reviewed 标志落地、ISS-013 随 CLI 命令任务全部完成而 resolved。沿用 DEC-020 CLI 退出码约定与 framework.ts 注册模式。待 Orchestrator 确认。
