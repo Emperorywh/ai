@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process'
-import { existsSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
 import { Command } from 'commander'
 import { parse as parseYaml } from 'yaml'
 import {
@@ -34,15 +34,24 @@ import type {
   TaskStatus,
 } from '../../core/index.js'
 import {
+  ClaudeSdkExecutor,
+  ClaudeSdkInvocationImpl,
   DryRunLocalExecutor,
   GitMergeAdapter,
   GlobalDocRepository,
   TaskDocRepository,
   WorktreeAdapter,
   buildStartupPrompt,
+  type ClaudeSdkInvocation,
   type ExecutorPermissionBoundary,
   type TaskExecutor,
 } from '../../infrastructure/index.js'
+import {
+  DEFAULT_CONFIG_PATH,
+  composeProviderEnv,
+  readProfileConfig,
+} from '../config/provider-profile.js'
+import type { SDKMessage, SDKResultMessage } from '@anthropic-ai/claude-agent-sdk'
 
 /**
  * `task:run` 命令：单个任务的执行编排集成入口（Readme.md §11 / §3.2 / §17）。
@@ -95,6 +104,11 @@ export interface TaskRunOutcome {
   readonly merged: boolean
   /** 合并冲突文件清单（仅合并冲突时非空）。 */
   readonly conflicts: readonly string[]
+  /**
+   * §7 cost/usage 摘要（采集自 SDK result 消息，写入本字段供 CLI 输出与测试断言）。
+   * SDK 路径下非空；DryRun / 无 result 消息到达时为 undefined（§7 cost 取自 result 消息）。
+   */
+  readonly cost?: CostSummary
 }
 
 /**
@@ -662,6 +676,397 @@ function toStringArray(value: unknown): string[] | undefined {
 }
 
 /* ============================================================ *
+ * §7 可观测性（F5 安全绳：流式终端 + 完整日志 + cost 摘要 + §9 SIGINT 中断）
+ * ============================================================ */
+
+/**
+ * §7 cost/usage 摘要（采集自 SDK result 消息，写入 TaskRunOutcome 供 CLI 输出与测试断言）。
+ *
+ * 字段名映射到 SdkSessionReport / SDKResultMessage（§12 终止字段，对照安装版 .d.ts）。
+ */
+export interface CostSummary {
+  /** 本次会话总成本（美元，result.total_cost_usd）。 */
+  readonly totalCostUsd: number
+  /** 输入 token 数。 */
+  readonly inputTokens: number
+  /** 输出 token 数。 */
+  readonly outputTokens: number
+  /** 缓存写入 token 数。 */
+  readonly cacheCreationInputTokens: number
+  /** 缓存读取 token 数。 */
+  readonly cacheReadInputTokens: number
+  /** 会话轮次数（result.num_turns）。 */
+  readonly numTurns: number
+  /** 会话墙钟时长毫秒（result.duration_ms）。 */
+  readonly durationMs: number
+}
+
+/** createObservability 选项。 */
+export interface ObservabilityOptions {
+  readonly projectRoot: string
+  readonly taskId: TaskId
+  /** 是否实时渲染到终端（默认 true；测试可关闭避免 console 噪声）。 */
+  readonly stream?: boolean
+  /** 是否把 abortController wire 进程 SIGINT（默认 true；测试可关闭）。 */
+  readonly wireSigInt?: boolean
+  /** 注入的时间戳源（测试确定性）。 */
+  readonly now?: () => Date
+}
+
+/**
+ * §7 可观测性上下文：流式渲染 + 日志落盘 + cost 采集 + §9 SIGINT abort。
+ *
+ * 三项可见性经 SDK 流式回调（onMessage）驱动，回调注入 invocation（TASK-032）→ sdk-client
+ * （TASK-030）for-await 透传每条 SDKMessage：
+ *  - 实时流式：assistant（text/tool_use）/ user（tool_result）消息打印到终端（§7.1）；
+ *  - 完整日志：逐消息（含 ISO 时间戳、轮次序号、类型、JSON）追加到 .caw/logs/<task>-<ts>.log（§7.2）；
+ *  - cost 摘要：result 消息到达时采集 total_cost_usd / usage / num_turns / duration_ms（§7.3）。
+ *
+ * 中断（§9）：abortController wire 进程 SIGINT（Ctrl+C → controller.abort() → SDK 抛 AbortError，
+ * invocation catch 产降级 result）；close() 移除监听，避免跨命令泄漏。
+ */
+export interface Observability {
+  /** SDKMessage 流式回调（注入 invocation，§7 三项可见性汇集于此）。 */
+  readonly onMessage: (message: SDKMessage) => void
+  /** 子进程 stderr 回调（注入 invocation，§7 日志落盘）。 */
+  readonly stderr: (data: string) => void
+  /** SIGINT 接入的中断控制器（注入 invocation，§9）。 */
+  readonly abortController: AbortController
+  /** 日志文件绝对路径（§7.2 完整日志；文件在首条消息到达时惰性创建，DryRun 无消息则不产空文件）。 */
+  readonly logFile: string
+  /** 取采集到的 cost（result 消息到达后非空；DryRun / 未到达为 undefined）。 */
+  getCost(): CostSummary | undefined
+  /** 收尾：移除 SIGINT 监听（日志经 appendFileSync 无需显式关闭句柄）。 */
+  close(): void
+}
+
+/**
+ * 创建 §7 可观测性上下文（F5 安全绳）。
+ *
+ * 日志文件惰性创建（首条消息时 mkdirSync + appendFileSync）：DryRun 不产 SDK 消息 → 不留空日志。
+ * 轮次按 assistant 消息计数（模型一次完整回复 = 一轮），写入日志的 turn 字段供事后审计定位。
+ */
+export function createObservability(options: ObservabilityOptions): Observability {
+  const stream = options.stream ?? true
+  const wireSigInt = options.wireSigInt ?? true
+  const now = options.now ?? (() => new Date())
+  const abortController = new AbortController()
+  const logFile = join(options.projectRoot, '.caw', 'logs', `${options.taskId}-${now().getTime()}.log`)
+
+  let cost: CostSummary | undefined
+  let turn = 0
+  let logReady = false
+
+  /** 惰性创建日志目录 + 追加一行（首条消息时建目录，无消息则不产空文件）。 */
+  function appendLog(line: string): void {
+    if (!logReady) {
+      mkdirSync(dirname(logFile), { recursive: true })
+      logReady = true
+    }
+    appendFileSync(logFile, line + '\n', 'utf8')
+  }
+
+  const onMessage = (message: SDKMessage): void => {
+    const ts = now().toISOString()
+    // 轮次：assistant 消息计一轮（模型一次回复 = 一轮）。
+    if (message.type === 'assistant') turn += 1
+    // 完整日志：时间戳 | 轮次 | 类型 | JSON（§7.2 逐消息审计依据）。
+    appendLog(`${ts} | turn ${turn} | ${message.type} | ${safeJson(message)}`)
+    // 终端流式渲染（仅 assistant / user 有输出，stream_event / system 等仅入日志）。
+    if (stream) {
+      for (const line of renderMessage(message)) console.log(line)
+    }
+    // cost 采集（result 消息携带会话终止统计）。
+    if (message.type === 'result') {
+      cost = extractCost(message)
+    }
+  }
+
+  const stderr = (data: string): void => {
+    appendLog(`${now().toISOString()} | stderr | ${data}`)
+  }
+
+  const onSigInt = (): void => {
+    abortController.abort()
+  }
+  if (wireSigInt) {
+    process.on('SIGINT', onSigInt)
+  }
+
+  return {
+    onMessage,
+    stderr,
+    abortController,
+    logFile,
+    getCost: () => cost,
+    close: () => {
+      if (wireSigInt) process.off('SIGINT', onSigInt)
+    },
+  }
+}
+
+/** §7.1 终端流式渲染：把 SDKMessage 渲染为可读行（仅 assistant / user 有输出，其余返回空数组）。 */
+function renderMessage(message: SDKMessage): string[] {
+  if (message.type === 'assistant') {
+    return renderAssistantContent(message.message.content)
+  }
+  if (message.type === 'user') {
+    return renderUserContent(message.message.content)
+  }
+  return []
+}
+
+/** assistant 消息内容块渲染：text 截断打印 + tool_use 打印工具名 + 输入摘要（路径/命令）。 */
+function renderAssistantContent(content: ReadonlyArray<{ type: string }>): string[] {
+  const lines: string[] = []
+  for (const block of content) {
+    if (block.type === 'text') {
+      // 经 type 判别后窄化为 text 块结构（content 入参为渲染宽类型，非 SDK 精确块联合）。
+      const b = block as unknown as { text: string }
+      const t = b.text.trim()
+      if (t !== '') lines.push(`  💬 ${truncate(t, 120)}`)
+    } else if (block.type === 'tool_use') {
+      const b = block as unknown as { name: string; input: unknown }
+      lines.push(`  🔧 ${b.name}(${summarizeToolInput(b.input)})`)
+    }
+    // thinking / redacted_thinking 等不渲染（日志已留全量）。
+  }
+  return lines
+}
+
+/** user 消息内容块渲染：tool_result 打印结果状态（✓ / ✗）+ 内容截断。 */
+function renderUserContent(content: string | ReadonlyArray<{ type: string }>): string[] {
+  if (typeof content === 'string') {
+    return content.trim() !== '' ? [`  ↳ ${truncate(content, 120)}`] : []
+  }
+  const lines: string[] = []
+  for (const block of content) {
+    if (block.type === 'tool_result') {
+      const b = block as unknown as { is_error?: boolean; content?: unknown }
+      const mark = b.is_error === true ? '✗ error' : '✓'
+      lines.push(`  ↳ tool_result ${mark} ${truncate(summarizeToolResult(b.content), 100)}`)
+    }
+  }
+  return lines
+}
+
+/** 从 SDK result 消息采集 cost/usage 摘要（§7.3，字段名对照安装版 .d.ts）。 */
+function extractCost(result: SDKResultMessage): CostSummary {
+  const usage = result.usage
+  return {
+    totalCostUsd: result.total_cost_usd,
+    inputTokens: usage.input_tokens ?? 0,
+    outputTokens: usage.output_tokens ?? 0,
+    cacheCreationInputTokens: usage.cache_creation_input_tokens ?? 0,
+    cacheReadInputTokens: usage.cache_read_input_tokens ?? 0,
+    numTurns: result.num_turns,
+    durationMs: result.duration_ms,
+  }
+}
+
+/** 工具调用输入摘要：优先提取常见字段（file_path/command/path/pattern），否则 JSON 截断。 */
+function summarizeToolInput(input: unknown): string {
+  if (input === null || typeof input !== 'object') return truncate(String(input), 80)
+  const obj = input as Record<string, unknown>
+  for (const key of ['file_path', 'path', 'command', 'pattern']) {
+    const v = obj[key]
+    if (typeof v === 'string') return `${key}=${truncate(v, 60)}`
+  }
+  return truncate(safeJson(input), 80)
+}
+
+/** tool_result content 摘要（content 可能是 string 或内容块数组）。 */
+function summarizeToolResult(content: unknown): string {
+  if (typeof content === 'string') return content
+  return safeJson(content)
+}
+
+/** 折叠空白并截断到 max 字符（超长加省略号），供终端单行渲染。 */
+function truncate(text: string, max: number): string {
+  const single = text.replace(/\s+/g, ' ').trim()
+  return single.length > max ? single.slice(0, max) + '…' : single
+}
+
+/** 安全 JSON 序列化（含循环引用等不可序列化值时回退 String，不抛错）。 */
+function safeJson(value: unknown): string {
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return String(value)
+  }
+}
+
+/* ============================================================ *
+ * composition root：profile → env → invocation → executor（SPEC §6 / §13.2）
+ * ============================================================ */
+
+/** invocation 构造工厂类型（默认真实 ClaudeSdkInvocationImpl；测试注入 fake 验装配 + outcome）。 */
+export type InvocationFactory = (opts: {
+  readonly providerEnv: Readonly<Record<string, string>>
+  readonly model?: string
+  readonly onMessage?: (message: SDKMessage) => void
+  readonly stderr?: (data: string) => void
+  readonly abortController: AbortController
+}) => ClaudeSdkInvocation
+
+/** assembleExecutor 输入（composition root 装配参数）。 */
+export interface AssembleExecutorInput {
+  readonly projectRoot: string
+  readonly taskId: TaskId
+  /** --provider 覆盖启用的 profile 名。 */
+  readonly provider?: string
+  /** --model 覆盖具体模型名（直接写入 invocation.model，SPEC §6「覆盖具体模型」）。 */
+  readonly model?: string
+  /** --executor：'dry-run' 显式回退；'sdk' 显式 SDK；省略 = auto（token 就位走 SDK，否则报错）。 */
+  readonly executorKind?: 'dry-run' | 'sdk'
+  /** 配置文件路径（默认 <projectRoot>/.caw/config.json）。 */
+  readonly configPath?: string
+  /** 环境来源（默认 process.env；测试注入隔离真实环境）。 */
+  readonly env?: NodeJS.ProcessEnv
+  /** invocation 构造工厂（默认真实 ClaudeSdkInvocationImpl；测试注入 fake）。 */
+  readonly invocationFactory?: InvocationFactory
+  /** 透传 createObservability 的开关（测试关闭终端渲染 / SIGINT wiring）。 */
+  readonly stream?: boolean
+  readonly wireSigInt?: boolean
+}
+
+/** assembleExecutor 结果：executor + 可观测性上下文（cost 采集自后者，§7）。 */
+export interface AssembledExecutor {
+  readonly executor: TaskExecutor
+  readonly observability: Observability
+}
+
+/**
+ * composition root（SPEC §6 / §13.2）：读 profile → 组装 env → 构造 invocation → 注入 ClaudeSdkExecutor。
+ *
+ * 装配策略（SPEC §14.3）：
+ *  - `--executor dry-run`：不读 token，直接 DryRunLocalExecutor（仍建可观测性，无 SDK 会话则 cost=undefined）；
+ *  - `--executor sdk` 或 auto：readProfileConfig → composeProviderEnv（token 缺失由 buildProviderEnv
+ *    抛 ProviderTokenMissingError → 不静默，§6 key 缺失）→ 构造 ClaudeSdkInvocationImpl + ClaudeSdkExecutor。
+ *
+ * `--model` 作为具体模型名直接写入 invocation.model（SPEC §6「覆盖具体模型，写入 options.model」），
+ * 省略则 invocation.model 为 undefined → SDK 经 ANTHROPIC_DEFAULT_*_MODEL env 按档位自选。
+ *
+ * 可观测回调（onMessage/stderr/abortController）注入 invocation，sdk-client 透传 SDKMessage 流。
+ */
+export function assembleExecutor(input: AssembleExecutorInput): AssembledExecutor {
+  if (
+    input.executorKind !== undefined &&
+    input.executorKind !== 'dry-run' &&
+    input.executorKind !== 'sdk'
+  ) {
+    throw new Error(`--executor 只支持 dry-run | sdk（收到「${input.executorKind}」）`)
+  }
+
+  const observability = createObservability({
+    projectRoot: input.projectRoot,
+    taskId: input.taskId,
+    stream: input.stream,
+    wireSigInt: input.wireSigInt,
+  })
+
+  // 显式 dry-run → 不读 token，直接回退（§14.3「--executor dry-run 显式回退 DryRun」）。
+  if (input.executorKind === 'dry-run') {
+    return { executor: new DryRunLocalExecutor(), observability }
+  }
+
+  // sdk / auto：读 profile + 组装 env（token 缺失由 buildProviderEnv 抛错，不静默，§6 key 缺失）。
+  const configPath = input.configPath ?? join(input.projectRoot, DEFAULT_CONFIG_PATH)
+  const config = readProfileConfig(configPath)
+  const providerEnv = composeProviderEnv(config, {
+    providerOverride: input.provider,
+    env: input.env,
+  })
+
+  const factory = input.invocationFactory ?? defaultInvocationFactory
+  const invocation = factory({
+    providerEnv,
+    model: input.model,
+    onMessage: observability.onMessage,
+    stderr: observability.stderr,
+    abortController: observability.abortController,
+  })
+  return { executor: new ClaudeSdkExecutor(invocation), observability }
+}
+
+/** 默认 invocation 工厂：构造真实 ClaudeSdkInvocationImpl（注入 provider env + 可观测回调 + abortController）。 */
+const defaultInvocationFactory: InvocationFactory = (opts) =>
+  new ClaudeSdkInvocationImpl({
+    providerEnv: { ...opts.providerEnv },
+    model: opts.model,
+    onMessage: opts.onMessage,
+    stderr: opts.stderr,
+    abortController: opts.abortController,
+  })
+
+/** runTaskWithAssembly 选项（CLI action 传参，组合装配 + 编排注入）。 */
+export interface RunTaskWithAssemblyOptions {
+  readonly projectRoot?: string
+  readonly mainRef?: string
+  readonly worktreesDir?: string
+  readonly provider?: string
+  readonly model?: string
+  readonly executor?: 'dry-run' | 'sdk'
+  readonly configPath?: string
+  readonly env?: NodeJS.ProcessEnv
+  readonly invocationFactory?: InvocationFactory
+  readonly stream?: boolean
+  readonly wireSigInt?: boolean
+  /** 以下透传 runTask 的测试注入项（git / 全局文档 / id 分配 / node_modules / 验证命令声明）。 */
+  readonly gitMergePort?: GitMergePort
+  readonly globalDocRepo?: GlobalDocRepositoryPort
+  readonly idAllocator?: IdAllocator
+  readonly nodeModulesRestorer?: (
+    wtPath: string,
+    mainRepo: string,
+    permissions: readonly Permission[],
+  ) => void
+  readonly testingCommands?: readonly TestingCommand[]
+}
+
+/**
+ * CLI action 入口：assembleExecutor → runTask → 合并 cost 摘要（§7）。
+ *
+ * 把 composition root（profile → executor + 可观测性）与 runTask 编排串联：执行后把可观测性
+ * 采集的 cost/usage 并入 TaskRunOutcome（SDK 路径非空、DryRun 为 undefined）。observability 经
+ * finally 关闭（移除 SIGINT 监听，避免跨命令泄漏）。
+ */
+export async function runTaskWithAssembly(
+  taskId: TaskId,
+  options: RunTaskWithAssemblyOptions = {},
+): Promise<TaskRunOutcome> {
+  const projectRoot = resolve(options.projectRoot ?? process.cwd())
+  const { executor, observability } = assembleExecutor({
+    projectRoot,
+    taskId,
+    provider: options.provider,
+    model: options.model,
+    executorKind: options.executor,
+    configPath: options.configPath,
+    env: options.env,
+    invocationFactory: options.invocationFactory,
+    stream: options.stream,
+    wireSigInt: options.wireSigInt,
+  })
+  try {
+    const outcome = await runTask(taskId, {
+      projectRoot,
+      mainRef: options.mainRef,
+      worktreesDir: options.worktreesDir,
+      executor,
+      gitMergePort: options.gitMergePort,
+      globalDocRepo: options.globalDocRepo,
+      idAllocator: options.idAllocator,
+      nodeModulesRestorer: options.nodeModulesRestorer,
+      testingCommands: options.testingCommands,
+    })
+    return { ...outcome, cost: observability.getCost() }
+  } finally {
+    observability.close()
+  }
+}
+
+/* ============================================================ *
  * commander 注册
  * ============================================================ */
 
@@ -670,11 +1075,27 @@ interface TaskRunCommandOptions {
   mainRef?: string
   worktreesDir?: string
   projectRoot?: string
+  provider?: string
+  model?: string
+  executor?: string
+  configPath?: string
+}
+
+/**
+ * 校验 --executor 值：合法返回 'dry-run' | 'sdk'，省略返回 undefined，非法抛错（不静默）。
+ */
+function parseExecutorKind(raw: string | undefined): 'dry-run' | 'sdk' | undefined {
+  if (raw === undefined) return undefined
+  if (raw === 'dry-run' || raw === 'sdk') return raw
+  throw new Error(`--executor 只支持 dry-run | sdk（收到「${raw}」）`)
 }
 
 /**
  * 向 commander program 注册 task:run 命令。
  * 退出码与错误输出归 framework.runCli 统一处理；本函数只负责命令签名与执行。
+ *
+ * `--provider` / `--model` / `--executor` / `--config` 经 runTaskWithAssembly 进入 composition root
+ * （§6 profile → env → invocation → executor），其余选项（main-ref / worktrees-dir / project-root）透传。
  */
 export function registerTaskRunCommand(program: Command): void {
   program
@@ -686,11 +1107,19 @@ export function registerTaskRunCommand(program: Command): void {
     .option('--main-ref <ref>', '主分支短名（默认 main）')
     .option('--worktrees-dir <dir>', 'worktree 根目录（默认 <项目根>/.worktrees）')
     .option('--project-root <dir>', '项目根目录（默认当前工作目录）')
+    .option('--provider <name>', '覆盖启用的 provider profile 名（默认 config.provider）')
+    .option('--model <name>', '覆盖具体模型名（写入 SDK options.model）')
+    .option('--executor <kind>', '执行器：dry-run | sdk（省略则按 token 就位自动）')
+    .option('--config <path>', 'provider profile 配置文件路径（默认 .caw/config.json）')
     .action(async (taskId: string, options: TaskRunCommandOptions) => {
-      const outcome = await runTask(taskId, {
+      const outcome = await runTaskWithAssembly(taskId as TaskId, {
         projectRoot: options.projectRoot,
         mainRef: options.mainRef,
         worktreesDir: options.worktreesDir,
+        provider: options.provider,
+        model: options.model,
+        executor: parseExecutorKind(options.executor),
+        configPath: options.configPath,
       })
       printOutcome(outcome)
     })
@@ -701,6 +1130,14 @@ function printOutcome(outcome: TaskRunOutcome): void {
   console.log(
     `任务 ${outcome.taskId} 执行完成（executor=${outcome.executor}）→ 状态: ${outcome.finalStatus}`,
   )
+  // §7.3 cost/usage 摘要（SDK 路径采集自 result 消息；DryRun 无 cost 字段）。
+  if (outcome.cost !== undefined) {
+    console.log(
+      `  cost $${outcome.cost.totalCostUsd.toFixed(4)}，${outcome.cost.numTurns} 轮，` +
+        `input ${outcome.cost.inputTokens}/output ${outcome.cost.outputTokens} tokens，` +
+        `${outcome.cost.durationMs}ms`,
+    )
+  }
   if (outcome.finalStatus === 'reviewing') {
     console.log(`任务进入审查，请运行: caw task:review ${outcome.taskId}`)
   } else if (outcome.merged) {

@@ -5,7 +5,15 @@ import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { serializeDocument, TaskDocRepository } from '../../src/infrastructure/index.js'
 import type { TaskExecutor } from '../../src/infrastructure/index.js'
-import { parseTestingCommands, runTask } from '../../src/cli/commands/task-run.js'
+import type { SdkRunReport } from '../../src/infrastructure/sdk/claude-sdk-adapter.js'
+import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
+import {
+  assembleExecutor,
+  parseTestingCommands,
+  runTask,
+  runTaskWithAssembly,
+  type InvocationFactory,
+} from '../../src/cli/commands/task-run.js'
 import { CliExitCode, runCli } from '../../src/cli/framework.js'
 import type { GitMergePort } from '../../src/application/ports.js'
 import type {
@@ -401,6 +409,8 @@ describe('task:run — runCli（退出码 + 输出）', () => {
     commitTaskDef(root, task)
     const logs = spyOnConsole('log')
 
+    // --executor dry-run：TASK-034 后默认走 auto（读 profile 配置），临时仓库无配置文件，
+    // 显式 dry-run 绕过装配直测 runTask 编排（reviewing 路径 + 输出）。
     const exit = await runCli([
       'task:run',
       'TASK-340',
@@ -408,6 +418,8 @@ describe('task:run — runCli（退出码 + 输出）', () => {
       root,
       '--worktrees-dir',
       worktreesDir,
+      '--executor',
+      'dry-run',
     ])
 
     expect(exit).toBe(CliExitCode.Success)
@@ -428,6 +440,334 @@ describe('task:run — runCli（退出码 + 输出）', () => {
       root,
       '--worktrees-dir',
       worktreesDir,
+      '--executor',
+      'dry-run',
+    ])
+    expect(exit).not.toBe(CliExitCode.Success)
+  })
+})
+
+/* ============================================================ *
+ * assembleExecutor composition root（TASK-034：profile → env → invocation → executor）
+ * ============================================================ */
+
+/** 写入最小合法 provider profile 配置（anthropic 官方 + glm 第三方），返回其路径。 */
+function writeProfileConfig(repoDir: string): string {
+  mkdirSync(join(repoDir, '.caw'), { recursive: true })
+  const configPath = join(repoDir, '.caw', 'config.json')
+  writeFileSync(
+    configPath,
+    JSON.stringify({
+      provider: 'anthropic',
+      profiles: {
+        anthropic: {
+          baseUrl: null,
+          authTokenEnv: 'ANTHROPIC_API_KEY',
+          modelMapping: { haiku: 'claude-haiku-4-5', sonnet: 'claude-sonnet-5', opus: 'claude-opus-4-8' },
+          extraEnv: {},
+        },
+        glm: {
+          baseUrl: 'https://open.bigmodel.cn/api/anthropic',
+          authTokenEnv: 'ZHIPU_API_KEY',
+          modelMapping: { haiku: 'glm-4.7', sonnet: 'glm-5.2', opus: 'glm-5.2' },
+          extraEnv: { API_TIMEOUT_MS: '3000000' },
+        },
+      },
+    }),
+    'utf8',
+  )
+  return configPath
+}
+
+/**
+ * 构造 fake invocation 工厂：捕获构造入参（断言 model / providerEnv），run() 时驱动注入的
+ * onMessage 回调（模拟 SDK 流式 message）后返回固定 SdkRunReport。
+ */
+function fakeInvocationFactory(
+  messages: readonly SDKMessage[],
+  report: SdkRunReport,
+): { factory: InvocationFactory; captured: { opts?: Parameters<InvocationFactory>[0] } } {
+  const captured: { opts?: Parameters<InvocationFactory>[0] } = {}
+  return {
+    factory: (opts) => {
+      captured.opts = opts
+      return {
+        name: 'fake-sdk',
+        async run() {
+          for (const m of messages) opts.onMessage?.(m)
+          return report
+        },
+      }
+    },
+    captured,
+  }
+}
+
+/** 构造合法 SdkRunReport（completed + review，供 ClaudeSdkExecutor 落 .result.md）。 */
+function validSdkReport(): SdkRunReport {
+  return {
+    executionStatus: 'completed',
+    modifiedFiles: [],
+    createdFiles: [],
+    deletedFiles: [],
+    verification: [],
+    globalUpdateRequests: { progress: [], decisions: [], issues: [] },
+    nextAction: 'review',
+    summary: 'fake 执行完成',
+  }
+}
+
+/** fake assistant 消息（含 text + tool_use 块，供 §7 流式渲染断言）。 */
+function fakeAssistantMessage(): SDKMessage {
+  return {
+    type: 'assistant',
+    message: {
+      id: 'msg_1',
+      type: 'message',
+      role: 'assistant',
+      model: 'claude-sonnet-5',
+      content: [
+        { type: 'text', text: '读取源文件' },
+        { type: 'tool_use', id: 'toolu_1', name: 'Read', input: { file_path: 'src/x.ts' } },
+      ],
+      stop_reason: 'tool_use',
+      stop_sequence: null,
+      usage: { input_tokens: 10, output_tokens: 5 },
+    },
+    parent_tool_use_id: null,
+    uuid: 'uuid-assistant',
+    session_id: 'sess-1',
+  } as unknown as SDKMessage
+}
+
+/** fake result 消息（携带 cost/usage 终止统计，供 §7 cost 采集断言）。 */
+function fakeResultMessage(): SDKMessage {
+  return {
+    type: 'result',
+    subtype: 'success',
+    total_cost_usd: 0.0567,
+    is_error: false,
+    duration_ms: 8000,
+    duration_api_ms: 6000,
+    num_turns: 4,
+    result: '任务完成',
+    session_id: 'sess-1',
+    usage: {
+      input_tokens: 100,
+      output_tokens: 200,
+      cache_creation_input_tokens: 10,
+      cache_read_input_tokens: 5,
+    },
+  } as unknown as SDKMessage
+}
+
+describe('task:run — assembleExecutor composition root', () => {
+  it('--executor dry-run → DryRunLocalExecutor，cost 为 undefined', () => {
+    const { executor, observability } = assembleExecutor({
+      projectRoot: root,
+      taskId: 'TASK-350',
+      executorKind: 'dry-run',
+      stream: false,
+      wireSigInt: false,
+    })
+    expect(executor.name).toBe('dry-run-local')
+    expect(observability.getCost()).toBeUndefined()
+    observability.close()
+  })
+
+  it('auto（未指定 executor）+ token 缺失 → 抛 ProviderTokenMissing 不静默', () => {
+    const configPath = writeProfileConfig(root)
+    expect(() =>
+      assembleExecutor({
+        projectRoot: root,
+        taskId: 'TASK-351',
+        configPath,
+        env: {}, // 无 ANTHROPIC_API_KEY
+        stream: false,
+        wireSigInt: false,
+      }),
+    ).toThrow(/token 环境变量.*未设置/)
+  })
+
+  it('--executor sdk + token 就位 → ClaudeSdkExecutor + invocation 注入 providerEnv', () => {
+    const configPath = writeProfileConfig(root)
+    const { factory, captured } = fakeInvocationFactory([], validSdkReport())
+    const { executor } = assembleExecutor({
+      projectRoot: root,
+      taskId: 'TASK-352',
+      executorKind: 'sdk',
+      configPath,
+      env: { ANTHROPIC_API_KEY: 'sk-test' },
+      invocationFactory: factory,
+      stream: false,
+      wireSigInt: false,
+    })
+    expect(executor.name).toBe('claude-sdk')
+    // assembleExecutor 内已调用工厂，断言 providerEnv 注入官方 token 键。
+    expect(captured.opts?.providerEnv['ANTHROPIC_API_KEY']).toBe('sk-test')
+    expect(captured.opts?.providerEnv['ANTHROPIC_BASE_URL']).toBeUndefined()
+  })
+
+  it('--provider glm + ZHIPU_API_KEY → invocation 注入第三方 token 键 + baseUrl', () => {
+    const configPath = writeProfileConfig(root)
+    const { factory, captured } = fakeInvocationFactory([], validSdkReport())
+    assembleExecutor({
+      projectRoot: root,
+      taskId: 'TASK-353',
+      provider: 'glm',
+      configPath,
+      env: { ZHIPU_API_KEY: 'zhipu-test' },
+      invocationFactory: factory,
+      stream: false,
+      wireSigInt: false,
+    })
+    expect(captured.opts?.providerEnv['ANTHROPIC_AUTH_TOKEN']).toBe('zhipu-test')
+    expect(captured.opts?.providerEnv['ANTHROPIC_BASE_URL']).toBe('https://open.bigmodel.cn/api/anthropic')
+    expect(captured.opts?.providerEnv['ANTHROPIC_DEFAULT_SONNET_MODEL']).toBe('glm-5.2')
+  })
+
+  it('--model 覆盖具体模型名 → invocation 工厂收到 model 字段', () => {
+    const configPath = writeProfileConfig(root)
+    const { factory, captured } = fakeInvocationFactory([], validSdkReport())
+    assembleExecutor({
+      projectRoot: root,
+      taskId: 'TASK-354',
+      model: 'custom-model-x',
+      configPath,
+      env: { ANTHROPIC_API_KEY: 'sk-test' },
+      invocationFactory: factory,
+      stream: false,
+      wireSigInt: false,
+    })
+    expect(captured.opts?.model).toBe('custom-model-x')
+  })
+
+  it('非法 executorKind → 抛错不静默', () => {
+    expect(() =>
+      assembleExecutor({
+        projectRoot: root,
+        taskId: 'TASK-355',
+        executorKind: 'foo' as 'dry-run',
+        stream: false,
+        wireSigInt: false,
+      }),
+    ).toThrow(/--executor 只支持 dry-run \| sdk/)
+  })
+})
+
+describe('task:run — SDK 路径可观测性（§7 流式 + 日志 + cost）', () => {
+  it('fake invocation 驱动 onMessage → cost 采集 + 日志含逐消息记录 + 终端流式渲染', () => {
+    const configPath = writeProfileConfig(root)
+    const { factory } = fakeInvocationFactory([fakeAssistantMessage(), fakeResultMessage()], validSdkReport())
+    const logs = spyOnConsole('log')
+
+    const { executor, observability } = assembleExecutor({
+      projectRoot: root,
+      taskId: 'TASK-360',
+      executorKind: 'sdk',
+      configPath,
+      env: { ANTHROPIC_API_KEY: 'sk-test' },
+      invocationFactory: factory,
+      stream: true,
+      wireSigInt: false,
+    })
+
+    // 触发一次执行：ClaudeSdkExecutor → invocation.run → 驱动 onMessage（流式 + cost 采集 + 日志落盘）。
+    return executor
+      .execute({
+        task_id: 'TASK-360',
+        worktree_path: root,
+        result_file: join(root, 'docs', 'tasks', 'TASK-360.result.md'),
+        context_pack: { required_docs: [], optional_doc_excerpts: [], source_files: [] },
+        permission_boundary: {
+          allowed_paths: [],
+          forbidden_paths: [],
+          permissions: [],
+          verification_commands: [],
+        },
+        startup_prompt: '执行 TASK-360',
+      })
+      .then(() => {
+        // cost 采集自 result 消息。
+        const cost = observability.getCost()
+        expect(cost).toBeDefined()
+        expect(cost?.totalCostUsd).toBeCloseTo(0.0567, 4)
+        expect(cost?.inputTokens).toBe(100)
+        expect(cost?.outputTokens).toBe(200)
+        expect(cost?.numTurns).toBe(4)
+        expect(cost?.durationMs).toBe(8000)
+
+        // 完整日志文件存在且含逐消息记录（assistant + result）。
+        expect(existsSync(observability.logFile)).toBe(true)
+        const logContent = readFileSync(observability.logFile, 'utf8')
+        expect(logContent).toContain('assistant')
+        expect(logContent).toContain('result')
+        expect(logContent).toContain('turn ')
+
+        // 终端流式渲染：assistant 的 tool_use（Read）打印到 console。
+        const streamed = logs.join('\n')
+        expect(streamed).toContain('Read')
+        expect(streamed).toContain('src/x.ts')
+
+        observability.close()
+      })
+  })
+})
+
+describe('task:run — runTaskWithAssembly e2e（装配 + 编排 + cost 入 outcome）', () => {
+  it('SDK 路径（fake invocation）→ outcome.executor=claude-sdk、cost 非空、状态流转 reviewing', async () => {
+    const task = mkTask({ id: 'TASK-370', name: 'sdkrun', noReview: false })
+    commitTaskDef(root, task)
+    const configPath = writeProfileConfig(root)
+    const { factory } = fakeInvocationFactory([fakeResultMessage()], validSdkReport())
+
+    const outcome = await runTaskWithAssembly('TASK-370', {
+      projectRoot: root,
+      worktreesDir,
+      configPath,
+      env: { ANTHROPIC_API_KEY: 'sk-test' },
+      invocationFactory: factory,
+      nodeModulesRestorer: noopNodeModules,
+      stream: false,
+      wireSigInt: false,
+    })
+
+    expect(outcome.executor).toBe('claude-sdk')
+    expect(outcome.finalStatus).toBe('reviewing')
+    expect(outcome.cost).toBeDefined()
+    expect(outcome.cost?.totalCostUsd).toBeCloseTo(0.0567, 4)
+  })
+})
+
+describe('task:run — runCli 装配选项（--executor）', () => {
+  it('--executor dry-run → 成功退出码（reviewing 路径）', async () => {
+    const task = mkTask({ id: 'TASK-380', name: 'cli', noReview: false })
+    commitTaskDef(root, task)
+
+    const exit = await runCli([
+      'task:run',
+      'TASK-380',
+      '--project-root',
+      root,
+      '--worktrees-dir',
+      worktreesDir,
+      '--executor',
+      'dry-run',
+    ])
+    expect(exit).toBe(CliExitCode.Success)
+  })
+
+  it('--executor foo（非法值）→ 非零退出码', async () => {
+    const task = mkTask({ id: 'TASK-381', name: 'cli', noReview: false })
+    commitTaskDef(root, task)
+
+    const exit = await runCli([
+      'task:run',
+      'TASK-381',
+      '--project-root',
+      root,
+      '--executor',
+      'foo',
     ])
     expect(exit).not.toBe(CliExitCode.Success)
   })
