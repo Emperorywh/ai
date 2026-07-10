@@ -27,3 +27,5 @@ export * from './mcp/mcp-adapter.js'
 export * from './sdk/sdk-client.js'
 // TASK-032：ClaudeSdkInvocation 真实实现（自主 SDK 会话 + JSON 提取重试降级 + 容错分类 + 中断）。
 export * from './sdk/claude-sdk-invocation-impl.js'
+// TASK-033：SDK 版 Reviewer（独立审查会话 + JSON 提取重试降级 + 容错分类 + 中断，§5）。
+export * from './sdk/claude-sdk-reviewer.js'
