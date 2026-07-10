@@ -397,3 +397,19 @@ recommended_action: |-
 ```
 
 提议自 `TASK-031-cli-provider-profile.result.md`。init.test.ts 测试标题/注释因 init 产物扩展（加 .caw/config.json）语义过时，断言全绿不阻塞（EXPECTED_PATHS 动态派生自 DOC_FILES + DOC_DOC_PATHS 只数 docs/），low 优先级（仅文档张力），建议后续更新测试表述。关联 DEC-032。
+
+## ISS-022 SDK 错误分类 classifyFault 采用 name+message 文本启发式——真实 API（尤其 GLM/DeepSeek 端点）错误措辞未经实证，TASK-035 观测后或需细化匹配规则
+
+```yaml
+id: ISS-022
+title: "SDK 错误分类 classifyFault 采用 name+message 文本启发式——真实 API（尤其 GLM/DeepSeek 端点）错误措辞未经实证，TASK-035 观测后或需细化匹配规则"
+status: open
+severity: low
+scope: src/infrastructure/sdk/claude-sdk-invocation-impl.ts（classifyFault）
+created_from_task: TASK-032
+owner: ""
+recommended_action: |-
+  SPEC §8 容错分类表（鉴权/网络5xx/限流/safety/JSON/中断）要求按错误类型分别处置，但 §12/§8 未穷举 Claude Agent SDK 的具体错误类（class）与 code，且错误形态随 SDK 版本变动（R-API，安装版 0.3.206）。本任务 classifyFault 按 SDK 抛出的 error.name + error.message 文本启发式分类为 abort/auth/network/unknown：abort（name==='AbortError' 或 message 含 abort）、auth（\b401|403\b / unauthor/forbidden/authentication / invalid ...key|token|credential）、network（\b429|5xx\b / econn/etimedout/enetunreach/eai_again/fetch failed/network/socket/timeout/rate limit）、其余 unknown。HTTP 状态码用 (?:^|\D)(NNN)(?:\D|$) 匹配独立数字避免误吞更长数字串。该分类是显式可审规则（§8 + AGENTS §3 显式错误处理，全在 classifyFault 函数内可审、非隐藏兼容逻辑），不阻塞验收（§11 验收项为 fake 单测，经 fake Error 覆盖 abort/auth/network/unknown 全路径全绿）。局限：真实 API（尤其第三方 GLM/DeepSeek 兼容端点，R-PROVIDER）的错误消息措辞未经实证，可能漏判某类错误为 unknown（unknown 仍显式降级 failed+needs-human 不静默，不会无限重试或崩溃，但可能本该重试的网络错被判 unknown 不重试）。建议 TASK-035 CI 真实 API 跑通后观测实际错误消息，按需细化 classifyFault 匹配规则（或引入 SDK 错误类/类型判别替代纯文本匹配）。关联 DEC-033。
+```
+
+提议自 `TASK-032-infra-sdk-invocation-impl.result.md`。classifyFault 启发式错误分类是显式可审规则（§8 + AGENTS §3），fake 单测全绿不阻塞验收；真实 API（GLM/DeepSeek）错误措辞未经实证可能漏判（unknown 仍降级不静默），low 优先级，建议 TASK-035 CI 观测后细化。关联 DEC-033。

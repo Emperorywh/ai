@@ -644,3 +644,23 @@ consequences: |-
 ```
 
 提议自 `TASK-031-cli-provider-profile.result.md`。provider-profile.ts 按 SPEC §6 落地多 provider 配置 + SDK env 组装（token 注入键 baseUrl 推断 + 三档强制全映射 + DEFAULT_PROFILE_CONFIG 单一来源供 init）。待 Orchestrator 确认。
+
+---
+
+## DEC-033 ClaudeSdkInvocation 真实实现设计——构造注入 provider 配置 + §4.2 camelCase 模型 JSON 提取校验 + §4.3 JSON 重试降级 + §8 启发式容错分类 + §9 abortController 中断
+
+```yaml
+id: DEC-033
+title: "ClaudeSdkInvocation 真实实现设计——构造注入 provider 配置 + §4.2 camelCase 模型 JSON 提取校验 + §4.3 JSON 重试降级 + §8 启发式容错分类 + §9 abortController 中断"
+status: proposed
+scope: src/infrastructure/sdk（claude-sdk-invocation-impl.ts）+ src/infrastructure/index.ts
+created_from_task: TASK-032
+decision: |-
+  claude-sdk-invocation-impl.ts 按 SPEC §4/§8/§9 落地 ClaudeSdkInvocation 真实类 ClaudeSdkInvocationImpl，ClaudeSdkExecutor 编排（claude-sdk-adapter.ts:248）不变。六项关键设计：(1) provider 配置经构造注入——env/model 来自 TASK-031 组装产物经构造函数注入（CLI 034 composition root 装配），SdkRunInput 契约不改（任务 §8 / PLAN §0-5）；本实现不 import provider-profile（env 已组装好直接用），保持 infrastructure 不依赖 cli/config。(2) 模型 JSON 校验用 camelCase 专属 schema SdkResultJsonSchema——SPEC 张力：§4.2 示例模型产出为 camelCase（executionStatus/modifiedFiles/... 对齐 SdkRunReport），但任务 §2/§4.3 文字提「ResultFrontmatterSchema.safeParse」（snake_case），二者字段名不同直接 safeParse 必失败；据 §4.2 显式示例裁定为 camelCase schema（复用同一套 core 子 schema），snake_case 落盘映射由 executor 负责（claude-sdk-adapter.ts:259 不变）；modifiedFiles/createdFiles/deletedFiles/verification/globalUpdateRequests 给 default 容 R-JSON 漏报，executionStatus+nextAction 两核心硬性必填。(3) §4.2 提取规则——优先 ```result-frontmatter fenced 块，缺失回退 ```json，取最后一块；result-frontmatter 块存在但 JSON 非法直接报 json-parse 失败（不退求 json 块）交重试修正。(4) §4.3 JSON 重试降级——parse/校验失败把错误反馈追加进重试会话 prompt（新会话无对话历史 §2.2 不续跑，反馈须在初始 prompt），重试 N=2（首次+2 次），耗尽降级 failed+needs-human + verification 全 skipped（保留 allowlist 命令顺序）+ 一条 issue 记 parse 错（id 留空 Orchestrator 分配）。(5) §8 容错分类——classifyFault 按 SDK 抛错 name+message 文本启发式分 abort/auth/network/unknown：abort→blocked+needs-human 保留 worktree 不回滚；auth→立即 failed 不重试；network→指数退避重试 max 3（base 1s×2^n+半区间抖动）耗尽降级；unknown→显式降级 failed+needs-human 不静默；is_error 会话（session 级错误非瞬时）→降级不重试。HTTP 状态码 \bNNN\b 独立数字匹配避免误吞更长数字串。(6) §9 中断——abortController 跨重试共享（CLI 034 注入并 wire SIGINT），每轮前置 signal.aborted 检查（中断后不重试），SDK 抛 AbortError 与正常返回 result 两种分支兼容。
+rationale: |-
+  构造注入 provider 配置：SPEC §8/任务 §8 明文「provider 配置经构造函数注入，SdkRunInput 契约不改」，CLI 034 装配实例；invocation 不读配置文件保持纯 infra。camelCase schema 裁定：§4.2 示例（用户验证）显式给 camelCase 字段且明文「对齐 SdkRunReport」，与「ResultFrontmatterSchema.safeParse」(snake_case) 冲突时以更具体的 §4.2 示例为准——ResultFrontmatterSchema 校验的应是最终落盘的 snake_case frontmatter（executor 已在落盘前 persistResult 做此校验，claude-sdk-adapter.ts:65），invocation 只需校验模型原始 camelCase 产出。提取取最后一块：§4.2「最后一块 result-frontmatter」，模型可能先输出格式示例再产真实块。JSON 反馈进 prompt 而非 systemPromptAppend：新会话无历史（§2.2），反馈须在初始 prompt 模型才看见；systemPromptAppend 稳定（边界+产出契约不随重试变）。启发式容错分类：SPEC §12/§8 未穷举 SDK 错误类/code 且随版本变（R-API），name+message 文本匹配是显式可审规则（§8 + AGENTS §3 显式错误处理），全在 classifyFault 函数内可审、非隐藏兼容；真实 API 错误观测后可细化（ISS-022）。abortController 共享 + 前置检查：避免 abort 后继续重试；§9 两种结束分支兼容（SDK 版本行为差异）。降级 verification 全 skipped：§4.3 明文「verification 标 skipped」；保留 allowlist 命令顺序供 Orchestrator 审计。有界 for 循环：避免 eslint no-constant-condition（eslint:recommended error）禁的 while(true)，1+jsonRetryMax+techRetryMax 界保证终止。
+consequences: |-
+  ClaudeSdkInvocationImpl 为 TASK-034（task:run 接线）注入对象：034 用 new ClaudeSdkExecutor(new ClaudeSdkInvocationImpl({providerEnv, model, onMessage, stderr, abortController})) 替换默认 DryRunLocalExecutor；TASK-033（SDK Reviewer）复用同套 sdk-client + provider-profile + JSON 重试降级模式（独立会话、独立类）。camelCase schema 裁定使 SPEC §4.3「ResultFrontmatterSchema.safeParse」措辞需据 §4.2 修正为「模型产出 camelCase JSON 经 SdkResultJsonSchema 校验」（已回写 SPEC §4.3）。启发式容错分类的局限：真实 API（GLM/DeepSeek 端点）错误消息措辞未经实证，可能漏判（ISS-022 low），TASK-035 CI 观测后细化。abortController 须由 034 wire SIGINT（本实现不 wire，只消费注入的 controller）。模型谎报 verification/modified_files（R-JSON）由重试+降级兜底、风险用户接受（§15）。SDK 中断后 worktree 保留（§9，不自动回滚 F3）。关联 DEC-029/030/031/032（SDK 立项+依赖+sdk-client+provider-profile）/ ISS-012（SDK 就位，本任务推进执行侧真实调用）/ ISS-016（真实 Reviewer，留 033）/ ISS-022（错误分类启发式）。
+```
+
+提议自 `TASK-032-infra-sdk-invocation-impl.result.md`。claude-sdk-invocation-impl.ts 按 SPEC §4/§8/§9 落地真实 ClaudeSdkInvocation（构造注入 provider 配置 + §4.2 camelCase 模型 JSON 提取校验 + §4.3 JSON 重试降级 + §8 启发式容错分类 + §9 abortController 中断），ClaudeSdkExecutor 编排不变；SPEC §4.3 camelCase 措辞张力已回写。待 Orchestrator 确认。

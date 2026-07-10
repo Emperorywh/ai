@@ -130,7 +130,7 @@ owner: Orchestrator
 - fenced 块的**标记名**、JSON 在模型自然语言输出中的**定位规则**(如「最后一块 ```result-frontmatter」),由实现任务固定并写入启动提示的产出指令段。
 
 ### 4.3 JSON 健壮性——重试 + 降级(访谈结论)
-模型产出经 `ResultFrontmatterSchema.safeParse`(及与 `SdkRunReport` 的映射校验):
+模型产出（camelCase，§4.2 SdkRunReport 形态）经**两段校验**：(a) 提取 + `JSON.parse`；(b) 以 camelCase 专属 schema（`SdkResultJsonSchema`，TASK-032，复用 core 子 schema——⚠ **非** `ResultFrontmatterSchema`：模型产出为 camelCase `executionStatus/modifiedFiles/...`，而 `ResultFrontmatterSchema` 是 snake_case `execution_status/modified_files/...`，字段名不同，直接 safeParse camelCase 必失败）。snake_case 落盘映射由 `ClaudeSdkExecutor` 负责（`claude-sdk-adapter.ts:259`，executor 在 `persistResult` 落盘前再过 `ResultFrontmatterSchema` 校验，`claude-sdk-adapter.ts:65`）:
 
 1. **成功** → 组装 frontmatter,落 `.result.md`。
 2. **parse 失败 / 缺字段 / 多余文本干扰定位** → 把 `safeParse.error` 作为反馈追加进对话,**最多重试 N 次(建议 N=2,即首次 + 2 次重试)**,要求模型只补一个合法 JSON 块。
