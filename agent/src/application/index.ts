@@ -18,3 +18,5 @@ export * from './merge/rebase-ff.js'
 export * from './merge/section-writeback.js'
 // TASK-021：合并编排——幂等恢复（§3.2 合并崩溃后按 git 状态判定 skip/重合并 + 补回写）。
 export * from './merge/recovery.js'
+// TASK-029：规划工作流（SPEC/ARCHITECTURE → PLAN 草案 + 任务草案集合 + 任务图校验）。
+export * from './planning-workflow.js'
