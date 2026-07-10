@@ -429,3 +429,19 @@ recommended_action: |-
 ```
 
 提议自 `TASK-034-cli-task-run-wiring.result.md`。TASK-034 frontmatter allowed_paths test 路径（test/cli/commands/）与实际（test/cli/）不符，本任务在真实文件上修改，建议后续修正 frontmatter（TASK-035 同约定）。low 优先级，不阻塞验收。关联 DEC-035。
+
+## ISS-024 CI 真实 API 契约断言未经真实环境验证（本地无 key）——system init model 字段提取 + GLM 档位前缀待 CI 首次跑通确认
+
+```yaml
+id: ISS-024
+title: "CI 真实 API 契约断言未经真实环境验证（本地无 key）——system init model 字段提取 + GLM 档位前缀待 CI 首次跑通确认"
+status: open
+severity: medium
+scope: test/integration/claude-sdk-real-api.test.ts
+created_from_task: TASK-035
+owner: ""
+recommended_action: |-
+  TASK-035 本地无 ANTHROPIC_API_KEY/ZHIPU_API_KEY，真实 API 契约子集经 describe.skipIf 跳过（2 skipped），其断言逻辑未经真实 SDK 响应验证。首次在 CI 配置 secret 跑通时需确认：(1) runRealReviewContract 的 onMessage 捕获 system init 消息 model 字段路径（`(m as {subtype?:string}).subtype === 'init'` → `(m as {model?:string}).model`）是否与安装版 0.3.206 实际 SDKSystem init 消息结构一致（SPEC §12 第 3 条据类型参考写作，R-API 风险——若 model 在嵌套对象或字段名不同，initModel 断言 toBeTruthy/toContain 失败，需对照 .d.ts 调整提取路径）；(2) GLM 第三方端点 system init 的 model 是否真为 glm-* 前缀（R-PROVIDER，GLM 兼容端点行为差异——若 GLM 回传模型名不含 glm- 前缀，toContain('glm-') 断言需放宽）；(3) 真实 API 错误措辞经 classifyFault（ISS-022）分类是否符合预期（执行/审查两侧通用，观测后一次细化）；(4) ClaudeSdkReviewer 真实审查的 review_result 分布与最小 .result.md 夹具的契合度。非阻塞（SPEC §11 明文真实 API 集成在 CI、§14-7/8 验收以 CI 跑通为准）。建议 CI 配置 secret 后首次跑通时人工核验上述断言，按需调整提取路径 / 放宽前缀 / 细化 classifyFault。关联 DEC-037（CI 契约策略）/ ISS-022（classifyFault 启发式同延）/ ISS-012（SDK 真实调用闭环，CI 验证为最后一环）。
+```
+
+提议自 `TASK-035-cli-task-review-wiring.result.md`。CI 真实 API 契约断言（system init model 字段 + GLM 档位前缀）本地无 key 未经实证（2 skipped），首次 CI 配置 secret 跑通时需确认（R-API/R-PROVIDER/ISS-022）。medium 优先级，非阻塞（SPEC §11 真实集成在 CI）。
