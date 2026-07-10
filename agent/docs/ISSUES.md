@@ -9,6 +9,30 @@ status: active
 >
 > 字段语义：`id` 由 Orchestrator 统一分配（`ISS-XXX`）；`status` 取 `open` / `resolved`；`severity` 取 `low` / `medium` / `high` / `critical`；`scope` 为影响范围；`owner` 为责任人（空串表示尚未指派，等待人工认领）；`created_from_task` 为来源任务或阶段。
 
+## 项目收尾遗留清单（2026-07-10）
+
+> 项目已完成全部 29 个任务并执行 Readme §11 第 10 步收尾。下列 **12 项 open** 为 v0.1.0 范围外的已知遗留，均非阻塞，按类别分组；权威字段见各条 fenced YAML。ISS-009 已由 TASK-026 落地路由适配器、本次收尾标记 resolved。
+
+- **SDK 接入类**（解锁后连带收敛）：
+  - ISS-012（medium）— Claude Agent SDK 未安装 / API 未确认，`ClaudeSdkExecutor` 需 SDK 就位才能调模型；当前以 DryRun + 注入骨架交付。后续入口：单立 SDK 选型任务。
+  - ISS-016（medium）— `task:review` 默认 `LocalReviewer` 确定性产 approved 不经真实审查；SDK 就位后注入真实 Reviewer（连带 ISS-012）。
+- **语义张力类**（需 Orchestrator 裁定方向）：
+  - ISS-006（medium）— 依赖级联张力：状态机表无 `ready/draft→blocked` 边，`cascadeIfBlocked` 对未启动后继返回 skipped。
+  - ISS-010（low）— §3.2 未明文 append 与 replace 同 section 混合时的冲突语义。
+  - ISS-011（low）— 合并恢复补做回写时 progress append 在重复恢复下可能重复追加。
+- **环境约束类**：
+  - ISS-005（low）— `better-sqlite3@11.10.0` 需 Node 22（ABI 127）预编译，本机无 VS Build Tools 无法重编译（建议固定 Node 22 / 升级 / 预装编译工具链）。
+- **跨进程 / 工作区同步类**：
+  - ISS-007（low）— `commitAuditResult` 依赖仓库已配置 git `user.name/email`，适配器不设 config。
+  - ISS-008（medium）— `WorktreeAdapter.reset` 基线存内存 Map，跨 CLI 进程续跑（restart_on_retry）丢失。
+  - ISS-014（low）— `fastForwardMain` 用 update-ref 不检出工作区，已由 `syncMainWorktreeFile` 针对性补齐（统一策略未裁定）。
+- **代码复用 / 增强类**：
+  - ISS-015（low）— `task-review.ts` 与 `task-run.ts` 重复合并逻辑，建议抽 cli 共享助手模块。
+  - ISS-004（low）— `VerificationResultSchema` 暂置于 `result-schema.ts` 未提升至 `enums.ts`（后续复用时提升）。
+  - ISS-017（low）— MCP 配置文件格式与 init 衔接未落地（待具体 server 需求出现）。
+
+> 已解决：ISS-001 / ISS-002 / ISS-003（2026-07-08）、ISS-013 / ISS-018（TASK-024，2026-07-10）、ISS-009（TASK-026，2026-07-10 本次收尾）。
+
 ---
 
 ## ISS-001 Readme.md 未显式枚举 DecisionStatus / IssueStatus / IssueSeverity 完整取值
@@ -149,7 +173,7 @@ recommended_action: |-
 ```yaml
 id: ISS-009
 title: "合并用例 docs port 需按 taskId 路由到各 worktree/docs/tasks，TaskDocRepository 单 tasksDir 无法覆盖多 worktree，wiring 归 TASK-025/026"
-status: open
+status: resolved
 severity: low
 scope: application/merge/rebase-ff
 created_from_task: TASK-019
@@ -159,6 +183,8 @@ recommended_action: |-
 ```
 
 提议自 `TASK-019-app-merge-rebase-ff.result.md`。合并用例的 docs port 需按 taskId 路由到各 worktree/docs/tasks，而 TaskDocRepository 单 tasksDir 无法覆盖多 worktree（GitMergePort 天然按 taskId 寻址 worktree）。低优先级——编排逻辑经 ports 接口正确（测试用路由夹具验证），路由适配器是 CLI wiring 层职责；建议 TASK-025/026 落地 CLI 时实现按 taskId 路由的 docs 适配器，待 Orchestrator 确认。
+
+**Resolution（TASK-026，2026-07-10）**：方案已落地——TASK-026 `task:run`（`src/cli/commands/task-run.ts`）在合并阶段以 `new TaskDocRepository(join(wtPath, 'docs', 'tasks'))` 把 `MergePorts.docs` 按 taskId（经 wtPath）路由到各 worktree 的 docs/tasks（task-run.ts:233 读 result、:308 合并写 result），`rebaseAndFastForwardMerge` 注释明文标注 ISS-009。ISS-009 不再可操作，标记 resolved。
 
 ---
 

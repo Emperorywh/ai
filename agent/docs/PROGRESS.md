@@ -1,13 +1,25 @@
 ---
 doc: PROGRESS
-status: active
+status: complete
 ---
 
 # PROGRESS — 当前项目状态
 
 > 本文件只保留当前有效状态，用于上下文恢复（见 `Readme.md` §6.5）。完整历史记录在各 `TASK-XXX.result.md` 与 `docs/DECISIONS.md`。
 
+## 项目终态快照（2026-07-10）
+
+> **本项目已按 Readme §11 第 10 步完成收尾。** 全部 29 个任务（TASK-001 ~ TASK-029）已实现并合并回主分支 `main`，无后续任务待执行。下方各 section 为最终交付记录（能力全集 / 架构状态 / 复用要点），当前有效；仅在本文件恢复为 `status: active` 时再滚动更新。
+
+- **交付范围**：四层架构（core / application / infrastructure / cli）全部就位——Core 领域原语 + 状态机 + 规则、application 用例（Context Pack / 调度 / 状态编排 / 合并 rebase-ff / section 回写 / 幂等恢复 / 规划工作流）、infrastructure 适配器（frontmatter / 文档仓储 / SQLite 索引 / git worktree / Claude SDK 适配器 / MCP 骨架）、CLI 全部命令（init / plan / task:create / status / rebuild-index / task:run / task:review）。
+- **全量验证**（`docs/TESTING.md`）全绿：`npm run typecheck` 通过（`strict` + `noUncheckedIndexedAccess`，src + test）、`npm test` 28 个测试文件 / 680 项单测全部通过、`npm run lint` 通过（ESLint 覆盖 src + test）、`npm run build` 通过（tsc 编译产 `dist/`，已 gitignore）。
+- **运行环境**：Node v22.23.1（ABI 127）。`better-sqlite3@11.10.0` 原生模块需 Node 22 预编译（见 ISS-005），`package.json` `engines.node ">=20"` 实际受此约束。
+- **版本**：`version: 0.1.0`、`private: true`。是否打 tag / 发版由人工决定。
+- **遗留项**：13 项 open（ISS-004/005/006/007/008/009/010/011/012/014/015/016/017），多为 SDK 就位（ISS-012 解锁后连带 ISS-016）/ 环境约束（ISS-005）/ 后续增强类，非阻塞性，不在 v0.1.0 范围；权威清单与处置建议见 `docs/ISSUES.md`。
+
 ## 当前完成到哪个任务
+
+> **终态**：全部 29 个任务（TASK-001 ~ TASK-029）已完成。下列逐任务清单为最终交付记录。
 
 - TASK-001（项目脚手架与基础约束）已完成：建立四层目录骨架、工具链与基础约束文档。
 - TASK-002（Core 领域原语与枚举）已完成：`src/core/enums.ts` 定义全部领域枚举 + Zod schema，26 项单测。
@@ -146,6 +158,8 @@ status: active
 
 ## 当前未解决问题摘要
 
+> 进行时滚动摘要。当前仍 open 的 13 项为 ISS-004/005/006/007/008/009/010/011/012/014/015/016/017；ISS-001/002/003/013/018 已 resolved。权威清单与处置建议以 `docs/ISSUES.md` 为准，下方条目为各任务实现期的时序快照（ISS-013 在 TASK-025 时记为 open，后由 TASK-024 resolved，见末条）。
+
 - TASK-017 新增 ISS-006：依赖级联张力——状态机表无 `ready/draft→blocked` 边，`cascadeIfBlocked` 对未启动后继返回 `skipped`（详见 ISS-006）。除此之外 TASK-017 仅 type-only import core 类型 + 值 import core 纯函数 + type-only import `./ports.js`，未新增 npm 依赖，未触及 core/infrastructure/cli（forbidden 守住）。编排器设计（四方法职责切分 / applyResult 对 ok:false 抛错转人工 DEC-005 落地 / applyReview skipped 委托 applyResult 复用 no_review 三分 / cascadeIfBlocked 逐个过状态机 + 不能则 skipped 返回 CascadeOutcome / isResultAcceptable 产物校验清单 / confirmed 取 false）系 §5.1/§7/§10/§15 与 ARCHITECTURE §4 的合理落地（DEC-014 proposed），非规格偏离。
 - ISS-005（low，open）延续：`better-sqlite3@11.10.0` 原生模块 Node 版本兼容——无 Node 25（ABI 141）预编译、本机无 VS Build Tools 无法 `node-gyp` 重编译；本任务纯计算不依赖 SQLite，但全量回归含 SQLite 测试在 Node 22（ABI 127）下通过；后续依赖 SQLite 的 CLI 任务（TASK-025 rebuild-index）受此约束（建议固定 Node 22 / 升级 better-sqlite3 / 预装编译工具链，待裁定）。
 - ISS-004（low，open）延续：`VerificationResultSchema`（`passed` / `failed` / `skipped`）暂置于 `result-schema.ts`；本任务未引用该枚举，未触发提升，ISS-004 维持现状不阻塞后续任务。ISS-001 / ISS-002 / ISS-003 已于 2026-07-08 全部裁定解决，对应 DEC-001 / DEC-002 / DEC-003 均置 `accepted`。
@@ -167,4 +181,4 @@ status: active
 
 ## 建议下一个任务
 
-- **全部 29 个任务（TASK-001 ~ TASK-029）已完成**，无后续任务待执行。建议进入 Readme §11 第 10 步项目收尾：跑 `docs/TESTING.md` 全量验证（`npm run typecheck` / `npm test` / `npm run lint` / `npm run build`）、把 `docs/PROGRESS.md` 更新为终态快照（标注项目完成与当前可用能力全集）、归档或标记 `docs/ISSUES.md` 遗留项（ISS-005/006/007/008/009/010/011/012/014/015/016/017 仍 open，多为 SDK 就位 / 环境约束 / 后续增强类，非阻塞性）、由 Orchestrator 或人工决定是否打 tag / 发版。TASK-024（本任务）P8 收尾，CLI 全部命令就位。
+- **无后续任务**：全部 29 个任务已完成，项目收尾（Readme §11 第 10 步）已执行——全量验证四项全绿、本文件已置终态快照（`status: complete`）、遗留项已归档（见上方「项目终态快照」与 `docs/ISSUES.md`）。后续若启动新工作（如 ISS-012 Claude Agent SDK 选型接入、ISS-006 级联完备性、ISS-015 cli 共享助手抽取），新建 PLAN 并把本文件恢复为 `status: active`。tag / 发版（当前 `0.1.0` / `private: true`）由人工决定。
