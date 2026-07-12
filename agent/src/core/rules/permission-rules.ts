@@ -174,6 +174,56 @@ export function validateCommandPermissions(
 }
 
 /* ============================================================ *
+ * allowlist 批量权限校验（TASK-039 / FR-011.3）——汇总权限不足命令
+ * ============================================================ */
+
+/**
+ * 权限不足的命令清单项（validateAllowlistPermissions 返回）。
+ */
+export interface DeniedCommand {
+  /** 权限不足的命令行。 */
+  readonly command: string
+  /** 该命令声明但任务 permissions 未覆盖的能力。 */
+  readonly missing: readonly Permission[]
+}
+
+/**
+ * allowlist 批量权限校验结果。
+ *   - ok:true：allowlist 所有命令的 requires_permissions 均被任务 permissions 覆盖，可全部执行。
+ *   - ok:false：返回 denied（权限不足命令清单），供 VerifyTaskUseCase 映射为 blocked / needs-human
+ *     （§8「权限缺失返回结构化结果，不静默跳过」）。
+ */
+export type AllowlistPermissionResult =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly denied: readonly DeniedCommand[] }
+
+/**
+ * 对 allowlist 批量校验 requires_permissions 是否被任务 permissions 覆盖（FR-011.3 / §8）。
+ *
+ * 逐条复用 validateCommandPermissions 语义：收集所有 requires_permissions 未被覆盖的命令与其缺失能力。返回 ok:false 时，
+ * 调用方（VerifyTaskUseCase）不得调 Runner（§11「requires_permissions 缺失时 Runner 不被调用」），直接产
+ * blocked + needs-human 结构化结果，不静默跳过（§8）。
+ *
+ * @param allowlist computeVerificationAllowlist 产出的最终验证命令清单（结构兼容 VerificationCommand）。
+ * @param taskPermissions 任务 frontmatter 声明的能力。
+ */
+export function validateAllowlistPermissions(
+  allowlist: readonly CommandPermissionSpec[],
+  taskPermissions: readonly Permission[],
+): AllowlistPermissionResult {
+  const granted = new Set(taskPermissions)
+  const denied: DeniedCommand[] = []
+  for (const cmd of allowlist) {
+    const missing = cmd.requires_permissions.filter((p) => !granted.has(p))
+    if (missing.length > 0) {
+      denied.push({ command: cmd.command, missing })
+    }
+  }
+  if (denied.length === 0) return { ok: true }
+  return { ok: false, denied }
+}
+
+/* ============================================================ *
  * 命令字符串启发式扫描（仅 warning，不授权）
  * ============================================================ */
 

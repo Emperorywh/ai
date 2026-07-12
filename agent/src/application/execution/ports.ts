@@ -35,6 +35,7 @@ import type {
   ReviewResult,
   TaskId,
   VerificationCommand,
+  VerificationResult,
 } from '../../core/index.js'
 
 /* ============================================================ *
@@ -184,6 +185,68 @@ export interface TaskReviewerPort {
   readonly name: string
   /** 审查单个任务，返回审查结论。 */
   review(input: ReviewInput): Promise<ReviewOutcome>
+}
+
+/* ============================================================ *
+ * 系统验证侧：VerificationRunnerPort（TASK-039 / SPEC §20.3 / FR-011）
+ * ============================================================ */
+
+/**
+ * VerificationRunner 单次执行输入（FR-011.4「在 worktree 内独立执行」）。
+ *
+ *   - command：要执行的验证命令行（allowlist 中的命令身份，原样透传）。
+ *   - worktreePath：执行工作目录（任务 worktree 根），runner 在此目录内执行命令、采集真实退出码。
+ */
+export interface VerificationRunnerInput {
+  /** 要执行的验证命令行。 */
+  readonly command: string
+  /** runner 执行命令的工作目录（任务 worktree 根）。 */
+  readonly worktreePath: string
+}
+
+/**
+ * VerificationRunner 单次执行输出（FR-011.4「记录真实退出码、stdout/stderr 摘要和耗时」）。
+ *
+ *   - command：回传命令行（与 input 一致，供调用方按命令归并）。
+ *   - result：passed（退出码 0）/ failed（退出码非 0 或超时）/ skipped（命令声明明确不适用，FR-012）。
+ *   - exitCode：真实退出码；null 表示无退出码（超时强制终止 / skipped 未执行）。
+ *   - durationMs：真实耗时毫秒（>= 0）。
+ *   - outputSummary：stdout / stderr 摘要（超时时写明「超时」），供审计与门禁原因输出。
+ *
+ * 不含 source 字段：记录经 VerifyTaskUseCase 映射为 ResultVerification 时统一标注 source='system'。
+ */
+export interface VerificationRunnerResult {
+  /** 执行的命令行（与 input.command 一致）。 */
+  readonly command: string
+  /** 执行结果（passed / failed / skipped）。 */
+  readonly result: VerificationResult
+  /** 真实退出码；null 表示无退出码（超时 / skipped）。 */
+  readonly exitCode: number | null
+  /** 真实耗时毫秒。 */
+  readonly durationMs: number
+  /** stdout / stderr 摘要。 */
+  readonly outputSummary: string
+}
+
+/**
+ * Verification Runner Port（SPEC §20.3，FR-011 系统验证执行抽象）。
+ *
+ * 把「在 worktree 内真实执行单条验证命令 + 采集真实退出码 / 耗时 / 输出摘要」抽象为单一 run 方法。
+ * Application（VerifyTaskUseCase）只经此 Port 依赖外部执行能力，**不感知子进程 / Node child_process /
+ * shell 细节**——真实实现（TASK-040）落在 infrastructure，测试以 fake Runner 注入覆盖
+ * passed / failed / skipped / 退出码 / 超时（任务 §11 验收）。
+ *
+ * run 为异步（命令执行为异步）。实现须保证：返回时已采集到真实退出码与输出摘要；超时强制终止后
+ * 映射为 result='failed' + exitCode=null + outputSummary 注明超时（不静默吞错、不伪造 passed）。
+ *
+ * 本任务（TASK-039）只定义契约，不提供真实子进程实现（§7「不实现子进程命令执行」）——真实 Runner
+ * 由 TASK-040 在 infrastructure 落地，此处仅是 application 依赖的窄接口。
+ */
+export interface VerificationRunnerPort {
+  /** runner 名称（供日志区分不同实现，如 fake-runner / shell-runner）。 */
+  readonly name: string
+  /** 在指定 worktree 内执行单条验证命令，返回真实退出码 / 耗时 / 输出摘要。 */
+  run(input: VerificationRunnerInput): Promise<VerificationRunnerResult>
 }
 
 /* ============================================================ *

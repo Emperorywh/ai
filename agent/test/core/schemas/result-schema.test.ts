@@ -493,3 +493,141 @@ describe('verification 条目 { command, result, notes } 结构', () => {
     ).toBe(false)
   })
 })
+
+/* ============================================================ *
+ * verification 系统验证四元组（TASK-039 / FR-011：source / exit_code / duration_ms / output_summary）
+ * ============================================================ */
+
+describe('verification 系统验证四元组（TASK-039，optional 兼容 + 系统记录完整）', () => {
+  it('旧三字段（无四元组）通过——optional 兼容模型自报与历史夹具', () => {
+    expect(
+      ResultVerificationSchema.safeParse({
+        command: 'npm test',
+        result: 'passed',
+        notes: '',
+      }).success,
+    ).toBe(true)
+  })
+
+  it('source 接受 model / system', () => {
+    for (const s of ['model', 'system']) {
+      expect(
+        ResultVerificationSchema.safeParse({
+          command: 'npm test',
+          result: 'passed',
+          notes: '',
+          source: s,
+        }).success,
+      ).toBe(true)
+    }
+  })
+
+  it('source 非法被拒', () => {
+    expect(
+      ResultVerificationSchema.safeParse({
+        command: 'npm test',
+        result: 'passed',
+        notes: '',
+        source: 'user',
+      }).success,
+    ).toBe(false)
+  })
+
+  it('exit_code 接受整数与 null', () => {
+    expect(
+      ResultVerificationSchema.safeParse({
+        command: 'npm test',
+        result: 'passed',
+        notes: '',
+        exit_code: 0,
+      }).success,
+    ).toBe(true)
+    expect(
+      ResultVerificationSchema.safeParse({
+        command: 'npm test',
+        result: 'failed',
+        notes: '',
+        exit_code: 2,
+      }).success,
+    ).toBe(true)
+    expect(
+      ResultVerificationSchema.safeParse({
+        command: 'npm test',
+        result: 'skipped',
+        notes: '',
+        exit_code: null,
+      }).success,
+    ).toBe(true)
+  })
+
+  it('exit_code 非整数 / 小数被拒', () => {
+    expect(
+      ResultVerificationSchema.safeParse({
+        command: 'npm test',
+        result: 'passed',
+        notes: '',
+        exit_code: '0',
+      }).success,
+    ).toBe(false)
+    expect(
+      ResultVerificationSchema.safeParse({
+        command: 'npm test',
+        result: 'passed',
+        notes: '',
+        exit_code: 1.5,
+      }).success,
+    ).toBe(false)
+  })
+
+  it('duration_ms 负数被拒，0 与正整数通过', () => {
+    expect(
+      ResultVerificationSchema.safeParse({
+        command: 'npm test',
+        result: 'passed',
+        notes: '',
+        duration_ms: -1,
+      }).success,
+    ).toBe(false)
+    expect(
+      ResultVerificationSchema.safeParse({
+        command: 'npm test',
+        result: 'passed',
+        notes: '',
+        duration_ms: 0,
+      }).success,
+    ).toBe(true)
+    expect(
+      ResultVerificationSchema.safeParse({
+        command: 'npm test',
+        result: 'passed',
+        notes: '',
+        duration_ms: 250,
+      }).success,
+    ).toBe(true)
+  })
+
+  it('output_summary 字符串通过', () => {
+    expect(
+      ResultVerificationSchema.safeParse({
+        command: 'npm test',
+        result: 'passed',
+        notes: '',
+        output_summary: 'stdout 摘要',
+      }).success,
+    ).toBe(true)
+  })
+
+  it('完整系统记录（source=system + 四元组）通过——系统路径强制完整', () => {
+    expect(
+      ResultVerificationSchema.safeParse({
+        command: 'npm test',
+        result: 'passed',
+        notes: '',
+        source: 'system',
+        exit_code: 0,
+        duration_ms: 320,
+        output_summary: 'all good',
+      }).success,
+    ).toBe(true)
+  })
+})

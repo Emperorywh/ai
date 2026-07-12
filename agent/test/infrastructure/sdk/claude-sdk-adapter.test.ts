@@ -183,6 +183,11 @@ describe('DryRunLocalExecutor', () => {
       command: 'npm run typecheck',
       result: 'skipped',
       notes: 'dry-run 占位，未实际执行验证命令',
+      // TASK-039：DryRun 显式写全系统验证四元组（source='model' + 空值），占位记录来源明确。
+      source: 'model',
+      exit_code: null,
+      duration_ms: 0,
+      output_summary: 'dry-run 占位，未实际执行验证命令',
     })
     expect(fm.verification[1]?.command).toBe('npm test -- infrastructure/sdk')
     expect(fm.verification[1]?.result).toBe('skipped')

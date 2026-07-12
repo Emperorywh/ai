@@ -23,6 +23,12 @@
  *     回填 post-rebase 的执行 commit 元信息（§3.2）；Executor 提议时留空。
  *   - verification[].result ∈ passed / failed / skipped（§10），该三值枚举当前仅在
  *     .result.md 的 verification 上下文使用，enums.ts 暂未定义，故就近定义于本文件。
+ *   - verification[].source / exit_code / duration_ms / output_summary（TASK-039，
+ *     串行编排 SPEC FR-011）：系统验证四元组，由 VerifyTaskUseCase 经 VerificationRunnerPort
+ *     执行后填充「真实来源、退出码、耗时、stdout/stderr 摘要」。模型自报记录与历史测试夹具
+ *     可缺省（optional）；系统验证记录必须由用例显式写全（§11「未执行命令不能伪装 passed」）。
+ *     optional 是兼容手段（模型无法知道真实退出码 + 大量历史夹具不在本任务可改范围），
+ *     不用于在系统验证路径隐藏缺失字段——系统路径完整性由 VerifyTaskUseCase + 测试保证。
  *   - global_update_requests.decisions / issues 复用 DecisionSchema / IssueSchema，
  *     提议态 id 留空，由 Orchestrator 回写分配 DEC-XXX / ISS-XXX。
  */
@@ -57,15 +63,49 @@ export const VerificationResultSchema = z.enum([
 export type VerificationResult = z.infer<typeof VerificationResultSchema>
 
 /**
- * verification 单条记录 schema。
+ * 验证记录来源枚举（TASK-039，串行编排 SPEC FR-011）。
  *
- * §10 最小结构：{ command, result, notes }。command 为执行的验证命令行（非空）；
- * result 复用 VerificationResultSchema；notes 为人工补充说明，允许空串。
+ *   - model：模型 / Executor 自报（Executor 产出的 .result.md 原始 verification）。模型无法获知真实退出码 / 耗时，
+ *     source='model' 的记录退出码 / 耗时为空，不作为完成门禁的权威依据——系统验证覆盖后由 source='system' 记录取代。
+ *   - system：系统经 VerificationRunnerPort 真实执行后写入（FR-011「独立执行最终 allowlist，记录真实退出码、
+ *     stdout/stderr 摘要和耗时」）。同名命令的系统记录覆盖模型自报记录，是完成门禁的唯一权威来源。
+ *
+ * 就近定义于本文件（与 VerificationResultSchema 同因：仅服务于 verification 上下文）。
+ */
+export const VerificationSourceSchema = z.enum([
+  'model', // 模型 / Executor 自报
+  'system', // 系统经 VerificationRunnerPort 真实执行
+] as const)
+export type VerificationSource = z.infer<typeof VerificationSourceSchema>
+
+/**
+ * verification 单条记录 schema（§10 最小结构 + TASK-039 系统验证四元组）。
+ *
+ * 必填三字段（§10）：
+ *   - command：执行的验证命令行（非空），命令身份（去重 / 覆盖键）。
+ *   - result：复用 VerificationResultSchema（passed / failed / skipped）。
+ *   - notes：人工补充说明，允许空串。
+ *
+ * 系统验证四元组（TASK-039 / FR-011，optional）：
+ *   - source：记录来源（model / system）。系统验证记录必为 'system'；模型自报记录为 'model' 或缺省
+ *     （VerifyTaskUseCase 在 overlay 时把缺省视为 model）。
+ *   - exit_code：真实退出码（系统执行）；null 表示不适用（skipped / 模型自报无真实退出码）。
+ *   - duration_ms：真实耗时毫秒（系统执行，>= 0）；模型自报可缺省。
+ *   - output_summary：stdout / stderr 摘要（系统执行）；模型自报可缺省。
+ *
+ * optional 的边界（任务 §12 风险点调和）：模型无法知道真实退出码 / 耗时，且历史测试夹具大量构造
+ * { command, result, notes } 三字段字面量（多数不在本任务可改范围），故四元组为 optional 以兼容；系统验证路径
+ * （VerifyTaskUseCase / SDK 真实执行）显式写全四元组，并由专项测试覆盖，不用 optional 在系统记录
+ * 里隐藏缺失字段。
  */
 export const ResultVerificationSchema = z.object({
   command: z.string().min(1, 'verification[].command 必填且非空'),
   result: VerificationResultSchema,
   notes: z.string(),
+  source: VerificationSourceSchema.optional(),
+  exit_code: z.number().int().nullable().optional(),
+  duration_ms: z.number().int().min(0, 'verification[].duration_ms 须为非负整数').optional(),
+  output_summary: z.string().optional(),
 })
 export type ResultVerification = z.infer<typeof ResultVerificationSchema>
 

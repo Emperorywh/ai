@@ -1,15 +1,20 @@
 import { describe, expect, it } from 'vitest'
 import {
   computeVerificationAllowlist,
+  isVerificationGatePassed,
+  overlaySystemVerification,
   resolvePathScope,
   scanCommandHeuristics,
+  validateAllowlistPermissions,
   validateCommandPermissions,
 } from '../../../src/core/index.js'
 import type {
   CommandPermissionSpec,
   Layer,
   Permission,
+  ResultVerification,
   TestingCommand,
+  VerificationCommand,
 } from '../../../src/core/index.js'
 
 /* ============================================================ *
@@ -555,5 +560,204 @@ describe('集成：启发式扫描不参与授权', () => {
     const buildCmd = allowlist.find((c) => c.command === 'npm run build')
     if (buildCmd === undefined) throw new Error('build 命令应在 allowlist 中')
     expect(validateCommandPermissions(buildCmd, [])).toEqual({ ok: true })
+  })
+})
+
+/* ============================================================ *
+ * validateAllowlistPermissions —— allowlist 批量权限校验（TASK-039 / FR-011.3）
+ * ============================================================ */
+
+describe('validateAllowlistPermissions：allowlist 批量权限校验', () => {
+  /** 构造 CommandPermissionSpec（结构兼容 VerificationCommand）。 */
+  function spec(command: string, requires: readonly Permission[] = []): CommandPermissionSpec {
+    return { command, requires_permissions: requires }
+  }
+
+  it('全部覆盖 → ok:true', () => {
+    expect(
+      validateAllowlistPermissions(
+        [spec('npm install', ['install_dependencies']), spec('npm test')],
+        ['install_dependencies'],
+      ),
+    ).toEqual({ ok: true })
+  })
+
+  it('部分未覆盖 → ok:false + denied 只含缺失命令与缺失能力', () => {
+    const result = validateAllowlistPermissions(
+      [spec('npm test'), spec('npm install', ['install_dependencies']), spec('deploy', ['network_access'])],
+      ['install_dependencies'],
+    )
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.denied).toEqual([{ command: 'deploy', missing: ['network_access'] }])
+    }
+  })
+
+  it('全部未覆盖 → denied 含全部', () => {
+    const result = validateAllowlistPermissions(
+      [spec('a', ['network_access']), spec('b', ['delete_files'])],
+      [],
+    )
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.denied).toHaveLength(2)
+  })
+
+  it('空 requires_permissions → ok:true（allowlist 命令执行授权自动获得）', () => {
+    expect(
+      validateAllowlistPermissions([spec('npm test'), spec('npm run lint')], []),
+    ).toEqual({ ok: true })
+  })
+
+  it('空 allowlist → ok:true', () => {
+    expect(
+      validateAllowlistPermissions([], ['install_dependencies']),
+    ).toEqual({ ok: true })
+  })
+})
+
+/* ============================================================ *
+ * overlaySystemVerification —— 系统记录覆盖模型自报（TASK-039 / FR-011.5）
+ * ============================================================ */
+
+describe('overlaySystemVerification：系统记录覆盖模型自报', () => {
+  /** 构造 ResultVerification（默认 source='system'，模型场景显式传 'model'）。 */
+  function mkRec(opts: {
+    command: string
+    result: 'passed' | 'failed' | 'skipped'
+    source?: 'model' | 'system'
+    exitCode?: number | null
+    durationMs?: number
+    outputSummary?: string
+    notes?: string
+  }): ResultVerification {
+    return {
+      command: opts.command,
+      result: opts.result,
+      notes: opts.notes ?? '',
+      source: opts.source ?? 'system',
+      exit_code: opts.exitCode ?? null,
+      duration_ms: opts.durationMs ?? 0,
+      output_summary: opts.outputSummary ?? '',
+    }
+  }
+
+  it('同命令系统记录覆盖模型自报（模型 passed 被系统 failed 取代）', () => {
+    const model = [mkRec({ command: 'npm test', result: 'passed', source: 'model' })]
+    const system = [
+      mkRec({
+        command: 'npm test',
+        result: 'failed',
+        source: 'system',
+        exitCode: 1,
+        durationMs: 120,
+        outputSummary: 'stderr 摘要',
+      }),
+    ]
+    const merged = overlaySystemVerification(model, system)
+    expect(merged).toHaveLength(1)
+    expect(merged[0]?.result).toBe('failed')
+    expect(merged[0]?.source).toBe('system')
+    expect(merged[0]?.exit_code).toBe(1)
+    expect(merged[0]?.duration_ms).toBe(120)
+  })
+
+  it('模型独有命令保留（系统未执行该命令，保留供审计但不参与门禁）', () => {
+    const model = [mkRec({ command: 'extra', result: 'passed', source: 'model' })]
+    const system = [mkRec({ command: 'npm test', result: 'passed' })]
+    const merged = overlaySystemVerification(model, system)
+    expect(merged.map((m) => m.command)).toEqual(['npm test', 'extra'])
+    expect(merged[1]?.source).toBe('model')
+  })
+
+  it('系统独有命令加入（模型未自报）', () => {
+    const merged = overlaySystemVerification([], [
+      mkRec({ command: 'npm test', result: 'passed' }),
+    ])
+    expect(merged).toHaveLength(1)
+  })
+
+  it('顺序：先系统记录（runner 执行顺序）后未覆盖模型记录', () => {
+    const model = [
+      mkRec({ command: 'a', result: 'passed', source: 'model' }),
+      mkRec({ command: 'b', result: 'passed', source: 'model' }),
+    ]
+    const system = [mkRec({ command: 'c', result: 'passed' })]
+    expect(overlaySystemVerification(model, system).map((m) => m.command)).toEqual([
+      'c',
+      'a',
+      'b',
+    ])
+  })
+
+  it('模型与系统全同命令 → 只保留系统记录（去重）', () => {
+    const model = [mkRec({ command: 'x', result: 'passed', source: 'model' })]
+    const system = [mkRec({ command: 'x', result: 'failed' })]
+    expect(overlaySystemVerification(model, system)).toHaveLength(1)
+  })
+
+  it('双空 → 空', () => {
+    expect(overlaySystemVerification([], [])).toEqual([])
+  })
+})
+
+/* ============================================================ *
+ * isVerificationGatePassed —— 完成门禁（TASK-039 / FR-012 / §11）
+ * ============================================================ */
+
+describe('isVerificationGatePassed：完成门禁（allowlist 命令须全 passed）', () => {
+  /** 构造 allowlist 命令（VerificationCommand）。 */
+  function cmd(command: string): VerificationCommand {
+    return { command, source: 'project', requires_permissions: [] }
+  }
+
+  /** 构造系统记录（默认 source='system'）。 */
+  function sys(command: string, result: 'passed' | 'failed' | 'skipped'): ResultVerification {
+    return { command, result, notes: '', source: 'system', exit_code: 0, duration_ms: 10, output_summary: '' }
+  }
+
+  it('全部 passed → ok:true', () => {
+    const allowlist = [cmd('npm test'), cmd('npm run lint')]
+    const records = [sys('npm test', 'passed'), sys('npm run lint', 'passed')]
+    expect(isVerificationGatePassed(allowlist, records)).toEqual({ ok: true })
+  })
+
+  it('有 failed → ok:false + failed 清单', () => {
+    const allowlist = [cmd('npm test')]
+    const records = [sys('npm test', 'failed')]
+    const result = isVerificationGatePassed(allowlist, records)
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.failed).toHaveLength(1)
+      expect(result.notRun).toEqual([])
+    }
+  })
+
+  it('有 skipped → ok:false（不再把任意 skipped 当作通过，§11）', () => {
+    const allowlist = [cmd('npm test')]
+    const records = [sys('npm test', 'skipped')]
+    expect(isVerificationGatePassed(allowlist, records).ok).toBe(false)
+  })
+
+  it('allowlist 命令无系统记录（未执行）→ ok:false + notRun（未执行不能伪装 passed）', () => {
+    const allowlist = [cmd('npm test'), cmd('npm run lint')]
+    const records = [sys('npm test', 'passed')]
+    const result = isVerificationGatePassed(allowlist, records)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.notRun).toEqual(['npm run lint'])
+  })
+
+  it('空 allowlist → ok:true（无可验证命令）', () => {
+    expect(isVerificationGatePassed([], [])).toEqual({ ok: true })
+  })
+
+  it('失败与未执行并存 → ok:false 同时含 failed 与 notRun', () => {
+    const allowlist = [cmd('a'), cmd('b'), cmd('c')]
+    const records = [sys('a', 'passed'), sys('b', 'failed')]
+    const result = isVerificationGatePassed(allowlist, records)
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.failed).toHaveLength(1)
+      expect(result.notRun).toEqual(['c'])
+    }
   })
 })

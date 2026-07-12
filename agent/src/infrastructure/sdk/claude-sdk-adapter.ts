@@ -96,11 +96,17 @@ export class DryRunLocalExecutor implements TaskExecutorPort {
 
   async execute(input: ExecuteInput): Promise<ExecuteOutcome> {
     // 验证 allowlist 命令占位为 skipped——dry-run 不实际执行验证命令（任务 §7「不伪造」）。
+    // source='model'（Executor 产出，非系统执行）；系统验证四元组填空值（无真实执行），
+    // 待 VerifyTaskUseCase 经系统 Runner 覆盖为 source='system' 真实记录（TASK-039）。
     const verification: ResultVerification[] =
       input.permission_boundary.verification_commands.map((cmd) => ({
         command: cmd.command,
         result: 'skipped',
         notes: 'dry-run 占位，未实际执行验证命令',
+        source: 'model',
+        exit_code: null,
+        duration_ms: 0,
+        output_summary: 'dry-run 占位，未实际执行验证命令',
       }))
 
     const frontmatter: ResultFrontmatter = {
