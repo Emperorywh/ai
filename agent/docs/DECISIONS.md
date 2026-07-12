@@ -772,3 +772,21 @@ consequences: |-
 ```
 
 落地自 `TASK-037-app-execute-task-use-case.result.md`。把 task:run 的单任务执行领域编排（依赖检查 / Context Pack / 权限 / 状态映射）抽取到 application/execution/execute-task.ts 的 ExecuteTaskUseCase（经 Ports 注入，零 infra import）；CLI 降为 composition root 装配 + done 路径合并回收（待 TASK-038 抽共享 Finalize）。零行为变更（task:run 23 + task-review 13 测试全绿），置 accepted。
+
+## DEC-040 抽取 ReviewTaskUseCase + FinalizeTaskUseCase；消除两 CLI 重复合并逻辑（SPEC §20.4）
+
+```yaml
+id: DEC-040
+title: "抽取 ReviewTaskUseCase + FinalizeTaskUseCase；消除两 CLI 重复合并逻辑（SPEC §20.4）"
+status: accepted
+scope: src/application/execution/review-task.ts + src/application/execution/finalize-task.ts + src/application/execution/index.ts + src/application/index.ts + src/cli/commands/task-run.ts + src/cli/commands/task-review.ts
+created_from_task: TASK-038
+decision: |-
+  把 cli/commands/task-review.ts 中可复用的审查编排（读 .result.md → 产出审查结论 → 写 .review.md → applyReview 状态映射）抽取到 src/application/execution/review-task.ts 的 ReviewTaskUseCase；把 task-run / task-review 两处重复的 done 路径合并回收（rebase+ff + 全局回写 + 主工作区同步 + 冲突 done→blocked + 落 ISSUES）抽取到 src/application/execution/finalize-task.ts 的 FinalizeTaskUseCase。ReviewTaskUseCase 只依赖 core + Ports（taskRepo main 状态权威 / reviewer / openWorktreeRepo 读 worktree result）；applyReview 的 skipped 分支读 .result.md 经内部路由适配器（task 操作→main、result 操作→worktree）路由，main / worktree 仓储显式区分（任务 §12）。FinalizeTaskUseCase 只依赖 core + application merge 原语（rebase-ff / section-writeback）+ Ports（taskRepo / gitMerge / globalDocRepo / idAllocator / openWorktreeRepo / syncMainFile）；合并 rebaseAndFastForward 的 docs port 路由到 worktree 仓储（.result.md 尚未合并入 main）。syncMainFile 为注入回调（CLI 闭包绑定 git checkout），与 execute-task 的 prepareWorktree 同构，使 application 用例不感知 git I/O。CLI task:run / task:review 降为 composition root：装配三用例 Ports、串联 execute → (done) finalize / review → (done) finalize；reviewing / rejected / blocked 不合并。合并冲突 issue 的 recommended_action 改为命令中立（「重跑该任务（caw task:run / task:review <id>）」），因 finalizer 三处共用、不绑定具体命令。Review 与 Finalize 是两个职责独立的用例（任务 §8）：不在 Review 内部调 Finalize，由 CLI / Orchestrator 在 done 路径串联，使 Orchestrator 能在 review 后据 outcome 决策是否合并。
+rationale: |-
+  SPEC §20.4「复用与重构」明确要求：实现 Orchestrator 前必须先抽取 task:run / task:review 重复的合并包装 / 冲突登记 / 主工作区同步 / 全局回写 / provider 组装，不得复制第三套实现。抽取前两 CLI 各自维护一套 rebaseAndFastForwardMerge + appendMergeConflictIssue + syncMainWorktreeFile（机械相同但分散），串行 Orchestrator 若再复用会引入 application→cli 反向依赖或复制第三套。按 §9 数据流「reviewing → Reviewer → ReviewDoc → done/rejected/blocked；仅 done 进入 Finalize」切分为两个独立用例：ReviewTaskUseCase 产出结构化 ReviewTaskOutcome（finalStatus / reviewResult / task / result / worktreePath），FinalizeTaskUseCase 消费其 task / result / worktreePath 继续合并，无需重新读取或二次推导。Review 与 Finalize 拆为两个用例而非合一，是因为任务 §8 明确「Review 和 Finalize 是两个职责独立的用例」「合并冲突只能返回结构化结果，application 不替用户解决冲突」——审查与合并是不同阶段，Orchestrator 需在 review 后据结论（done / rejected / blocked）决策是否进合并，合一会强迫 rejected / blocked 也过合并分支。经 Ports 注入而非直接 new infra：满足「用例零 infra import」+「fake Ports 可在无 Git / 无 SDK 环境覆盖完整审查 / 合并链」（任务 §11）；openWorktreeRepo / syncMainFile 作为用例局部注入回调（非正式 Port），避免在 application/ports.ts 为「在路径打开仓储」「git checkout 单文件」过度抽象。status 置 accepted：已实际落地、SPEC §20.4 明确要求、零行为变更（task:run 23 + task-review 13 测试全绿）。
+consequences: |-
+  正面：done 路径合并回收单一来源（FinalizeTaskUseCase），CLI 不再持有可复用的合并 / 冲突登记 / 全局回写逻辑（任务 §11 验收：两 CLI 不再各自定义 rebaseAndFastForwardMerge）；task:run no_review 完成路径与 task:review approved 路径复用同一 finalizer；串行 Orchestrator（TASK-044）可直接复用三用例；用例经 fake Ports 纯内存可测（review-task 9 + finalize-task 6 tests），不依赖 git/SDK/fs 序列化。约束：合并冲突 issue 的 recommended_action 文案统一为命令中立（不再区分 task:run / task:review），冲突测试只断言 taskId / 合并冲突 / 冲突文件清单、不断言命令名，故无测试回归；若后续需命令特异化提示，应由调用方在 finalizer 之外补充而非回到分叉实现。约束：ReviewTaskOutcome / FinalizeTaskOutcome 的 task / result / worktreePath 是串联契约，TASK-044 Orchestrator 接入时应直接消费，不宜改动字段语义。openWorktreeRepo / syncMainFile 为用例局部注入回调，Orchestrator 接入时同样需在 composition root 绑定（TASK-049）。关联 DEC-039（执行用例，三用例闭环）/ DEC-038（执行/审查 Ports 单一来源）/ SPEC §20.4（复用与重构）。
+```
+
+落地自 `TASK-038-app-review-finalize-use-cases.result.md`。把 task:review 的审查编排抽取到 application/execution/review-task.ts 的 ReviewTaskUseCase，把两 CLI 重复的 done 路径合并回收抽取到 application/execution/finalize-task.ts 的 FinalizeTaskUseCase（SPEC §20.4，经 Ports 注入、零 infra import）；CLI 降为 composition root（装配 Ports + 串联 execute/review → finalize）。零行为变更（task:run 23 + task-review 13 测试全绿），置 accepted。
