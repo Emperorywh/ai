@@ -5,13 +5,8 @@ import { Command } from 'commander'
 import { parse as parseYaml } from 'yaml'
 import {
   ExecuteTaskUseCase,
-  StateOrchestrator,
-  rebaseAndFastForward,
-  writebackGlobalDocs,
+  FinalizeTaskUseCase,
   type IdAllocator,
-  type MergePorts,
-  type MergeTask,
-  type WritebackRequest,
 } from '../../application/index.js'
 import type {
   GitMergePort,
@@ -24,7 +19,6 @@ import type { TaskExecutorPort } from '../../application/execution/ports.js'
 import type {
   Layer,
   Permission,
-  TaskFrontmatter,
   TaskId,
   TaskStatus,
   TestingCommand,
@@ -49,14 +43,14 @@ import type { SDKMessage, SDKResultMessage } from '@anthropic-ai/claude-agent-sd
 /**
  * `task:run` 命令：单个任务的执行 composition root（Readme.md §11 / §3.2 / §17）。
  *
- * 职责（TASK-037 起）：「执行阶段」（依赖检查 → 刷新 context_pack → ready→running →
+ * 职责（TASK-037 / TASK-038 起）：「执行阶段」（依赖检查 → 刷新 context_pack → ready→running →
  * worktree → R7 → Executor → 读 .result.md → applyResult 状态映射）委托
- * ExecuteTaskUseCase（application/execution/execute-task.ts）；本文件只负责：
+ * ExecuteTaskUseCase（application/execution/execute-task.ts）；done 路径「合并回收」委托共享
+ * FinalizeTaskUseCase（application/execution/finalize-task.ts，SPEC §20.4）。本文件只负责：
  *   - composition root 装配：infrastructure 实现（TaskDocRepository / WorktreeAdapter /
  *     DryRunLocalExecutor / ClaudeSdkExecutor / GitMergeAdapter / GlobalDocRepository）wiring
- *     注入 ExecuteTaskPorts；provider/observability 组装（assembleExecutor）。
- *   - 合并回收阶段（done 路径）：rebaseAndFastForward（TASK-019）+ writebackGlobalDocs
- *     （TASK-020）+ syncMainWorktreeFile；冲突 → blocked + appendMergeConflictIssue。
+ *     注入 ExecuteTaskPorts / FinalizeTaskPorts；provider/observability 组装（assembleExecutor）。
+ *   - 串联用例：execute → (done) → finalize；reviewing 不合并。
  *   - 参数解析与 commander 注册。
  *
  * 合并触发规则（§9 数据流 / 任务 §2）：
@@ -67,8 +61,8 @@ import type { SDKMessage, SDKResultMessage } from '@anthropic-ai/claude-agent-sd
  *
  * 分层定位（ARCHITECTURE.md §4 / 任务 §8）：CLI 是 composition root——只编排 application +
  * infrastructure，不持有状态机、不重复领域规则。执行阶段领域编排自 TASK-037 起收敛到
- * ExecuteTaskUseCase（本文件不再持有可复用的依赖检查 / Context Pack / 权限边界 / 状态映射逻辑）；
- * 合并阶段待 TASK-038 抽取为共享 Finalize 用例。对 infra 的依赖在 ports 结构类型兼容下由本文件 wiring 注入。
+ * ExecuteTaskUseCase；done 路径合并回收自 TASK-038 起收敛到 FinalizeTaskUseCase（本文件不再
+ * 持有可复用的合并 / 冲突登记 / 全局回写逻辑）。对 infra 的依赖在 ports 结构类型兼容下由本文件 wiring 注入。
  *
  * 幂等恢复（TASK-021 recoverMerge）：单次成功执行的新鲜合并走 019+020；recoverMerge 以
  * `branchMerged` 为分叉点，对 DryRun 这类「产出未提交 .result.md」的新鲜执行，baseline 处
@@ -146,10 +140,9 @@ export interface TaskRunOptions {
  * 执行单个任务（Readme.md §11 / §3.2）—— composition root 入口。
  *
  * TASK-037 起，「执行阶段」（依赖检查 → 刷新 context_pack → ready→running → worktree →
- * R7 → Executor → 读 .result.md → applyResult 状态映射）委托 ExecuteTaskUseCase；本函数
- * 只负责装配 ExecuteTaskPorts（main 仓储 / worktree / executor / worktree 仓储 / R7 准备）、
- * 解析 testingCommands，并承接 done 路径的「合并回收」阶段（rebase + ff + 全局回写 + 主工作区
- * 同步；冲突 → blocked + ISSUES）。合并阶段待 TASK-038 抽取为共享 Finalize 用例。
+ * R7 → Executor → 读 .result.md → applyResult 状态映射）委托 ExecuteTaskUseCase；TASK-038 起
+ * done 路径的「合并回收」委托共享 FinalizeTaskUseCase（task:run / task:review / Orchestrator 共用）。
+ * 本函数只负责装配 Ports（执行用例 + 完成用例）、解析 testingCommands、provider/observability 组装。
  *
  * 状态权威在 main 仓库 frontmatter（TaskDocRepository 读写）；执行产物在 worktree（Executor
  * 写、合并经 rebase+ff 回收进 main）。reviewing 不合并；done（no_review 校验通过）才合并。
@@ -189,38 +182,29 @@ export async function runTask(
   // 执行阶段（领域编排全部在用例内）→ 结构化结果（finalStatus / worktreePath / task / result）。
   const executed = await useCase.execute({ taskId, mainRef, testingCommands })
 
-  // 合并阶段（done 路径）—— composition root 承接，待 TASK-038 抽取共享 Finalize 用例。
-  // reviewing 不合并；冲突 / 失败不在此分支合并。
+  // 合并阶段（done 路径）—— 委托共享 FinalizeTaskUseCase（TASK-038 / SPEC §20.4）。
+  // reviewing 不合并；冲突 / 失败不在此分支合并。CLI 只装配 Ports + 串联用例，
+  // 合并 / 回写 / 冲突登记的领域编排收敛在 FinalizeTaskUseCase（task:run / task:review / Orchestrator 共用）。
   let merged = false
   let conflicts: string[] = []
   if (executed.finalStatus === 'done') {
-    const mergeOutcome = rebaseAndFastForwardMerge({
-      git: options.gitMergePort ?? new GitMergeAdapter(projectRoot, worktreesDir),
-      wtPath: executed.worktreePath,
-      task: executed.task,
-      mainRef,
+    const finalizeUseCase = new FinalizeTaskUseCase({
+      taskRepo,
+      gitMerge: options.gitMergePort ?? new GitMergeAdapter(projectRoot, worktreesDir),
+      globalDocRepo: globalRepo,
+      idAllocator,
+      openWorktreeRepo: (wtPath) => new TaskDocRepository(join(wtPath, 'docs', 'tasks')),
+      syncMainFile: (resultFileRel) => syncMainWorktreeFile(projectRoot, mainRef, resultFileRel),
     })
-    if (mergeOutcome.merged) {
-      // 合并成功 → 全局文档 section 回写（§3.2 串行回写 global_update_requests）。
-      const writebackRequest: WritebackRequest = {
-        task_id: taskId,
-        updates: executed.result.global_update_requests,
-      }
-      writebackGlobalDocs(globalRepo, [writebackRequest], { idAllocator })
-      // fastForwardMain 用 update-ref 移动 ref、不检出工作区；把已进 main 历史的结果文件
-      // 同步到主工作区（仅该文件，不动任务 status 工作区写回）。
-      syncMainWorktreeFile(projectRoot, mainRef, executed.task.workflow_outputs.result_file)
-      merged = true
-    } else {
-      conflicts = [...mergeOutcome.conflicts]
-      // 合并冲突：done → blocked（Orchestrator 确认）+ 落 ISSUES（§3.2/§8 不静默）。
-      const orchestrator = new StateOrchestrator(taskRepo)
-      orchestrator.transition(taskId, 'blocked', {
-        no_review: executed.task.no_review,
-        confirmed: true,
-      })
-      appendMergeConflictIssue(globalRepo, idAllocator, taskId, conflicts)
-    }
+    const finalizeOutcome = finalizeUseCase.finalize({
+      taskId,
+      mainRef,
+      worktreePath: executed.worktreePath,
+      task: executed.task,
+      result: executed.result,
+    })
+    merged = finalizeOutcome.merged
+    conflicts = [...finalizeOutcome.conflicts]
   }
 
   const finalStatus = taskRepo.readTask(taskId).status
@@ -232,45 +216,6 @@ export async function runTask(
     merged,
     conflicts,
   }
-}
-
-/* ============================================================ *
- * 合并回收（TASK-019 rebase-ff）
- * ============================================================ */
-
-/** rebaseAndFastForwardMerge 的输入（git 原语 Port + worktree 路径 + 任务投影 + 主分支）。 */
-interface MergeInput {
-  readonly git: GitMergePort
-  readonly wtPath: string
-  readonly task: TaskFrontmatter
-  readonly mainRef: string
-}
-
-/**
- * 在 worktree 内执行 rebase + 回填 + fast-forward 合并（TASK-019）。
- *
- * docs Port 路由到 worktree 的 docs/tasks（ISS-009：合并读 / 写 .result.md 在 worktree 内）。
- * 返回 merged=true（已 ff 进 main）/ merged=false + 冲突清单（供调用方置 blocked + 落 ISSUES）。
- */
-function rebaseAndFastForwardMerge(input: MergeInput): {
-  merged: boolean
-  conflicts: readonly string[]
-} {
-  const docs: MergePorts['docs'] = new TaskDocRepository(join(input.wtPath, 'docs', 'tasks'))
-  const ports: MergePorts = { git: input.git, docs }
-  const mergeTask: MergeTask = {
-    id: input.task.id,
-    depends_on: input.task.depends_on,
-    workflow_outputs: { result_file: input.task.workflow_outputs.result_file },
-  }
-  const outcome = rebaseAndFastForward(ports, [mergeTask], { mainRef: input.mainRef })
-  const own = outcome.results.find((r) => r.taskId === input.task.id)
-  if (own === undefined) {
-    // 单任务合并必产出本任务结果；到此处属异常，不静默。
-    throw new Error(`合并未产出 ${input.task.id} 的结果`)
-  }
-  if (own.ok) return { merged: true, conflicts: [] }
-  return { merged: false, conflicts: own.conflicts }
 }
 
 /* ============================================================ *
@@ -355,35 +300,12 @@ export function createFsGlobalDocRepo(projectRoot: string): GlobalDocRepositoryP
 }
 
 /**
- * 把合并冲突登记进 docs/ISSUES.md（§3.2 / 任务 §8 不静默）。
+ * 合并后把已进入 main 历史的结果文件同步到主工作区（fastForwardMain 用 update-ref，工作区不自动检出）。
  *
- * 经 idAllocator 分配 ISS-XXX（既有非空 id ∪ 本批次去重）后 appendIssue 写回。
- * 冲突清单（unmerged 文件）记入 recommended_action 供人工定位。
+ * TASK-038 起作为 FinalizeTaskUseCase 的 syncMainFile 注入回调（task:run / task:review 共用）：
+ * CLI composition root 闭包绑定 projectRoot + mainRef 后注入；application 用例不感知 git I/O。
  */
-function appendMergeConflictIssue(
-  globalRepo: GlobalDocRepositoryPort,
-  idAllocator: IdAllocator,
-  taskId: TaskId,
-  conflicts: readonly string[],
-): void {
-  const issuesDoc = globalRepo.readGlobalDoc('issues')
-  const usedIds = collectExistingIds(globalRepo.readIssues(issuesDoc))
-  const id = idAllocator.nextIssueId(usedIds)
-  const updated = globalRepo.appendIssue(issuesDoc, {
-    id,
-    title: `${taskId} 合并冲突`,
-    status: 'open',
-    severity: 'high',
-    scope: taskId,
-    created_from_task: taskId,
-    owner: '',
-    recommended_action: `解决 rebase 合并冲突后重跑 caw task:run ${taskId}；冲突文件: ${conflicts.join(', ')}`,
-  })
-  globalRepo.writeGlobalDoc('issues', updated)
-}
-
-/** 合并后把已进入 main 历史的结果文件同步到主工作区（fastForwardMain 用 update-ref，工作区不自动检出）。 */
-function syncMainWorktreeFile(mainRepoDir: string, mainRef: string, resultFileRel: string): void {
+export function syncMainWorktreeFile(mainRepoDir: string, mainRef: string, resultFileRel: string): void {
   // 仅检出该文件到主工作区 + 索引；不动其余工作区改动（如任务 status 写回）。
   const r = spawnSync('git', ['checkout', mainRef, '--', resultFileRel], {
     cwd: mainRepoDir,
@@ -401,15 +323,6 @@ function syncMainWorktreeFile(mainRepoDir: string, mainRef: string, resultFileRe
 /* ============================================================ *
  * 纯辅助函数
  * ============================================================ */
-
-/** 从既有条目数组收集非空 id 集合（id 分配去重基线，镜像 section-writeback.collectExistingIds）。 */
-function collectExistingIds(entries: ReadonlyArray<{ id: string }>): Set<string> {
-  const set = new Set<string>()
-  for (const e of entries) {
-    if (e.id !== '') set.add(e.id)
-  }
-  return set
-}
 
 /** 顺序 id 分配器：同前缀（DEC / ISS）现有最大编号 +1，三位补零（与 recovery 测试一致）。 */
 export function sequentialIdAllocator(): IdAllocator {

@@ -1,20 +1,14 @@
-import { spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { Command } from 'commander'
 import {
-  StateOrchestrator,
-  rebaseAndFastForward,
-  writebackGlobalDocs,
+  ReviewTaskUseCase,
+  FinalizeTaskUseCase,
   type IdAllocator,
-  type MergePorts,
-  type MergeTask,
-  type WritebackRequest,
 } from '../../application/index.js'
 import type {
   GitMergePort,
   GlobalDocRepositoryPort,
-  TaskDocRepositoryPort,
 } from '../../application/ports.js'
 // TASK-036：审查契约（TaskReviewerPort + ReviewOutcome）自 application execution/ports
 // 导入（单一来源）；本文件不再重复定义，仅保留 LocalReviewer 兜底实现。
@@ -23,21 +17,21 @@ import type {
   TaskReviewerPort,
 } from '../../application/execution/ports.js'
 import type {
-  ReviewFrontmatter,
   ReviewResult,
-  TaskFrontmatter,
   TaskId,
   TaskStatus,
 } from '../../core/index.js'
 import { ClaudeSdkReviewer, GitMergeAdapter, TaskDocRepository } from '../../infrastructure/index.js'
-// 复用 TASK-026/034 已导出的 cli 公共助手——全局文档 fs 适配器 + 顺序 id 分配器 +
-// §7 可观测性上下文（createObservability，TASK-034）+ cost 摘要类型，避免重复实现（AGENTS §3）。
-// task-run.ts 虽在本任务 forbidden_paths，但 forbidden 约束的是「修改」而非「依赖」——
+// 复用 TASK-026/034/038 已导出的 cli 公共助手——全局文档 fs 适配器 + 顺序 id 分配器 +
+// §7 可观测性上下文（createObservability，TASK-034）+ cost 摘要类型 + 主工作区结果文件同步
+// （syncMainWorktreeFile，TASK-038 起 FinalizeTaskUseCase 的 syncMainFile 注入回调），避免重复实现（AGENTS §3）。
+// task-run.ts 虽曾属其他任务 forbidden_paths，但 forbidden 约束的是「修改」而非「依赖」——
 // 本文件自 TASK-027 起即跨命令 import task-run.ts 导出助手（先例），此处仅扩展该 import。
 import {
   createFsGlobalDocRepo,
   createObservability,
   sequentialIdAllocator,
+  syncMainWorktreeFile,
   type CostSummary,
   type Observability,
 } from './task-run.js'
@@ -52,10 +46,15 @@ import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 /**
  * `task:review` 命令：Reviewer 审查编排集成入口（Readme.md §5.3 / §15 / §3.2）。
  *
- * 职责：把审查链路串联为一条完整用例——
- *   读 .result.md（worktree）→ 产出 .review.md（approved/rejected/needs-human；
- *   no_review 时由 Orchestrator 生成 skipped 占位）→ applyReview 映射任务状态 →
- *   done 才合并回收（rebase + 回填 + fast-forward，TASK-019）+ 全局文档 section 回写（TASK-020）。
+ * 职责（TASK-038 起）：「审查阶段」（读 .result.md → 产出 .review.md → applyReview 状态映射）
+ * 委托 ReviewTaskUseCase（application/execution/review-task.ts）；done 路径「合并回收」委托
+ * 共享 FinalizeTaskUseCase（application/execution/finalize-task.ts，task:run / task:review /
+ * Orchestrator 共用，SPEC §20.4）。本文件只负责：
+ *   - composition root 装配：infrastructure 实现（TaskDocRepository / LocalReviewer /
+ *     ClaudeSdkReviewer / GitMergeAdapter / GlobalDocRepository）wiring 注入 ReviewTaskPorts /
+ *     FinalizeTaskPorts；provider/observability 组装（assembleReviewer）。
+ *   - 串联用例：review → (done) → finalize；rejected/blocked 保留 worktree 不合并。
+ *   - commander 注册。
  *
  * 审查结论到状态的映射固定（§15）：approved→done、rejected→rejected、
  * needs-human-confirmation→blocked；skipped 表示 no_review 任务 Reviewer 不介入，
@@ -67,8 +66,8 @@ import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
  * 留作崩溃续跑入口（DEC-022），本命令单次成功路径不调用。
  *
  * 分层定位（ARCHITECTURE.md §4 / 任务 §8）：CLI 是 composition root——只编排 application +
- * infrastructure，不持有状态机、不重复领域规则。状态映射经 StateOrchestrator.applyReview
- * （TASK-017），合并经 rebaseAndFastForward（TASK-019），回写经 writebackGlobalDocs（TASK-020）。
+ * infrastructure，不持有状态机、不重复领域规则。审查编排自 TASK-038 起收敛到 ReviewTaskUseCase，
+ * 合并回收收敛到 FinalizeTaskUseCase（本文件不再持有可复用的审查 / 合并 / 冲突登记逻辑）。
  *
  * 权威来源：根目录 Readme.md §5.3（Reviewer）/ §15（审查清单与映射）/ §3.2（合并策略）。
  */
@@ -77,8 +76,6 @@ import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 const DEFAULT_MAIN_REF = 'main'
 /** 默认 worktree 根目录（相对项目根）。 */
 const DEFAULT_WORKTREES_REL = '.worktrees'
-/** no_review 占位审查的审查者标识（§15「由 Orchestrator 生成」）。 */
-const ORCHESTRATOR_REVIEWER = 'orchestrator'
 
 /* ============================================================ *
  * LocalReviewer —— SDK 未就位兜底实现（审查契约见 application/execution/ports.ts）
@@ -153,17 +150,12 @@ export interface TaskReviewOptions {
  * ============================================================ */
 
 /**
- * 审查单个任务（Readme.md §5.3 / §15 / §3.2）。
+ * 审查单个任务（Readme.md §5.3 / §15 / §3.2）—— composition root 入口。
  *
- * 链路：
- *   1. 读任务（main 仓库，frontmatter 权威）→ 状态须为 `reviewing`（applyReview 的
- *      approved/rejected/needs-human/skipped 四映射均从 reviewing 出发，§7 状态机）。
- *   2. 定位 worktree（task:run 创建并保留至审查；.result.md 产物在 worktree，尚未合并入 main）。
- *   3. 读 .result.md（worktree）。
- *   4. 产出审查结论：no_review → Orchestrator 生成 skipped 占位（§15）;否则调 Reviewer。
- *   5. 写 .review.md（main 仓库——审查结论与执行事实分离，§5.3 不污染 .result.md）。
- *   6. applyReview 映射状态（经路由适配器：task 状态权威在 main、.result.md 在 worktree）。
- *   7. done 才合并回收 + 全局文档回写;rejected/blocked 保留 worktree 不合并（§8）。
+ * TASK-038 起，「审查阶段」（读 .result.md → 产出审查结论 → 写 .review.md → applyReview
+ * 状态映射）委托 ReviewTaskUseCase；done 路径「合并回收」委托共享 FinalizeTaskUseCase
+ * （task:run / task:review / Orchestrator 共用，SPEC §20.4）。本函数只负责装配 Ports
+ * （审查用例 + 完成用例）+ worktree 定位。
  *
  * 状态权威在 main 仓库 frontmatter（TaskDocRepository 读写 reviewing→done/rejected/blocked）；
  * 执行产物 .result.md 在 worktree（task:run 写、合并经 rebase+ff 回收进 main）。
@@ -184,260 +176,59 @@ export async function reviewTask(
     throw new Error(`任务目录不存在: ${tasksDir}（请先在项目根运行 caw init）`)
   }
 
-  // main 仓库文档仓储：任务状态权威（reviewing→done/rejected/blocked 流转写回这里）。
-  const mainRepo = new TaskDocRepository(tasksDir)
-  const task = mainRepo.readTask(taskId)
-
-  // 1. 状态前置：必须 reviewing（applyReview 四映射的合法起始态，§7 状态机 reviewing 出边）。
-  if (task.status !== 'reviewing') {
-    throw new Error(
-      `任务 ${taskId} 当前状态为 ${task.status}，应为 reviewing 才能审查` +
-        '（先经 caw task:run 进入 reviewing 后再审查）',
-    )
-  }
-
-  // 2. worktree 定位（task:run 创建并保留至审查;产物 .result.md 在 worktree，尚未合并入 main）。
+  // worktree 定位（task:run 创建并保留至审查;产物 .result.md 在 worktree，尚未合并入 main）。
   const wtPath = resolve(worktreesDir, taskId)
   if (!existsSync(wtPath)) {
     throw new Error(
       `任务 ${taskId} 的 worktree 不存在: ${wtPath}（审查需 caw task:run 产出的 worktree）`,
     )
   }
-  const worktreeRepo = new TaskDocRepository(join(wtPath, 'docs', 'tasks'))
 
-  // 3. 读 .result.md（worktree——供 reviewer 审查 + applyReview skipped 分支的产物校验）。
-  const result = worktreeRepo.readResult(taskId)
+  // main 仓库文档仓储：任务状态权威 + .review.md 落点。
+  const mainRepo = new TaskDocRepository(tasksDir)
 
-  // 4. 产出审查结论：no_review → Orchestrator 生成 skipped 占位（§15）;否则调 Reviewer。
-  const review = task.no_review
-    ? buildReviewFrontmatter(taskId, ORCHESTRATOR_REVIEWER, {
-        review_result: 'skipped',
-        required_changes: [],
-        findings: [],
-      })
-    : buildReviewFrontmatter(
-        taskId,
-        reviewer.name,
-        await reviewer.review({
-          task_id: taskId,
-          result,
-          worktree_path: wtPath,
-          result_file: task.workflow_outputs.result_file,
-        }),
-      )
+  // 审查阶段（领域编排全部在用例内）→ 结构化结果（finalStatus / reviewResult / task / result）。
+  const reviewUseCase = new ReviewTaskUseCase({
+    taskRepo: mainRepo,
+    reviewer,
+    openWorktreeRepo: (p) => new TaskDocRepository(join(p, 'docs', 'tasks')),
+  })
+  const reviewed = await reviewUseCase.review({ taskId, worktreePath: wtPath })
 
-  // 5. 写 .review.md（main 仓库——审查结论属 Orchestrator/Reviewer 产物，与 .result.md 分离，§5.3）。
-  mainRepo.writeReview(review)
-
-  // 6. applyReview 映射状态（路由适配器：task 状态权威在 main、.result.md 在 worktree）。
-  //    skipped 分支内部 readResult 经适配器路由到 worktree（.result.md 尚未合并入 main）。
-  const orchestrator = new StateOrchestrator(reviewOrchestratorRepo(mainRepo, worktreeRepo))
-  orchestrator.applyReview(taskId, review)
-
-  // 7. done 才合并回收;rejected/blocked 保留 worktree 不合并（§8「禁止 reviewing/rejected 回收」）。
+  // 合并阶段（done 路径）—— 委托共享 FinalizeTaskUseCase（TASK-038 / SPEC §20.4）。
+  // rejected/blocked 保留 worktree 不合并（§8「禁止 reviewing/rejected 回收」）。
   let merged = false
   let conflicts: string[] = []
-  const statusAfterReview = mainRepo.readTask(taskId).status
-  if (statusAfterReview === 'done') {
-    const mergeOutcome = rebaseAndFastForwardMerge({
-      git: options.gitMergePort ?? new GitMergeAdapter(projectRoot, worktreesDir),
-      wtPath,
-      task,
-      mainRef,
+  if (reviewed.finalStatus === 'done') {
+    const finalizeUseCase = new FinalizeTaskUseCase({
+      taskRepo: mainRepo,
+      gitMerge: options.gitMergePort ?? new GitMergeAdapter(projectRoot, worktreesDir),
+      globalDocRepo: globalRepo,
+      idAllocator,
+      openWorktreeRepo: (p) => new TaskDocRepository(join(p, 'docs', 'tasks')),
+      syncMainFile: (resultFileRel) => syncMainWorktreeFile(projectRoot, mainRef, resultFileRel),
     })
-    if (mergeOutcome.merged) {
-      // 合并成功 → 全局文档 section 回写（§3.2 串行回写 global_update_requests）。
-      const writebackRequest: WritebackRequest = {
-        task_id: taskId,
-        updates: result.global_update_requests,
-      }
-      writebackGlobalDocs(globalRepo, [writebackRequest], { idAllocator })
-      // fastForwardMain 用 update-ref 移动 ref、不检出工作区;把已进 main 历史的结果文件
-      // 同步到主工作区（仅该文件，不动任务 status 工作区写回，延续 TASK-026 ISS-014）。
-      syncMainWorktreeFile(projectRoot, mainRef, task.workflow_outputs.result_file)
-      merged = true
-    } else {
-      conflicts = [...mergeOutcome.conflicts]
-      // 合并冲突：done → blocked（Orchestrator confirmed）+ 落 ISSUES（§3.2/§8 不静默）。
-      orchestrator.transition(taskId, 'blocked', {
-        no_review: task.no_review,
-        confirmed: true,
-      })
-      appendMergeConflictIssue(globalRepo, idAllocator, taskId, conflicts)
-    }
+    const finalizeOutcome = finalizeUseCase.finalize({
+      taskId,
+      mainRef,
+      worktreePath: reviewed.worktreePath,
+      task: reviewed.task,
+      result: reviewed.result,
+    })
+    merged = finalizeOutcome.merged
+    conflicts = [...finalizeOutcome.conflicts]
   }
 
   const finalStatus = mainRepo.readTask(taskId).status
   return {
     taskId,
     finalStatus,
-    reviewResult: review.review_result,
-    reviewer: review.reviewer,
+    reviewResult: reviewed.reviewResult,
+    reviewer: reviewed.reviewer,
     worktreePath: wtPath,
     merged,
     conflicts,
   }
-}
-
-/* ============================================================ *
- * Orchestrator 仓储路由适配器（task 状态权威在 main、.result.md 在 worktree）
- * ============================================================ */
-
-/**
- * task:review 专用的 Orchestrator 仓储适配器。
- *
- * applyReview 的 skipped 分支内部调 readResult 读 .result.md，而 .result.md 在 worktree
- * （尚未合并入 main）;同时 task 状态权威在 main。单一 TaskDocRepository（单 tasksDir）
- * 无法兼顾两者（ISS-009 路由问题的细化），故在 cli composition root 组合双仓储：
- * readTask/writeTask/readReview/writeReview/listTasks → main（状态权威），
- * readResult/writeResult → worktree（.result.md 所在）。
- *
- * 结构类型满足 TaskDocRepositoryPort，StateOrchestrator 无感知（ARCHITECTURE.md §4）。
- */
-function reviewOrchestratorRepo(
-  main: TaskDocRepository,
-  worktree: TaskDocRepository,
-): TaskDocRepositoryPort {
-  return {
-    readTask: (id) => main.readTask(id),
-    writeTask: (task, body) => main.writeTask(task, body),
-    readResult: (id) => worktree.readResult(id),
-    writeResult: (result, body) => worktree.writeResult(result, body),
-    readReview: (id) => main.readReview(id),
-    writeReview: (review, body) => main.writeReview(review, body),
-    listTasks: () => main.listTasks(),
-  }
-}
-
-/* ============================================================ *
- * 合并回收（TASK-019 rebase-ff，docs port 路由到 worktree）
- * ============================================================ */
-
-/** rebaseAndFastForwardMerge 的输入（git 原语 Port + worktree 路径 + 任务投影 + 主分支）。 */
-interface MergeInput {
-  readonly git: GitMergePort
-  readonly wtPath: string
-  readonly task: TaskFrontmatter
-  readonly mainRef: string
-}
-
-/**
- * 在 worktree 内执行 rebase + 回填 + fast-forward 合并（TASK-019）。
- *
- * docs Port 路由到 worktree 的 docs/tasks（ISS-009：合并读 / 写 .result.md 在 worktree 内）。
- * 返回 merged=true（已 ff 进 main）/ merged=false + 冲突清单（供调用方置 blocked + 落 ISSUES）。
- *
- * 注：本函数与 TASK-026 task-run.ts 的 rebaseAndFastForwardMerge 逻辑一致（合并机械相同）;
- * 因本任务 allowed_paths 不含 task-run.ts 且该函数未导出，此处按 self-contained 命令惯例
- * 就地实现（cli 共享助手抽取待后续任务扩权）。
- */
-function rebaseAndFastForwardMerge(input: MergeInput): {
-  merged: boolean
-  conflicts: readonly string[]
-} {
-  const docs: MergePorts['docs'] = new TaskDocRepository(join(input.wtPath, 'docs', 'tasks'))
-  const ports: MergePorts = { git: input.git, docs }
-  const mergeTask: MergeTask = {
-    id: input.task.id,
-    depends_on: input.task.depends_on,
-    workflow_outputs: { result_file: input.task.workflow_outputs.result_file },
-  }
-  const outcome = rebaseAndFastForward(ports, [mergeTask], { mainRef: input.mainRef })
-  const own = outcome.results.find((r) => r.taskId === input.task.id)
-  if (own === undefined) {
-    // 单任务合并必产出本任务结果;到此处属异常，不静默。
-    throw new Error(`合并未产出 ${input.task.id} 的结果`)
-  }
-  if (own.ok) return { merged: true, conflicts: [] }
-  return { merged: false, conflicts: own.conflicts }
-}
-
-/* ============================================================ *
- * 全局文档（冲突 ISSUES 登记 + 主工作区同步）
- * ============================================================ */
-
-/**
- * 把合并冲突登记进 docs/ISSUES.md（§3.2 / 任务 §8 不静默）。
- *
- * 经 idAllocator 分配 ISS-XXX（既有非空 id ∪ 本批次去重）后 appendIssue 写回。
- * 冲突清单（unmerged 文件）记入 recommended_action 供人工定位。
- *
- * 注：与 TASK-026 task-run.ts 的 appendMergeConflictIssue 逻辑一致;因 allowed_paths 不含
- * task-run.ts 且未导出，此处就地实现。
- */
-function appendMergeConflictIssue(
-  globalRepo: GlobalDocRepositoryPort,
-  idAllocator: IdAllocator,
-  taskId: TaskId,
-  conflicts: readonly string[],
-): void {
-  const issuesDoc = globalRepo.readGlobalDoc('issues')
-  const usedIds = collectExistingIds(globalRepo.readIssues(issuesDoc))
-  const id = idAllocator.nextIssueId(usedIds)
-  const updated = globalRepo.appendIssue(issuesDoc, {
-    id,
-    title: `${taskId} 合并冲突`,
-    status: 'open',
-    severity: 'high',
-    scope: taskId,
-    created_from_task: taskId,
-    owner: '',
-    recommended_action: `解决 rebase 合并冲突后重跑 caw task:review ${taskId}；冲突文件: ${conflicts.join(', ')}`,
-  })
-  globalRepo.writeGlobalDoc('issues', updated)
-}
-
-/** 合并后把已进入 main 历史的结果文件同步到主工作区（fastForwardMain 用 update-ref，工作区不自动检出）。 */
-function syncMainWorktreeFile(mainRepoDir: string, mainRef: string, resultFileRel: string): void {
-  // 仅检出该文件到主工作区 + 索引;不动其余工作区改动（如任务 status 写回）。
-  const r = spawnSync('git', ['checkout', mainRef, '--', resultFileRel], {
-    cwd: mainRepoDir,
-    stdio: 'ignore',
-  })
-  if (r.status !== 0) {
-    // 同步失败不阻断（合并已成功进 main 历史），但显式告警（AGENTS §4 不静默）。
-    console.warn(
-      `warning: 同步主工作区结果文件失败（${resultFileRel}，退出码 ${r.status ?? 'null'}）；` +
-        '该文件已在 main 历史中，可经 git checkout 手动检出。',
-    )
-  }
-}
-
-/* ============================================================ *
- * 纯辅助函数
- * ============================================================ */
-
-/**
- * 把审查结论组装为合法 ReviewFrontmatter（补全 task_id / reviewer / reviewed_at）。
- *
- * reviewed_at 用 ISO8601 UTC（§8 / §15，z.string().datetime() 接受带 Z 的时间戳）。
- */
-function buildReviewFrontmatter(
-  taskId: TaskId,
-  reviewerName: string,
-  partial: {
-    readonly review_result: ReviewResult
-    readonly required_changes: readonly string[]
-    readonly findings: readonly string[]
-  },
-): ReviewFrontmatter {
-  return {
-    task_id: taskId,
-    review_result: partial.review_result,
-    reviewer: reviewerName,
-    reviewed_at: new Date().toISOString(),
-    required_changes: [...partial.required_changes],
-    findings: [...partial.findings],
-  }
-}
-
-/** 从既有条目数组收集非空 id 集合（id 分配去重基线，镜像 section-writeback.collectExistingIds）。 */
-function collectExistingIds(entries: ReadonlyArray<{ id: string }>): Set<string> {
-  const set = new Set<string>()
-  for (const e of entries) {
-    if (e.id !== '') set.add(e.id)
-  }
-  return set
 }
 
 /* ============================================================ *

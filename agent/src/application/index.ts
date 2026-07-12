@@ -7,9 +7,11 @@
  */
 // TASK-015：application → infrastructure 窄接口（Ports）与 Context Pack 生成器。
 export * from './ports.js'
-// TASK-036/037：执行 / 审查 Ports（TaskExecutorPort / TaskReviewerPort + 输入输出 + §18 启动提示）
-// 与单任务执行用例（ExecuteTaskUseCase）。串行编排 SPEC §20.3：Executor/Reviewer 契约单一来源，
-// SDK 实现经结构类型满足 Port；TASK-037 起执行用例复用这些 Port，CLI 降为 composition root。
+// TASK-036/037/038：执行 / 审查 Ports（TaskExecutorPort / TaskReviewerPort + 输入输出 + §18 启动提示）
+// 与单任务执行 / 审查 / 完成用例（ExecuteTaskUseCase / ReviewTaskUseCase / FinalizeTaskUseCase）。
+// 串行编排 SPEC §20.3/§20.4：Executor/Reviewer 契约单一来源，SDK 实现经结构类型满足 Port；
+// TASK-037 起执行用例复用这些 Port，TASK-038 起审查 + 共享完成用例消除 CLI 重复合并逻辑，
+// CLI 降为 composition root（wiring + 串联用例）。
 export * from './execution/index.js'
 export * from './context-pack-generator.js'
 // TASK-016：拓扑排序与并行检测（调度计算）。
