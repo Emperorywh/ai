@@ -754,3 +754,21 @@ consequences: |-
 ```
 
 落地自 `TASK-036-app-execution-review-ports.result.md`。把 Executor/Reviewer 契约从 infrastructure + CLI 收敛到 application/execution/ports.ts 单一来源（TaskExecutorPort / TaskReviewerPort），删除 executor-contract.ts 与 reviewer 重复结构类型，首次引入 infrastructure → application（仅 ports）依赖倒置；ARCHITECTURE §3/§4 同步。已实际落地、task §8 明确要求、零行为变更（既有测试全绿），置 accepted。
+
+## DEC-039 抽取 ExecuteTaskUseCase 单任务执行用例；review 与最终合并暂留 CLI composition root（待 TASK-038 共享 Finalize）
+
+```yaml
+id: DEC-039
+title: "抽取 ExecuteTaskUseCase 单任务执行用例；review 与最终合并暂留 CLI composition root（待 TASK-038 共享 Finalize）"
+status: accepted
+scope: src/application/execution/execute-task.ts + src/application/execution/index.ts + src/application/index.ts + src/cli/commands/task-run.ts
+created_from_task: TASK-037
+decision: |-
+  把 cli/commands/task-run.ts 中可复用的单任务执行领域编排（依赖前置检查、Context Pack 刷新与回写、权限边界组装、ready→running、worktree 创建、R7 工作区准备、§18 启动提示 + Executor 调用、读 .result.md、applyResult 状态映射）抽取到 src/application/execution/execute-task.ts 的 ExecuteTaskUseCase。用例只依赖 core 领域原语 + application Ports：taskRepo（main 仓储，状态权威）、worktree（WorktreePort）、executor（TaskExecutorPort）、openWorktreeRepo（在 worktree 路径打开仓储读 result）、prepareWorktree（R7 工作区准备）。main 仓储与 worktree 仓储在 Ports 层显式区分（任务 §12 风险点），状态流转写 main、产物从 worktree 读。用例内部组合 StateOrchestrator / computeContextPack / refreshSourceFiles / resolvePathScope / computeVerificationAllowlist，全部复用现有领域能力。CLI task:run 降为 composition root：装配 ExecuteTaskPorts（infrastructure 实现 wiring）、解析 testingCommands、承接 done 路径的合并回收（rebase-ff + 全局回写 + 主工作区同步 + 冲突→blocked+ISSUES）与 provider/observability 组装。review 与最终合并不在本任务用例范围（任务 §2/§9 明确「不负责 review 和最终合并」）：合并回收当前仍由 CLI composition root 承接，待 TASK-038 抽取为共享 Finalize 用例（SPEC §20.4），使 task:run / task:review / 串行 Orchestrator 三处共用同一合并实现，不复制第三套。
+rationale: |-
+  串行 Orchestrator（application 层，TASK-044）不能依赖 CLI command，必须先有 application 层的可复用执行入口。抽取前 runTask 同时承担「执行阶段编排」+「合并回收」+「composition root 装配」三类职责（任务 §1），顶层 Orchestrator 若直接复用会引入 application→cli 反向依赖或把循环堆在 CLI。按 SPEC §9 数据流「TaskDoc → 依赖 → Context Pack → ready→running → Worktree → Executor → ResultDoc → 状态映射」切分执行阶段为单一用例，返回结构化 ExecuteTaskOutcome（finalStatus / worktreePath / 刷新后的 task / 读到的 result），使后续合并阶段（CLI 或 TASK-038 Finalize）能基于结构化结果继续，无需重新读取或二次推导。合并回收暂留 CLI 而非本任务一并抽取，是因为任务 §2/§7 明确本任务不负责 review 与最终合并，且 SPEC §20.4 把「合并包装 / 冲突登记 / 主工作区同步 / 全局回写」归为 TASK-038 的共享 Finalize 范围（需同时供 task:review 复用）；本任务只切执行阶段，不越界到审查/合并，保持单任务单目标。经 Ports 注入而非直接 new infra：满足「用例零 infra import」+「fake Ports 可在无 Git/无 SDK 环境覆盖完整执行链」（任务 §11）；openWorktreeRepo 作为用例局部注入函数（非正式 Port），避免在 application/ports.ts 为「在路径打开仓储」过度抽象。status 置 accepted：已实际落地、任务 §2 明确要求、零行为变更（task:run 23 + task-review 13 测试全绿）。
+consequences: |-
+  正面：执行阶段领域编排单一来源（ExecuteTaskUseCase），CLI 不再持有可复用的依赖检查/Context Pack/权限/状态映射逻辑（任务 §11 验收）；串行 Orchestrator（TASK-044）可直接复用；用例经 fake Ports 纯内存可测（10 tests），不依赖 git/SDK/fs 序列化。约束：合并回收（含冲突→blocked）仍散在 CLI composition root，TASK-038 必须把它与 task:review 的合并路径抽取为共享 Finalize，否则 Orchestrator 会缺合并能力或被迫复制第三套实现（SPEC §20.4 已约束）。约束：ExecuteTaskOutcome 携带 task（刷新后投影）+ result + worktreePath，是 CLI/TASK-038 Finalize 的输入契约，TASK-038 抽取 Finalize 时应直接消费此结构，不宜再改其字段语义。prepareWorktree 签名只暴露 (wtPath, permissions)，主仓库路径等装配期常量由 composition root（CLI 或 Orchestrator wiring，TASK-049）闭包绑定。关联 DEC-038（执行/审查 Ports 单一来源，本用例直接消费 TaskExecutorPort）/ SPEC §20.4（复用与重构：抽取合并包装为共享 Finalize）。
+```
+
+落地自 `TASK-037-app-execute-task-use-case.result.md`。把 task:run 的单任务执行领域编排（依赖检查 / Context Pack / 权限 / 状态映射）抽取到 application/execution/execute-task.ts 的 ExecuteTaskUseCase（经 Ports 注入，零 infra import）；CLI 降为 composition root 装配 + done 路径合并回收（待 TASK-038 抽共享 Finalize）。零行为变更（task:run 23 + task-review 13 测试全绿），置 accepted。
