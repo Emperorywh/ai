@@ -7,8 +7,8 @@ import { serializeDocument, TaskDocRepository } from '../../src/infrastructure/i
 import {
   LocalReviewer,
   reviewTask,
-  type Reviewer,
 } from '../../src/cli/commands/task-review.js'
+import type { TaskReviewerPort } from '../../src/application/execution/ports.js'
 import { CliExitCode, runCli } from '../../src/cli/framework.js'
 import type { GitMergePort } from '../../src/application/ports.js'
 import type {
@@ -153,7 +153,7 @@ function mainRepo(): TaskDocRepository {
 /** fake Reviewer：产出指定审查结论（控制 approved / rejected / needs-human-confirmation）。 */
 function fakeReviewer(
   reviewResult: 'approved' | 'rejected' | 'needs-human-confirmation',
-): Reviewer {
+): TaskReviewerPort {
   return {
     name: 'fake-reviewer',
     async review() {

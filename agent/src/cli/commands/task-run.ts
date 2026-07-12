@@ -20,6 +20,13 @@ import type {
   GlobalDocName,
   GlobalDocRepositoryPort,
 } from '../../application/ports.js'
+// TASK-036：执行契约（Port + 输入输出 + 权限边界 + §18 启动提示）自 application execution/ports
+// 导入（单一来源）；具体执行器实现类仍从 infrastructure 导入（composition root wiring）。
+import {
+  buildStartupPrompt,
+  type ExecutorPermissionBoundary,
+  type TaskExecutorPort,
+} from '../../application/execution/ports.js'
 import {
   computeVerificationAllowlist,
   resolvePathScope,
@@ -41,10 +48,7 @@ import {
   GlobalDocRepository,
   TaskDocRepository,
   WorktreeAdapter,
-  buildStartupPrompt,
   type ClaudeSdkInvocation,
-  type ExecutorPermissionBoundary,
-  type TaskExecutor,
 } from '../../infrastructure/index.js'
 import {
   DEFAULT_CONFIG_PATH,
@@ -125,7 +129,7 @@ export interface TaskRunOptions {
   /** worktree 根目录（默认 <项目根>/.worktrees）。 */
   readonly worktreesDir?: string
   /** Task Executor（默认 DryRunLocalExecutor；SDK 就位后由上层注入 ClaudeSdkExecutor）。 */
-  readonly executor?: TaskExecutor
+  readonly executor?: TaskExecutorPort
   /** 合并用 git 原语 Port（默认真实 GitMergeAdapter；测试可注入 fake 模拟冲突）。 */
   readonly gitMergePort?: GitMergePort
   /** 全局文档读写 Port（默认文件系统适配器；测试可注入内存版）。 */
@@ -932,7 +936,7 @@ export interface AssembleExecutorInput {
 
 /** assembleExecutor 结果：executor + 可观测性上下文（cost 采集自后者，§7）。 */
 export interface AssembledExecutor {
-  readonly executor: TaskExecutor
+  readonly executor: TaskExecutorPort
   readonly observability: Observability
 }
 

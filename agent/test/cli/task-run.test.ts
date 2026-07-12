@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { serializeDocument, TaskDocRepository } from '../../src/infrastructure/index.js'
-import type { TaskExecutor } from '../../src/infrastructure/index.js'
+import type { TaskExecutorPort } from '../../src/application/execution/ports.js'
 import type { SdkRunReport } from '../../src/infrastructure/sdk/claude-sdk-adapter.js'
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import {
@@ -781,7 +781,7 @@ describe('task:run — runCli 装配选项（--executor）', () => {
  * fake 执行器：产出 verification 含 failed 的 .result.md（模拟「免审任务产物校验未通过」）。
  * next_action=review 走 completed+review+no_review 三分：orchestratorVerified=false（验证失败）→ blocked。
  */
-function fakeFailedExecutor(taskId: TaskId): TaskExecutor {
+function fakeFailedExecutor(taskId: TaskId): TaskExecutorPort {
   return {
     name: 'fake-failed',
     async execute(input) {

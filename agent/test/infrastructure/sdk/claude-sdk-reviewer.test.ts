@@ -3,19 +3,22 @@ import {
   ClaudeSdkReviewer,
   extractReviewJson,
   type ClaudeSdkReviewerOptions,
-  type SdkReviewInput,
-  type SdkReviewOutcome,
 } from '../../../src/infrastructure/index.js'
+// TASK-036：审查契约（ReviewInput / ReviewOutcome）自 application execution/ports 导入
+// （ClaudeSdkReviewer implements TaskReviewerPort，方法签名直接用此契约类型，不再本地复制）。
+import type {
+  ReviewInput,
+  ReviewOutcome,
+} from '../../../src/application/execution/ports.js'
 import type { ResultFrontmatter } from '../../../src/core/index.js'
 import type {
   SdkSessionInput,
   SdkSessionReport,
 } from '../../../src/infrastructure/sdk/sdk-client.js'
 
-// 注：ClaudeSdkReviewer 不 import cli 的 Reviewer 契约（分层 infra↛cli + forbidden_paths），
-// 靠 TS 结构类型兼容让 TASK-035 wiring 注入（ARCHITECTURE §4「无需 implements」）。结构兼容性
-// 由 TASK-035 在 task-review.ts 内的 wiring typecheck 自然验证（单一 ResultFrontmatter identity，
-// 不触发 test 跨文件类型 identity 怪异），故本测试不内联 cli 类型断言。
+// 注：ClaudeSdkReviewer 经 `implements TaskReviewerPort`（TASK-036 收敛后审查契约在 application
+// execution/ports）在编译期证明结构满足 Port；其 review 入参/出参直接复用 ReviewInput / ReviewOutcome，
+// 无第二套结构对齐类型。本测试据此断言 outcome 形态。
 
 /* ============================================================ *
  * 夹具构造
@@ -40,8 +43,8 @@ function makeResultFrontmatter(overrides?: Partial<ResultFrontmatter>): ResultFr
   return { ...base, ...overrides }
 }
 
-/** 构造合法 SdkReviewInput（结构对齐 ReviewInput：task_id / result / worktree_path / result_file）。 */
-function makeReviewInput(overrides?: Partial<SdkReviewInput>): SdkReviewInput {
+/** 构造合法 ReviewInput（task_id / result / worktree_path / result_file）。 */
+function makeReviewInput(overrides?: Partial<ReviewInput>): ReviewInput {
   return {
     task_id: 'TASK-099',
     result: makeResultFrontmatter(),
@@ -206,7 +209,7 @@ describe('ClaudeSdkReviewer', () => {
   it('正常产出：模型产合法 approved JSON → ReviewOutcome 字段正确 + 会话只调一次', async () => {
     const { runSession, calls } = sessionQueue([sessionReport(fencedReview(approvedJson()))])
     const reviewer = makeReviewer({ runSession })
-    const outcome: SdkReviewOutcome = await reviewer.review(makeReviewInput())
+    const outcome: ReviewOutcome = await reviewer.review(makeReviewInput())
 
     expect(outcome.review_result).toBe('approved')
     expect(outcome.required_changes).toEqual([])
@@ -225,7 +228,7 @@ describe('ClaudeSdkReviewer', () => {
     expect(outcome.findings).toEqual(['发现 src/core 反向依赖 application'])
   })
 
-  it('SdkReviewInput 正确投影为 SdkSessionInput（cwd=worktree/env/model/append/prompt）', async () => {
+  it('ReviewInput 正确投影为 SdkSessionInput（cwd=worktree/env/model/append/prompt）', async () => {
     const { runSession, calls } = sessionQueue([sessionReport(fencedReview(approvedJson()))])
     const reviewer = makeReviewer({
       runSession,
@@ -497,7 +500,7 @@ describe('ClaudeSdkReviewer', () => {
   it('返回的 outcome 形态满足 ReviewOutcome 契约（review_result 合法 + 数组字段）', async () => {
     const { runSession } = sessionQueue([sessionReport(fencedReview(rejectedJson()))])
     const reviewer = makeReviewer({ runSession })
-    const outcome: SdkReviewOutcome = await reviewer.review(makeReviewInput())
+    const outcome: ReviewOutcome = await reviewer.review(makeReviewInput())
 
     expect(['approved', 'rejected', 'needs-human-confirmation']).toContain(outcome.review_result)
     expect(Array.isArray(outcome.required_changes)).toBe(true)

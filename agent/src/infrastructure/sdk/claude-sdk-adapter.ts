@@ -1,17 +1,20 @@
 /**
  * Claude Agent SDK 适配器（infrastructure/sdk/claude-sdk-adapter.ts）。
  *
- * 本文件实现 TaskExecutor 契约（executor-contract.ts）的两个具体执行器：
+ * 本文件实现 TaskExecutorPort（application/execution/ports.ts，TASK-036 收敛）的两个具体执行器：
  *   - DryRunLocalExecutor：SDK 未就位时的兜底，**本地不调用模型**，产出占位 `.result.md`
  *     供前置阶段（状态流转 / 合并 / 全局文档回写）联调（任务 §2 / §7）。
  *   - ClaudeSdkExecutor：SDK 就位后经**注入式句柄** ClaudeSdkInvocation 调用模型；
  *     SDK 未注入（未安装 / API 未确认）时 execute 抛 ExecutorNotConfiguredError，
  *     **绝不伪造 SDK 调用**（任务 §7 / §12 R1）。
  *
- * 分层定位（ARCHITECTURE.md §4 / 任务 §1 / §8）：本文件仅被 cli（task:run / task:review）
- * 依赖，不经 application；core/application 不得 import 本文件（SDK 适配属 cli composition
- * root 职责）。依赖方向：infrastructure → core（type-only + ResultFrontmatterSchema 运行时校验），
- * infrastructure → infrastructure/fs（复用 serializeDocument 序列化 .result.md），零反向依赖。
+ * 分层定位（ARCHITECTURE.md §4 / 任务 §1 / §8）：本文件是 infrastructure adapter，
+ * **import application/execution/ports.ts 的执行契约类型**（ExecuteInput / ExecuteOutcome /
+ * ExecutorPermissionBoundary / ExecutorError / TaskExecutorPort）作为方法签名——这是依赖倒置：
+ * adapter 依赖 application 的 port 抽象（infrastructure → application，仅限 ports），不构成
+ * application → infrastructure 的反向依赖。SDK 适配属 cli composition root 职责，core 仍零反向依赖。
+ * 其余依赖：infrastructure → core（type-only + ResultFrontmatterSchema 运行时校验）、
+ * infrastructure → infrastructure/fs（复用 serializeDocument 序列化 .result.md）。
  *
  * SDK 接入策略（任务 §12 R1「SDK API 未确认」是本计划最高风险）：
  *   - 不引入 npm 依赖（红线：package.json 不得新增），故不 import 具体 Claude Agent SDK。
@@ -41,8 +44,8 @@ import {
   type ExecuteInput,
   type ExecuteOutcome,
   type ExecutorPermissionBoundary,
-  type TaskExecutor,
-} from './executor-contract.js'
+  type TaskExecutorPort,
+} from '../../application/execution/ports.js'
 
 /* ============================================================ *
  * 共享：.result.md 落盘（校验 + 序列化 + 写文件）
@@ -88,7 +91,7 @@ function persistResult(
  * 该执行器产出的 .result.md 经 persistResult 过 ResultFrontmatterSchema，可被
  * TaskDocRepository.readResult 正常读取、被 Orchestrator 正常消费。
  */
-export class DryRunLocalExecutor implements TaskExecutor {
+export class DryRunLocalExecutor implements TaskExecutorPort {
   readonly name = 'dry-run-local'
 
   async execute(input: ExecuteInput): Promise<ExecuteOutcome> {
@@ -237,7 +240,7 @@ export class ExecutorNotConfiguredError extends ExecutorError {
  * invocation 实现内，待 SDK 就位时实现。当前无真实 invocation 实现（见 ISSUES），
  * 测试以 fake invocation 验证编排逻辑。
  */
-export class ClaudeSdkExecutor implements TaskExecutor {
+export class ClaudeSdkExecutor implements TaskExecutorPort {
   readonly name = 'claude-sdk'
   private readonly invocation: ClaudeSdkInvocation | null
 

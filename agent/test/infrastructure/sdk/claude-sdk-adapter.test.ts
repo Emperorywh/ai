@@ -2,16 +2,20 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+// TASK-036：执行契约（buildStartupPrompt / ExecutorError / ExecuteInput）自 application
+// execution/ports 导入；具体执行器实现类 + SDK 句柄类型仍从 infrastructure 导入。
 import {
   buildStartupPrompt,
+  ExecutorError,
+  type ExecuteInput,
+} from '../../../src/application/execution/ports.js'
+import {
   ClaudeSdkExecutor,
   DryRunLocalExecutor,
-  ExecutorError,
   ExecutorNotConfiguredError,
   parseDocument,
   TaskDocRepository,
   type ClaudeSdkInvocation,
-  type ExecuteInput,
   type SdkRunInput,
   type SdkRunReport,
 } from '../../../src/infrastructure/index.js'

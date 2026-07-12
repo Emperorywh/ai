@@ -16,8 +16,13 @@ import type {
   GlobalDocRepositoryPort,
   TaskDocRepositoryPort,
 } from '../../application/ports.js'
+// TASK-036：审查契约（TaskReviewerPort + ReviewOutcome）自 application execution/ports
+// 导入（单一来源）；本文件不再重复定义，仅保留 LocalReviewer 兜底实现。
 import type {
-  ResultFrontmatter,
+  ReviewOutcome,
+  TaskReviewerPort,
+} from '../../application/execution/ports.js'
+import type {
   ReviewFrontmatter,
   ReviewResult,
   TaskFrontmatter,
@@ -76,65 +81,20 @@ const DEFAULT_WORKTREES_REL = '.worktrees'
 const ORCHESTRATOR_REVIEWER = 'orchestrator'
 
 /* ============================================================ *
- * Reviewer 契约（§12：可复用 TASK-022 注入式执行器模式）
+ * LocalReviewer —— SDK 未就位兜底实现（审查契约见 application/execution/ports.ts）
  * ============================================================ */
-
-/**
- * Reviewer 输入：被审查任务的执行结果 + worktree 位置（供真实 reviewer agent 读取改动）。
- *
- * 复用 TASK-022 Executor 契约的「注入式句柄」模式：编排层组装输入、消费审查结论，
- * 具体「调用模型 + 读改动 + 产出结论」隔离于 Reviewer 实现内（SDK 就位后注入真实实现）。
- */
-export interface ReviewInput {
-  /** 当前任务 id。 */
-  readonly task_id: TaskId
-  /** 被审查的 .result.md frontmatter（execution_status / verification / 改动清单）。 */
-  readonly result: ResultFrontmatter
-  /** worktree 根目录（任务改动所在，供真实 reviewer agent 读取）。 */
-  readonly worktree_path: string
-  /** .result.md 相对仓库路径。 */
-  readonly result_file: string
-}
-
-/**
- * Reviewer 输出：审查结论（不含 task_id / reviewer / reviewed_at，由命令层补全为 ReviewFrontmatter）。
- *
- * review_result 取 approved / rejected / needs-human-confirmation（§15）；skipped 专用于
- * no_review 的 Orchestrator 占位审查，不由 Reviewer 产出，故在此排除。
- */
-export interface ReviewOutcome {
-  /** 审查结论（approved / rejected / needs-human-confirmation）。 */
-  readonly review_result: Exclude<ReviewResult, 'skipped'>
-  /** 必须修改项（rejected / needs-human-confirmation 时填写，§15）。 */
-  readonly required_changes: readonly string[]
-  /** 审查发现清单。 */
-  readonly findings: readonly string[]
-}
-
-/**
- * Reviewer 契约接口（Readme.md §15 / §12）。
- *
- * 把「审查任务 + 产出审查结论」抽象为单一 review 方法，具体实现：
- *   - LocalReviewer（本文件）：SDK 未就位兜底，本地确定性产出 approved 供合并链路联调（§12）。
- *   - 真实 reviewer agent：SDK 就位后由上层注入（复用 TASK-022 注入式句柄，ISS-012 / DEC-019）。
- *
- * review 为异步（真实模型调用为异步；LocalReviewer 同步完成但统一返回 Promise 以兼容契约）。
- */
-export interface Reviewer {
-  /** 审查者名称（local-reviewer / 注入的 agent 名，供日志区分）。 */
-  readonly name: string
-  /** 审查单个任务，返回审查结论。 */
-  review(input: ReviewInput): Promise<ReviewOutcome>
-}
 
 /**
  * 本地审查器（SDK 未就位兜底，§12「若未就位用本地审查器兜底，避免阻塞」）。
  *
  * 不调用模型、不读改动，确定性产出 approved（与 TASK-022 DryRunLocalExecutor 产 completed 同义：
- * 让 done + 合并链路在无模型环境可联调）。真实审查由上层注入 Reviewer 实现；当前 SDK 未安装
- * （ISS-012），故以本地兜底交付，不伪造模型调用。
+ * 让 done + 合并链路在无模型环境可联调）。真实审查由上层注入 TaskReviewerPort 实现（如
+ * ClaudeSdkReviewer）；当前以本地兜底交付，不伪造模型调用。
+ *
+ * TASK-036：审查契约（TaskReviewerPort / ReviewInput / ReviewOutcome）已收敛到
+ * application/execution/ports.ts，本类 `implements TaskReviewerPort` 在编译期证明结构满足 Port。
  */
-export class LocalReviewer implements Reviewer {
+export class LocalReviewer implements TaskReviewerPort {
   readonly name = 'local-reviewer'
   async review(): Promise<ReviewOutcome> {
     return { review_result: 'approved', required_changes: [], findings: [] }
@@ -179,7 +139,7 @@ export interface TaskReviewOptions {
   /** worktree 根目录（默认 <项目根>/.worktrees）。 */
   readonly worktreesDir?: string
   /** Reviewer（默认 LocalReviewer；SDK 就位后由上层注入真实 agent）。 */
-  readonly reviewer?: Reviewer
+  readonly reviewer?: TaskReviewerPort
   /** 合并用 git 原语 Port（默认真实 GitMergeAdapter；测试可注入 fake 模拟冲突）。 */
   readonly gitMergePort?: GitMergePort
   /** 全局文档读写 Port（默认文件系统适配器；测试可注入内存版）。 */
@@ -497,7 +457,7 @@ export type ReviewerFactory = (opts: {
   readonly onMessage?: (message: SDKMessage) => void
   readonly stderr?: (data: string) => void
   readonly abortController: AbortController
-}) => Reviewer
+}) => TaskReviewerPort
 
 /** assembleReviewer 输入（composition root 装配参数）。 */
 export interface AssembleReviewerInput {
@@ -522,7 +482,7 @@ export interface AssembleReviewerInput {
 
 /** assembleReviewer 结果：reviewer + 可观测性上下文（cost 采集自后者，§7）。 */
 export interface AssembledReviewer {
-  readonly reviewer: Reviewer
+  readonly reviewer: TaskReviewerPort
   readonly observability: Observability
 }
 
@@ -600,9 +560,9 @@ export function assembleReviewer(input: AssembleReviewerInput): AssembledReviewe
 /**
  * 默认 reviewer 工厂：构造真实 ClaudeSdkReviewer（注入 provider env + 可观测回调 + abortController）。
  *
- * ClaudeSdkReviewer（TASK-033）结构兼容 Reviewer 契约（ARCHITECTURE §4 无需 implements）——
- * SdkReviewInput/SdkReviewOutcome 字段与 ReviewInput/ReviewOutcome 逐一一致，TS 结构类型兼容让
- * 此处 `new ClaudeSdkReviewer(...)` 直接赋给 Reviewer（兼容性经本 wiring typecheck 自然验证）。
+ * ClaudeSdkReviewer（TASK-033）`implements TaskReviewerPort`（TASK-036 收敛后审查契约在 application
+ * execution/ports），其 review(input: ReviewInput): Promise<ReviewOutcome> 与 Port 逐一一致——
+ * 此处 `new ClaudeSdkReviewer(...)` 直接赋给 TaskReviewerPort（兼容性经 implements + wiring typecheck 双重验证）。
  */
 const defaultReviewerFactory: ReviewerFactory = (opts) =>
   new ClaudeSdkReviewer({

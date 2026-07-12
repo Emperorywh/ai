@@ -1,49 +1,54 @@
 /**
- * Task Executor 契约（infrastructure/sdk/executor-contract.ts）。
+ * Application 执行 / 审查 Ports（ARCHITECTURE.md §4，串行编排 SPEC §20.3）。
  *
- * 本文件定义「执行引擎适配层」与调用方（cli task:run / task:review）之间的稳定契约：
- * Executor 接收 Context Pack（§8）+ 权限边界（§16，TASK-009 解析结果）+ §18 启动提示，
- * 在 worktree 内执行单个任务，产出合法的 `.result.md`（过 ResultFrontmatterSchema）。
+ * 本文件是 TaskExecutor 与 TaskReviewer 契约的**单一来源**（TASK-036 收敛）：
+ *   - 把原本散落在 infrastructure（executor-contract.ts）与 CLI（task-review.ts）的
+ *     执行 / 审查契约统一到 application，使串行 Orchestrator（application 层）能直接
+ *     复用这些类型，不必反向依赖 infrastructure 或把业务循环堆在 CLI。
+ *   - Execute / Review 的输入输出、权限边界、§18 启动提示类型各有唯一来源，禁止
+ *     在 infrastructure / CLI 再复制结构类型维持"碰巧兼容"（任务 §8）。
  *
- * 分层定位（ARCHITECTURE.md §4）：本契约**仅被 cli 依赖、不经 application**——
- * application 层不感知具体执行引擎，故不构成 core/application 对 SDK 的反向依赖。
- * core/application 也不得 import 本文件的具体 SDK 类型（任务 §1 / §7）：对 SDK 的
- * 依赖以注入式句柄 `ClaudeSdkInvocation`（见 claude-sdk-adapter.ts）隔离，本文件只
- * 暴露与 SDK 无关的契约接口 `TaskExecutor` / 输入输出 / 权限边界 / §18 启动提示构建器。
+ * 依赖方向（任务 §8）：`cli → application ← infrastructure`。
+ *   - application 在此定义 Port 抽象 + 共享类型；串行用例（TASK-037/038 及后续）经此
+ *     依赖执行 / 审查能力，不感知具体 SDK 实现。
+ *   - infrastructure 的 Claude SDK 适配器（claude-sdk-adapter.ts / claude-sdk-reviewer.ts）
+ *     **import 本文件的共享类型**作为方法签名，并经 TypeScript 结构类型满足 Port——
+ *     这是依赖倒置：adapter 依赖 application 的 port 抽象（infrastructure → application，
+ *     仅限 ports），不构成 application → infrastructure 的反向依赖。
+ *   - CLI composition root（task:run / task:review）实例化 SDK 实现，仅以 Port 类型交给用例。
  *
- * 设计约束（任务 §1 / §7 / §8）：
- *   - 仅 type-only import core 的领域类型（ContextPack / ExecutionStatus / Permission /
- *     TaskId / VerificationCommand），零反向依赖（不依赖 application/cli；不 import
- *     具体 Claude Agent SDK 类型——SDK API 未确认，见 ISSUES 与 DECISIONS）。
- *   - 不承载工作流领域逻辑（§3.1：执行引擎适配层不承载核心逻辑）：状态映射在 core
- *     （TASK-008），状态编排 / 合并 / 全局文档回写在 application（TASK-017/019/020/021），
- *     本契约只描述「执行边界」与「产出形态」。
- *   - §18 启动提示以纯函数 buildStartupPrompt 组装，占位符（TASK-XXX-xxx）由调用方
- *     传入实际值替换；模板文本唯一来源为 Readme.md §18，不在他处复制。
+ * 设计约束（ARCHITECTURE.md §4 / 任务 §8）：
+ *   - 本文件只导入 core 的类型（type-only）与 core 的 Schema 派生类型，零运行时反向依赖。
+ *   - Port 接口不出现 Claude Agent SDK 专属类型（SDK API 隔离在 infra adapter 内）。
+ *   - 借助 TypeScript 结构类型兼容，infra 实现类（DryRunLocalExecutor / ClaudeSdkExecutor /
+ *     ClaudeSdkReviewer）与 CLI 兜底类（LocalReviewer）无需显式 `implements`，由 CLI wiring
+ *     与 `implements` 子句共同在编译期证明结构满足 Port（任务 §11 验收）。
  *
- * 权威来源：根目录 Readme.md §5.2（Task Executor）/ §8（Context Pack）/
+ * 权威来源：根目录 Readme.md §5.2（Task Executor）/ §5.3（Reviewer）/ §15（审查清单与映射）/
  * §16（权限模型）/ §18（新上下文启动提示模板）。
  */
 import type {
   ContextPack,
   ExecutionStatus,
   Permission,
+  ResultFrontmatter,
+  ReviewResult,
   TaskId,
   VerificationCommand,
 } from '../../core/index.js'
 
 /* ============================================================ *
- * 权限边界（§16，TASK-009 解析结果）
+ * 执行侧：权限边界 + 输入输出 + Port
  * ============================================================ */
 
 /**
  * Executor 执行期的权限边界（Readme.md §16）。
  *
- * 由 cli（task:run）在启动 Executor 前用 TASK-009 的解析结果组装后注入：
- *   - allowed_paths / forbidden_paths：任务声明的路径作用域。cli 启动前应已用
- *     `resolvePathScope`（permission-rules.ts）检测重叠并拒绝启动（deny 优先），
- *     到达 Executor 时二者应已无重叠；Executor 据此约束模型读写范围。
- *   - permissions：任务 frontmatter 声明的能力（默认项除外的能力需显式声明）。
+ * 由 cli（task:run）/ 串行 Orchestrator 在启动 Executor 前用 TASK-009 的解析结果组装后注入：
+ *   - allowed_paths / forbidden_paths：任务声明的路径作用域。启动前应已用
+ *     `resolvePathScope`（permission-rules.ts）检测重叠并拒绝（deny 优先），到达
+ *     Executor 时二者应已无重叠；Executor 据此约束模型读写范围。
+ *   - permissions：任务 frontmatter 声明的能力（默认项之外的能力需显式声明）。
  *   - verification_commands：经 `computeVerificationAllowlist`（verification-rules.ts）
  *     按 layer 裁剪 + 任务级并集后的验证 allowlist；其执行授权自动获得（§16），
  *     Executor 可据此运行验证命令并记录结果。
@@ -61,14 +66,10 @@ export interface ExecutorPermissionBoundary {
   readonly verification_commands: readonly VerificationCommand[]
 }
 
-/* ============================================================ *
- * 执行输入 / 输出
- * ============================================================ */
-
 /**
  * Executor 单次执行输入（任务 §9 数据流：Context Pack + 权限 → Executor → .result.md）。
  *
- * 全部字段由 cli 在 worktree 创建后、启动 Executor 前组装：
+ * 全部字段由 cli / Orchestrator 在 worktree 创建后、启动 Executor 前组装：
  *   - worktree_path：Executor 的工作目录（§3.2 每个 running 任务独立 worktree）；
  *     DryRun / SDK 两实现均在此目录下执行 / 写入。
  *   - result_file：任务唯一允许写入的结果文件绝对路径（workflow_outputs.result_file，
@@ -107,12 +108,8 @@ export interface ExecuteOutcome {
   readonly execution_status: ExecutionStatus
 }
 
-/* ============================================================ *
- * 契约接口
- * ============================================================ */
-
 /**
- * Task Executor 契约接口（Readme.md §5.2）。
+ * Task Executor Port（Readme.md §5.2，串行编排 SPEC §20.3）。
  *
  * 把「调用模型 / 执行引擎 + 产出 .result.md」抽象为单一 execute 方法，具体实现：
  *   - DryRunLocalExecutor（claude-sdk-adapter.ts）：SDK 未就位兜底，本地不调用模型，
@@ -122,8 +119,11 @@ export interface ExecuteOutcome {
  * execute 为异步（SDK 模型调用为异步；DryRun 同步完成但统一返回 Promise 以兼容契约）。
  * 实现须保证：返回时 .result.md 已落盘且 frontmatter 过 ResultFrontmatterSchema；
  * 不可恢复的错误以 ExecutorError 抛出（不静默）。
+ *
+ * 命名为 Port（对齐 TaskDocRepositoryPort 等既有 port 命名，SPEC §20.3），
+ * 取代旧 infrastructure 的 `TaskExecutor` 接口（已删除，不保留转发兼容层）。
  */
-export interface TaskExecutor {
+export interface TaskExecutorPort {
   /** 执行器名称（dry-run-local / claude-sdk，供日志区分）。 */
   readonly name: string
   /** 执行单个任务，产出 .result.md。 */
@@ -131,7 +131,63 @@ export interface TaskExecutor {
 }
 
 /* ============================================================ *
- * §18 启动提示构建器（Readme.md §18）
+ * 审查侧：输入输出 + Port
+ * ============================================================ */
+
+/**
+ * Reviewer 审查输入：被审查任务的执行结果 + worktree 位置（供真实 reviewer agent 读取改动）。
+ *
+ * 复用执行侧的「注入式句柄」模式：编排层组装输入、消费审查结论，具体「调用模型 + 读改动 +
+ * 产出结论」隔离于 Reviewer 实现内（SDK 就位后注入真实实现）。
+ */
+export interface ReviewInput {
+  /** 当前任务 id。 */
+  readonly task_id: TaskId
+  /** 被审查的 .result.md frontmatter（execution_status / verification / 改动清单）。 */
+  readonly result: ResultFrontmatter
+  /** worktree 根目录（任务改动所在，供真实 reviewer agent 读取）。 */
+  readonly worktree_path: string
+  /** .result.md 相对仓库路径。 */
+  readonly result_file: string
+}
+
+/**
+ * Reviewer 审查输出：审查结论（不含 task_id / reviewer / reviewed_at，由命令层补全为 ReviewFrontmatter）。
+ *
+ * review_result 取 approved / rejected / needs-human-confirmation（§15）；skipped 专用于
+ * no_review 的 Orchestrator 占位审查，不由 Reviewer 产出，故在此排除。
+ */
+export interface ReviewOutcome {
+  /** 审查结论（approved / rejected / needs-human-confirmation）。 */
+  readonly review_result: Exclude<ReviewResult, 'skipped'>
+  /** 必须修改项（rejected / needs-human-confirmation 时填写，§15）。 */
+  readonly required_changes: readonly string[]
+  /** 审查发现清单。 */
+  readonly findings: readonly string[]
+}
+
+/**
+ * Task Reviewer Port（Readme.md §15 / §12，串行编排 SPEC §20.3）。
+ *
+ * 把「审查任务 + 产出审查结论」抽象为单一 review 方法，具体实现：
+ *   - LocalReviewer（cli/commands/task-review.ts）：SDK 未就位兜底，本地确定性产出
+ *     approved 供合并链路联调（§12）。
+ *   - ClaudeSdkReviewer（claude-sdk-reviewer.ts）：SDK 就位后由上层注入（独立审查会话）。
+ *
+ * review 为异步（真实模型调用为异步；LocalReviewer 同步完成但统一返回 Promise 以兼容契约）。
+ *
+ * 命名为 Port（对齐既有 port 命名，SPEC §20.3），取代旧 CLI 的 `Reviewer` 接口
+ * （已迁移到本文件，CLI 不再重复定义）。
+ */
+export interface TaskReviewerPort {
+  /** 审查者名称（local-reviewer / 注入的 agent 名，供日志区分）。 */
+  readonly name: string
+  /** 审查单个任务，返回审查结论。 */
+  review(input: ReviewInput): Promise<ReviewOutcome>
+}
+
+/* ============================================================ *
+ * §18 启动提示构建器（Readme.md §18，Executor 初始指令唯一文本来源）
  * ============================================================ */
 
 /**
@@ -202,7 +258,8 @@ const STARTUP_PROMPT_TEMPLATE = `你现在是本项目的 Task Executor。
  * Executor 错误基类。
  *
  * 不可恢复的执行失败（SDK 未注入、文件写入失败、产物非法等）以此抛出，不静默。
- * 具体子类（如 ExecutorNotConfiguredError）定义在 claude-sdk-adapter.ts。
+ * 具体子类（如 ExecutorNotConfiguredError）定义在 claude-sdk-adapter.ts（infrastructure），
+ * 经 `extends ExecutorError` 复用本基类——故本基类随执行契约留在 application 单一来源。
  */
 export class ExecutorError extends Error {
   constructor(message: string) {

@@ -18,8 +18,9 @@ export * from './sqlite/schema.js'
 export * from './sqlite/index-repo.js'
 // TASK-018：Git worktree 生命周期与合并原语适配器（子进程调系统 git）。
 export * from './git/worktree-adapter.js'
-// TASK-022：Task Executor 契约 + Claude Agent SDK 适配器（DryRun 兜底 + 注入式 SDK 骨架）。
-export * from './sdk/executor-contract.js'
+// TASK-022/036：Task Executor Claude Agent SDK 适配器（DryRun 兜底 + 注入式 SDK 骨架）。
+// 执行契约（TaskExecutorPort / ExecuteInput / buildStartupPrompt / ExecutorError 等）自 TASK-036
+// 起收敛到 application/execution/ports.ts，本层只导出具体执行器实现类 + SDK 调用句柄类型。
 export * from './sdk/claude-sdk-adapter.js'
 // TASK-028：MCP 适配器骨架（注册机制 + 统一调用代理，具体 server 留空抛「未配置」错误）。
 export * from './mcp/mcp-adapter.js'
