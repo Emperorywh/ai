@@ -4,12 +4,10 @@ import { dirname, join, resolve } from 'node:path'
 import { Command } from 'commander'
 import { parse as parseYaml } from 'yaml'
 import {
+  ExecuteTaskUseCase,
   StateOrchestrator,
-  computeContextPack,
-  refreshSourceFiles,
   rebaseAndFastForward,
   writebackGlobalDocs,
-  type DependencyResultSummary,
   type IdAllocator,
   type MergePorts,
   type MergeTask,
@@ -20,25 +18,16 @@ import type {
   GlobalDocName,
   GlobalDocRepositoryPort,
 } from '../../application/ports.js'
-// TASK-036：执行契约（Port + 输入输出 + 权限边界 + §18 启动提示）自 application execution/ports
-// 导入（单一来源）；具体执行器实现类仍从 infrastructure 导入（composition root wiring）。
-import {
-  buildStartupPrompt,
-  type ExecutorPermissionBoundary,
-  type TaskExecutorPort,
-} from '../../application/execution/ports.js'
-import {
-  computeVerificationAllowlist,
-  resolvePathScope,
-  type TestingCommand,
-} from '../../core/index.js'
+// TASK-036：执行契约（Port + 输入输出）自 application execution/ports 导入（单一来源）；
+// 具体执行器实现类仍从 infrastructure 导入（composition root wiring）。
+import type { TaskExecutorPort } from '../../application/execution/ports.js'
 import type {
   Layer,
   Permission,
-  ResultFrontmatter,
   TaskFrontmatter,
   TaskId,
   TaskStatus,
+  TestingCommand,
 } from '../../core/index.js'
 import {
   ClaudeSdkExecutor,
@@ -58,12 +47,17 @@ import {
 import type { SDKMessage, SDKResultMessage } from '@anthropic-ai/claude-agent-sdk'
 
 /**
- * `task:run` 命令：单个任务的执行编排集成入口（Readme.md §11 / §3.2 / §17）。
+ * `task:run` 命令：单个任务的执行 composition root（Readme.md §11 / §3.2 / §17）。
  *
- * 职责：把 7 个下游能力（TASK-015/017/018/019/020/021/022）串联为一条完整执行链路——
- *   依赖前置检查 → 刷新 context_pack 并回写 → ready→running → create worktree →
- *   R7 恢复 node_modules → 组装权限边界 + §18 启动提示 → 选 Executor 执行 →
- *   读 .result.md → applyResult 流转。
+ * 职责（TASK-037 起）：「执行阶段」（依赖检查 → 刷新 context_pack → ready→running →
+ * worktree → R7 → Executor → 读 .result.md → applyResult 状态映射）委托
+ * ExecuteTaskUseCase（application/execution/execute-task.ts）；本文件只负责：
+ *   - composition root 装配：infrastructure 实现（TaskDocRepository / WorktreeAdapter /
+ *     DryRunLocalExecutor / ClaudeSdkExecutor / GitMergeAdapter / GlobalDocRepository）wiring
+ *     注入 ExecuteTaskPorts；provider/observability 组装（assembleExecutor）。
+ *   - 合并回收阶段（done 路径）：rebaseAndFastForward（TASK-019）+ writebackGlobalDocs
+ *     （TASK-020）+ syncMainWorktreeFile；冲突 → blocked + appendMergeConflictIssue。
+ *   - 参数解析与 commander 注册。
  *
  * 合并触发规则（§9 数据流 / 任务 §2）：
  *   - 普通任务执行后停在 `reviewing`，**不合并**，提示运行 `task:review`。
@@ -72,9 +66,9 @@ import type { SDKMessage, SDKResultMessage } from '@anthropic-ai/claude-agent-sd
  *   - 合并冲突：`done → blocked`（Orchestrator 确认）+ 把冲突登记进 docs/ISSUES.md（§3.2/§8 不静默）。
  *
  * 分层定位（ARCHITECTURE.md §4 / 任务 §8）：CLI 是 composition root——只编排 application +
- * infrastructure，不持有状态机、不重复领域规则。状态流转经 StateOrchestrator（TASK-017），
- * 合并经 rebaseAndFastForward（TASK-019），回写经 writebackGlobalDocs（TASK-020）；对 infra 的
- * 依赖在 ports 结构类型兼容下由本文件 wiring 注入。
+ * infrastructure，不持有状态机、不重复领域规则。执行阶段领域编排自 TASK-037 起收敛到
+ * ExecuteTaskUseCase（本文件不再持有可复用的依赖检查 / Context Pack / 权限边界 / 状态映射逻辑）；
+ * 合并阶段待 TASK-038 抽取为共享 Finalize 用例。对 infra 的依赖在 ports 结构类型兼容下由本文件 wiring 注入。
  *
  * 幂等恢复（TASK-021 recoverMerge）：单次成功执行的新鲜合并走 019+020；recoverMerge 以
  * `branchMerged` 为分叉点，对 DryRun 这类「产出未提交 .result.md」的新鲜执行，baseline 处
@@ -88,8 +82,6 @@ import type { SDKMessage, SDKResultMessage } from '@anthropic-ai/claude-agent-sd
 const DEFAULT_MAIN_REF = 'main'
 /** 默认 worktree 根目录（相对项目根）。 */
 const DEFAULT_WORKTREES_REL = '.worktrees'
-/** .result.md 后缀（§9 约定，用于派生任务文件路径）。 */
-const RESULT_SUFFIX = '.result.md'
 
 /* ============================================================ *
  * 结果与选项类型
@@ -151,23 +143,16 @@ export interface TaskRunOptions {
  * ============================================================ */
 
 /**
- * 执行单个任务（Readme.md §11 / §3.2）。
+ * 执行单个任务（Readme.md §11 / §3.2）—— composition root 入口。
  *
- * 链路：
- *   1. 读任务（main 仓库，frontmatter 权威）→ 状态须为 `ready`。
- *   2. 依赖前置检查：全部 `depends_on` 须 `done`，否则拒绝运行（任务 §8）。
- *   3. 刷新 `context_pack.source_files`（refreshSourceFiles）并回写 frontmatter（§11）。
- *   4. 组装权限边界：resolvePathScope 检测路径重叠（deny 优先拒绝启动，§16）+
- *      computeVerificationAllowlist（layer 裁剪 + 任务级并集）。
- *   5. `ready → running`（StateOrchestrator，状态机校验后写回 main 仓库）。
- *   6. create worktree（每个 running 任务独立 worktree + 分支 task/TASK-XXX，§3.2）。
- *   7. R7：恢复 worktree 内 node_modules。
- *   8. 组装 §18 启动提示 → Executor 在 worktree 内执行、产出 .result.md。
- *   9. 读 .result.md（从 worktree —— 产物尚未合并入 main）→ applyResult 流转。
- *  10. 目标状态为 `done`（免审校验通过）→ 合并回收 + 全局文档回写；冲突 → blocked + ISSUES。
+ * TASK-037 起，「执行阶段」（依赖检查 → 刷新 context_pack → ready→running → worktree →
+ * R7 → Executor → 读 .result.md → applyResult 状态映射）委托 ExecuteTaskUseCase；本函数
+ * 只负责装配 ExecuteTaskPorts（main 仓储 / worktree / executor / worktree 仓储 / R7 准备）、
+ * 解析 testingCommands，并承接 done 路径的「合并回收」阶段（rebase + ff + 全局回写 + 主工作区
+ * 同步；冲突 → blocked + ISSUES）。合并阶段待 TASK-038 抽取为共享 Finalize 用例。
  *
- * 状态权威在 main 仓库 frontmatter（TaskDocRepository 读写）；执行产物在 worktree（Executor 写、
- * 合并经 rebase+ff 回收进 main）。任务 status 流转写回 main 工作区文件（§3.2 全局状态由 Orchestrator 维护）。
+ * 状态权威在 main 仓库 frontmatter（TaskDocRepository 读写）；执行产物在 worktree（Executor
+ * 写、合并经 rebase+ff 回收进 main）。reviewing 不合并；done（no_review 校验通过）才合并。
  */
 export async function runTask(
   taskId: TaskId,
@@ -185,117 +170,65 @@ export async function runTask(
     throw new Error(`任务目录不存在: ${tasksDir}（请先在项目根运行 caw init）`)
   }
 
-  // main 仓库文档仓储：任务状态权威（ready→running→reviewing/done 流转写回这里）。
-  const mainRepo = new TaskDocRepository(tasksDir)
-  const task = mainRepo.readTask(taskId)
-
-  // 1. 状态前置：必须 ready 才能运行（draft 需先经 plan/task:create 置 ready）。
-  if (task.status !== 'ready') {
-    throw new Error(
-      `任务 ${taskId} 当前状态为 ${task.status}，应为 ready 才能运行（先置 ready 后再执行）`,
-    )
-  }
-
-  // 2. 依赖前置检查：全部依赖必须 done（任务 §8「依赖未完成 → 拒绝运行」）。
-  const allTasks = readAllTasks(mainRepo)
-  checkDependenciesDone(taskId, task.depends_on, allTasks)
-
-  // 3. 刷新 context_pack.source_files（§11：依赖完成后用其实际产物替换预填）并回写 frontmatter。
-  const dependencyResults = readDependencyResults(mainRepo, task.depends_on)
-  const refreshedSourceFiles = refreshSourceFiles(task, dependencyResults)
-  const refreshedTask: TaskFrontmatter = {
-    ...task,
-    context_pack: { ...task.context_pack, source_files: refreshedSourceFiles },
-  }
-  mainRepo.writeTask(refreshedTask)
-  const contextPack = computeContextPack(refreshedTask, { dependencyResults })
-
-  // 4. 权限边界（路径重叠拒绝启动在 create worktree 之前，避免建了 worktree 再拒绝）。
   const testingCommands =
     options.testingCommands ?? parseTestingCommands(readOptional(join(projectRoot, 'docs', 'TESTING.md')))
-  const boundary = buildPermissionBoundary(task, testingCommands)
 
-  // 5. ready → running（confirmed 不需要：ready→running 无 confirmed 闸门，§7）。
-  const orchestrator = new StateOrchestrator(mainRepo)
-  orchestrator.transition(taskId, 'running', {
-    no_review: task.no_review,
-    confirmed: false,
-  })
-
-  // 6. worktree 创建（独立工作区 + 分支 task/TASK-XXX，§3.2）。
-  const worktreePort = new WorktreeAdapter(projectRoot, worktreesDir)
-  const wtPath = worktreePort.create(mainRef, taskId)
-
-  // 7. R7：恢复 worktree 内 node_modules。
+  // 装配 ExecuteTaskPorts（composition root：infrastructure 实现 wiring 注入 application 用例）。
+  // main 仓储 = 任务状态权威；worktree 仓储（openWorktreeRepo）专读 Executor 产出的 .result.md
+  // （§12 主/worktree 显式区分，不用路径判断隐式路由）；prepareWorktree 绑定 projectRoot 适配 R7。
+  const taskRepo = new TaskDocRepository(tasksDir)
   const restorer = options.nodeModulesRestorer ?? restoreNodeModules
-  restorer(wtPath, projectRoot, task.permissions)
-
-  // 8. 组装 §18 启动提示并在 worktree 内执行（Executor 产出 .result.md）。
-  const resultFileRel = task.workflow_outputs.result_file
-  const resultFileAbs = join(wtPath, resultFileRel)
-  const startupPrompt = buildStartupPrompt({
-    taskId,
-    taskFile: taskFileFromResult(resultFileRel),
-    resultFile: resultFileRel,
-  })
-  await executor.execute({
-    task_id: taskId,
-    worktree_path: wtPath,
-    result_file: resultFileAbs,
-    context_pack: contextPack,
-    permission_boundary: boundary,
-    startup_prompt: startupPrompt,
+  const useCase = new ExecuteTaskUseCase({
+    taskRepo,
+    worktree: new WorktreeAdapter(projectRoot, worktreesDir),
+    executor,
+    openWorktreeRepo: (wtPath) => new TaskDocRepository(join(wtPath, 'docs', 'tasks')),
+    prepareWorktree: (wtPath, permissions) => restorer(wtPath, projectRoot, permissions),
   })
 
-  // 9. 读 .result.md（worktree 内 —— 产物尚未合并入 main；applyResult 接收 result 作参数）。
-  const worktreeRepo = new TaskDocRepository(join(wtPath, 'docs', 'tasks'))
-  const result = worktreeRepo.readResult(taskId)
+  // 执行阶段（领域编排全部在用例内）→ 结构化结果（finalStatus / worktreePath / task / result）。
+  const executed = await useCase.execute({ taskId, mainRef, testingCommands })
 
-  // 10. 状态流转：把 result 映射为目标状态（no_review + completed + review 时校验产物三分，§7/§10）。
-  // orchestratorVerified 镜像 StateOrchestrator.isResultAcceptable（验证结果无 failed）：
-  // 免审任务由 Orchestrator（本命令）校验产物，通过→done / 未通过→blocked。
-  const orchestratorVerified = isProductAcceptable(result)
-  orchestrator.applyResult(taskId, result, { orchestratorVerified })
-
-  // 11. done（免审校验通过）才合并回收；reviewing 不合并；冲突 / 失败不在此分支合并。
+  // 合并阶段（done 路径）—— composition root 承接，待 TASK-038 抽取共享 Finalize 用例。
+  // reviewing 不合并；冲突 / 失败不在此分支合并。
   let merged = false
   let conflicts: string[] = []
-  const statusAfterResult = mainRepo.readTask(taskId).status
-  if (statusAfterResult === 'done') {
+  if (executed.finalStatus === 'done') {
     const mergeOutcome = rebaseAndFastForwardMerge({
       git: options.gitMergePort ?? new GitMergeAdapter(projectRoot, worktreesDir),
-      wtPath,
-      task: refreshedTask,
+      wtPath: executed.worktreePath,
+      task: executed.task,
       mainRef,
     })
     if (mergeOutcome.merged) {
       // 合并成功 → 全局文档 section 回写（§3.2 串行回写 global_update_requests）。
       const writebackRequest: WritebackRequest = {
         task_id: taskId,
-        updates: result.global_update_requests,
+        updates: executed.result.global_update_requests,
       }
       writebackGlobalDocs(globalRepo, [writebackRequest], { idAllocator })
       // fastForwardMain 用 update-ref 移动 ref、不检出工作区；把已进 main 历史的结果文件
       // 同步到主工作区（仅该文件，不动任务 status 工作区写回）。
-      syncMainWorktreeFile(projectRoot, mainRef, resultFileRel)
+      syncMainWorktreeFile(projectRoot, mainRef, executed.task.workflow_outputs.result_file)
       merged = true
     } else {
       conflicts = [...mergeOutcome.conflicts]
       // 合并冲突：done → blocked（Orchestrator 确认）+ 落 ISSUES（§3.2/§8 不静默）。
+      const orchestrator = new StateOrchestrator(taskRepo)
       orchestrator.transition(taskId, 'blocked', {
-        no_review: task.no_review,
+        no_review: executed.task.no_review,
         confirmed: true,
       })
       appendMergeConflictIssue(globalRepo, idAllocator, taskId, conflicts)
     }
   }
 
-  const finalStatus = mainRepo.readTask(taskId).status
+  const finalStatus = taskRepo.readTask(taskId).status
   return {
     taskId,
     finalStatus,
-    executor: executor.name,
-    worktreePath: wtPath,
+    executor: executed.executor,
+    worktreePath: executed.worktreePath,
     merged,
     conflicts,
   }
@@ -338,109 +271,6 @@ function rebaseAndFastForwardMerge(input: MergeInput): {
   }
   if (own.ok) return { merged: true, conflicts: [] }
   return { merged: false, conflicts: own.conflicts }
-}
-
-/* ============================================================ *
- * 权限边界组装（§16）
- * ============================================================ */
-
-/**
- * 组装 Executor 权限边界（§16）。
- *
- * resolvePathScope 检测 allowed/forbidden 重叠（deny 优先拒绝启动，不静默取并集）；
- * computeVerificationAllowlist 按 layer 裁剪项目级命令 + 任务级并集，产出验证 allowlist。
- */
-function buildPermissionBoundary(
-  task: TaskFrontmatter,
-  testingCommands: readonly TestingCommand[],
-): ExecutorPermissionBoundary {
-  const scope = resolvePathScope(task.allowed_paths, task.forbidden_paths)
-  if (!scope.ok) {
-    const overlapText = scope.overlaps
-      .map((o) => `${o.allowed} ⋂ ${o.forbidden}`)
-      .join('; ')
-    throw new Error(
-      `任务 ${task.id} 启动前权限检测失败：${scope.reason}（重叠: ${overlapText}）`,
-    )
-  }
-  const verificationCommands = computeVerificationAllowlist({
-    taskLayer: task.layer,
-    testingCommands,
-    taskVerification: task.verification,
-  })
-  return {
-    allowed_paths: task.allowed_paths,
-    forbidden_paths: task.forbidden_paths,
-    permissions: task.permissions,
-    verification_commands: verificationCommands,
-  }
-}
-
-/* ============================================================ *
- * 依赖前置检查与产物读取
- * ============================================================ */
-
-/** 读取全部任务 frontmatter，按 id 索引（供依赖状态检查）。 */
-function readAllTasks(repo: TaskDocRepository): Map<TaskId, TaskFrontmatter> {
-  const map = new Map<TaskId, TaskFrontmatter>()
-  for (const id of repo.listTasks()) {
-    map.set(id, repo.readTask(id))
-  }
-  return map
-}
-
-/**
- * 检查全部依赖是否 done（任务 §8：依赖未完成 → 拒绝运行并提示）。
- *
- * 依赖不在任务集合内（无法确认完成）或状态非 done 均视为未完成，抛错不静默。
- */
-function checkDependenciesDone(
-  taskId: TaskId,
-  dependsOn: readonly TaskId[],
-  allTasks: Map<TaskId, TaskFrontmatter>,
-): void {
-  if (dependsOn.length === 0) return
-  const pending: string[] = []
-  for (const dep of dependsOn) {
-    const depTask = allTasks.get(dep)
-    if (depTask === undefined) {
-      pending.push(`${dep}（不在任务集合内，无法确认完成）`)
-    } else if (depTask.status !== 'done') {
-      pending.push(`${dep}（当前 ${depTask.status}）`)
-    }
-  }
-  if (pending.length > 0) {
-    throw new Error(
-      `任务 ${taskId} 的前置依赖未全部完成，拒绝运行（§8）：${pending.join('; ')}`,
-    )
-  }
-}
-
-/**
- * 读取各依赖 .result.md 的产物清单（modified_files ∪ created_files）。
- *
- * 调用前依赖已确认 done（checkDependenciesDone）；done 依赖无 .result.md（异常但非致命）
- * 按空产物计入，使 refreshSourceFiles 仍能刷新（all-or-nothing：全部依赖在 map 内即刷新）。
- */
-function readDependencyResults(
-  repo: TaskDocRepository,
-  dependsOn: readonly TaskId[],
-): ReadonlyMap<TaskId, DependencyResultSummary> {
-  const map = new Map<TaskId, DependencyResultSummary>()
-  for (const dep of dependsOn) {
-    let modified_files: string[] = []
-    let created_files: string[] = []
-    try {
-      const r = repo.readResult(dep)
-      modified_files = [...r.modified_files]
-      created_files = [...r.created_files]
-    } catch (err) {
-      // 依赖 done 但 .result.md 缺失：按空产物计入；其余错误（损坏）冒泡。
-      if (!isDocMissing(err)) throw err
-    }
-    map.set(dep, { task_id: dep, modified_files, created_files })
-  }
-  return map
 }
 
 /* ============================================================ *
@@ -572,22 +402,6 @@ function syncMainWorktreeFile(mainRepoDir: string, mainRef: string, resultFileRe
  * 纯辅助函数
  * ============================================================ */
 
-/**
- * no_review 任务的「产物齐全」校验（§7 / §15）。
- *
- * 镜像 StateOrchestrator.isResultAcceptable（私有）：.result.md 可读（readResult 不抛即结构合法）+
- * 验证结果无失败项（verification 无 result === 'failed'）。通过 → 免审直 done，未通过 → blocked。
- */
-function isProductAcceptable(result: ResultFrontmatter): boolean {
-  return result.verification.every((v) => v.result !== 'failed')
-}
-
-/** 从 workflow_outputs.result_file 派生任务文件路径（去 .result.md 加 .md，§9 共用 slug）。 */
-function taskFileFromResult(resultFile: string): string {
-  if (!resultFile.endsWith(RESULT_SUFFIX)) return resultFile
-  return resultFile.slice(0, resultFile.length - RESULT_SUFFIX.length) + '.md'
-}
-
 /** 从既有条目数组收集非空 id 集合（id 分配去重基线，镜像 section-writeback.collectExistingIds）。 */
 function collectExistingIds(entries: ReadonlyArray<{ id: string }>): Set<string> {
   const set = new Set<string>()
@@ -617,11 +431,6 @@ export function sequentialIdAllocator(): IdAllocator {
 /** 读取文件内容；不存在返回空串（readDecisions / readIssues 对无 fenced yaml 返回空数组）。 */
 function readOptional(filePath: string): string {
   return existsSync(filePath) ? readFileSync(filePath, 'utf8') : ''
-}
-
-/** 判定错误是否为「文档不存在」（TaskDocRepository 抛错的稳定前缀，DEC-008）。 */
-function isDocMissing(err: unknown): boolean {
-  return err instanceof Error && err.message.startsWith('文档不存在')
 }
 
 /**
