@@ -25,6 +25,7 @@ agent/
       index.ts
     application/                # 编排用例，不依赖具体基础设施实现
       ports.ts                  # application→infra 窄接口
+      execution/                # 执行 / 审查 Ports（TaskExecutorPort / TaskReviewerPort，TASK-036）
       planning-workflow.ts
       context-pack-generator.ts
       scheduler.ts
@@ -52,12 +53,16 @@ agent/
 ```text
 cli → application → core ← infrastructure
 infrastructure → core
+infrastructure → application（仅 execution ports 抽象，依赖倒置，TASK-036）
 core 不反向依赖任何层
 ```
 
 - `core`：领域模型、Schema、状态机、规则，零反向依赖，可被纯单元测试验证。
 - `application`：编排用例流程，**不直接依赖 infrastructure 实现类**。
-- `infrastructure`：外部系统适配（fs / sqlite / git / sdk / mcp），不承载业务规则。
+- `infrastructure`：外部系统适配（fs / sqlite / git / sdk / mcp），不承载业务规则；其 SDK adapter
+  （claude-sdk-adapter / claude-sdk-reviewer）import `application/execution/ports.ts` 的执行 / 审查
+  契约类型作为方法签名——这是依赖倒置（adapter 依赖 application 的 port 抽象），不构成 application
+  → infrastructure 的反向依赖。
 - `cli`：交互入口与 composition root，负责把 infrastructure 实现注入 application。
 
 ## 4. application / infrastructure 依赖倒置约定（ports）
@@ -68,9 +73,12 @@ core 不反向依赖任何层
   - `WorktreePort` — Git worktree 创建与回收。
   - `GitMergePort` — rebase / 回填 `execution_commits` / fast-forward 合并原语。
 - `infrastructure` 提供具体实现类，由 `cli` 在 composition root 处 wiring 注入。
-- 借助 TypeScript 结构类型兼容，`infrastructure` 实现类**无需显式 `implements`**。
+- 借助 TypeScript 结构类型兼容，`infrastructure` 实现类**无需显式 `implements`**（多数仓储适配器经
+  纯结构匹配 Port）；执行 / 审查的 SDK adapter 则显式 `implements` 对应 Port，作为编译期证明（TASK-036）。
 - `application` **不得直接 import `infrastructure` 实现类**。
-- `infrastructure/sdk/executor-contract.ts` 仅被 `cli`（task:run / task:review）依赖、不经 `application`，不构成反向依赖。
+- 执行 / 审查契约（`TaskExecutorPort` / `TaskReviewerPort` + 输入输出 + §18 启动提示 + `ExecutorError`）
+  自 TASK-036 起收敛在 `application/execution/ports.ts`（单一来源）；旧 `infrastructure/sdk/executor-contract.ts`
+  已删除，CLI 的 `Reviewer` 契约已迁入 application，infrastructure 不再维护结构对齐的重复类型。
 
 ## 5. layer 与物理分层的关系
 

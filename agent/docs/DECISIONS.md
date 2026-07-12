@@ -736,3 +736,21 @@ consequences: |-
 ```
 
 提议自 `TASK-035-cli-task-review-wiring.result.md`。task-review.ts 落地 assembleReviewer composition root（reviewerKind 三态，auto key 缺失回退 LocalReviewer 不报错——与 task:run 关键差异）+ CI 真实 API 契约（describe.skipIf 有 key 跑/无 key skip 标注）；复用 task-run.ts createObservability（import 非修改，延续 task-review.ts TASK-027 先例 + AGENTS §3 DRY）。v0.2.0 SDK 接入收尾。待 Orchestrator 确认。
+
+## DEC-038 执行/审查契约收敛到 application/execution/ports.ts + 依赖倒置（infrastructure SDK adapter import application ports 类型）
+
+```yaml
+id: DEC-038
+title: "执行/审查契约收敛到 application/execution/ports.ts + 依赖倒置（infrastructure SDK adapter import application ports 类型）"
+status: accepted
+scope: src/application/execution/ports.ts + src/infrastructure/sdk/{claude-sdk-adapter,claude-sdk-reviewer}.ts + src/cli/commands/{task-run,task-review}.ts + docs/ARCHITECTURE.md
+created_from_task: TASK-036
+decision: |-
+  把 TaskExecutor 契约（原 infrastructure/sdk/executor-contract.ts）与 TaskReviewer 契约（原 cli/commands/task-review.ts 的 Reviewer/ReviewInput/ReviewOutcome）统一收敛到 src/application/execution/ports.ts，命名为 TaskExecutorPort / TaskReviewerPort（对齐既有 TaskDocRepositoryPort 等 port 命名 + SPEC §20.3）。共享输入输出类型（ExecuteInput / ExecuteOutcome / ReviewInput / ReviewOutcome / ExecutorPermissionBoundary）、§18 启动提示（StartupPromptArgs / buildStartupPrompt / STARTUP_PROMPT_TEMPLATE）与 ExecutorError 一同迁入，作为执行契约的单一来源。infrastructure 的 SDK adapter（claude-sdk-adapter.ts / claude-sdk-reviewer.ts）import 这些共享类型作为方法签名，并经 implements TaskExecutorPort / implements TaskReviewerPort 在编译期证明结构满足 Port。删除 executor-contract.ts（不留转发层）与 reviewer 的重复结构类型（SdkReviewInput / SdkReviewOutcome）。这首次引入 infrastructure → application 依赖（仅限 ports 抽象），是依赖倒置（DIP）：adapter 依赖 application 的 port 抽象，不构成 application → infrastructure 反向依赖。ARCHITECTURE.md §3/§4 已同步更新（§3 增 infra→application ports 边、§4 末条改述契约新位置）。
+rationale: |-
+  收敛前契约分散三处：Executor 契约在 infrastructure（executor-contract.ts）、Reviewer 契约在 CLI（task-review.ts）、SDK Reviewer 另维护一套结构对齐类型（SdkReviewInput/SdkReviewOutcome「碰巧兼容」ReviewInput/ReviewOutcome）。串行 Orchestrator（application 层，TASK-044）若复用这些类型，要么 application 反向依赖 infrastructure（违反分层），要么把业务循环堆在 CLI。收敛到 application execution/ports 后：application 用例直接消费 Port 类型（TASK-037/038 起复用），CLI 与 SDK adapter 各自从 application 取契约、不再互相依赖，重复类型消除（任务 §8「禁止复制结构类型维持碰巧兼容」）。infrastructure → application 仅限 ports 抽象是标准 DIP（adapter 依赖其实现的 Port 抽象），与既有「application 不得 import infrastructure 实现类」不冲突。命名 Port 对齐既有 port 惯例 + SPEC §20.3 明确要求。TaskId = string（core/enums.ts），故 ReviewInput（task_id: TaskId）与原 SdkReviewInput（task_id: string）结构完全等价，迁移零行为变更（既有测试全绿佐证）。status 置 accepted：契约迁移已实际落地、task §8 明确要求、无争议。
+consequences: |-
+  正面：契约单一来源，消除重复类型；application 用例（TASK-037/038/044）可直接经 Port 编排执行/审查，不必反向依赖 infra；SDK 实现满足 Port 经 implements 编译期证明（test/application/execution/ports.test.ts 断言）。负面/约束：infrastructure 首次依赖 application（仅 ports），ARCHITECTURE §3 分层图须体现（已更新）；ports.ts 当前合并接口 + buildStartupPrompt + ExecutorError（与既有 application/ports.ts 纯接口风格略异，但作为「执行契约模块」整体合理，后续若膨胀可拆分）。既有 ARCHITECTURE §4「infra 实现类无需 implements」表述被细化（多数仓储仍纯结构匹配，执行/审查 SDK adapter 改为显式 implements 作编译期证明）。SPEC §20.1 分层图（cli → application → core ← infrastructure）未显式画 infra→application ports 边，与 ARCHITECTURE §3 精细化后存在轻微表述张力（SPEC 在 TASK-036 forbidden_paths 不可改，后续 TASK-049 接入 orchestrate 时可酌情回写）。关联 DEC-034（ClaudeSdkReviewer 设计，本任务改 implements TaskReviewerPort）/ DEC-033（ClaudeSdkInvocationImpl，经 ClaudeSdkExecutor implements TaskExecutorPort）。
+```
+
+落地自 `TASK-036-app-execution-review-ports.result.md`。把 Executor/Reviewer 契约从 infrastructure + CLI 收敛到 application/execution/ports.ts 单一来源（TaskExecutorPort / TaskReviewerPort），删除 executor-contract.ts 与 reviewer 重复结构类型，首次引入 infrastructure → application（仅 ports）依赖倒置；ARCHITECTURE §3/§4 同步。已实际落地、task §8 明确要求、零行为变更（既有测试全绿），置 accepted。
