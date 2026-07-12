@@ -25,7 +25,7 @@ agent/
       index.ts
     application/                # 编排用例，不依赖具体基础设施实现
       ports.ts                  # application→infra 窄接口
-      execution/                # Ports（TaskExecutorPort / TaskReviewerPort，TASK-036）+ execute-task.ts（TASK-037）/ review-task.ts + finalize-task.ts（TASK-038）单任务执行 / 审查 / 共享完成用例
+      execution/                # Ports（TaskExecutorPort / TaskReviewerPort / VerificationRunnerPort，TASK-036/039）+ execute-task.ts（TASK-037）/ review-task.ts + finalize-task.ts（TASK-038）/ verify-task.ts（TASK-039）单任务执行 / 审查 / 共享完成 / 系统验证用例
       planning-workflow.ts
       context-pack-generator.ts
       scheduler.ts
@@ -76,9 +76,10 @@ core 不反向依赖任何层
 - 借助 TypeScript 结构类型兼容，`infrastructure` 实现类**无需显式 `implements`**（多数仓储适配器经
   纯结构匹配 Port）；执行 / 审查的 SDK adapter 则显式 `implements` 对应 Port，作为编译期证明（TASK-036）。
 - `application` **不得直接 import `infrastructure` 实现类**。
-- 执行 / 审查契约（`TaskExecutorPort` / `TaskReviewerPort` + 输入输出 + §18 启动提示 + `ExecutorError`）
-  自 TASK-036 起收敛在 `application/execution/ports.ts`（单一来源）；旧 `infrastructure/sdk/executor-contract.ts`
-  已删除，CLI 的 `Reviewer` 契约已迁入 application，infrastructure 不再维护结构对齐的重复类型。
+- 执行 / 审查 / 验证契约（`TaskExecutorPort` / `TaskReviewerPort` / `VerificationRunnerPort` + 输入输出
+  + §18 启动提示 + `ExecutorError`）自 TASK-036 / TASK-039 起收敛在 `application/execution/ports.ts`（单一来源）；
+  旧 `infrastructure/sdk/executor-contract.ts` 已删除，CLI 的 `Reviewer` 契约已迁入 application，infrastructure
+  不再维护结构对齐的重复类型。
 - 单任务执行用例 `ExecuteTaskUseCase` 自 TASK-037 起位于 `application/execution/execute-task.ts`：把
   `task:run` 的执行阶段领域编排（依赖检查 / Context Pack / 权限边界 / 状态映射）收敛为 application 用例，
   经 Ports（`TaskDocRepositoryPort` / `WorktreePort` / `TaskExecutorPort` + `openWorktreeRepo` / `prepareWorktree`）
@@ -91,6 +92,12 @@ core 不反向依赖任何层
   （`TaskDocRepositoryPort` / `TaskReviewerPort` / `GitMergePort` / `GlobalDocRepositoryPort` + `openWorktreeRepo` /
   `syncMainFile` 注入）注入依赖，零 infra import；Review 与 Finalize 是两个职责独立的用例，由 CLI / Orchestrator
   在 done 路径串联，不在 Review 内部调 Finalize。
+- 单任务系统验证用例 `VerifyTaskUseCase` 自 TASK-039 起位于 `application/execution/verify-task.ts`：把
+  Executor 完成后的系统验证阶段（allowlist 计算 → requires_permissions 校验 → 串行 Runner → 系统记录覆盖
+  模型自报 → 完成门禁，FR-011 / FR-012）收敛为 application 用例，经 Ports（`VerificationRunnerPort`）注入依赖，
+  零 infra import；只定义契约不实现子进程（真实 Runner 由 TASK-040 落地）。系统验证四元组（source / exit_code /
+  duration_ms / output_summary）按 DEC-041 在 `ResultVerification` 上为 optional——模型自报与历史夹具可缺省，
+  系统验证路径显式写全；完成门禁按 DEC-042 只认 allowlist 命令的系统记录 `result === 'passed'`。
 
 ## 5. layer 与物理分层的关系
 

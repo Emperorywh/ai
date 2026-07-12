@@ -790,3 +790,39 @@ consequences: |-
 ```
 
 落地自 `TASK-038-app-review-finalize-use-cases.result.md`。把 task:review 的审查编排抽取到 application/execution/review-task.ts 的 ReviewTaskUseCase，把两 CLI 重复的 done 路径合并回收抽取到 application/execution/finalize-task.ts 的 FinalizeTaskUseCase（SPEC §20.4，经 Ports 注入、零 infra import）；CLI 降为 composition root（装配 Ports + 串联 execute/review → finalize）。零行为变更（task:run 23 + task-review 13 测试全绿），置 accepted。
+
+## DEC-041 ResultVerification 系统验证四元组采用 optional 兼容模型自报与历史夹具
+
+```yaml
+id: DEC-041
+title: "ResultVerification 系统验证四元组采用 optional 兼容模型自报与历史夹具"
+status: proposed
+scope: src/core/schemas/result-schema.ts
+created_from_task: TASK-039
+decision: |-
+  ResultVerification 新增 source / exit_code / duration_ms / output_summary 四元组为 optional（z.infer 上字段可选）。系统验证路径（VerifyTaskUseCase / SDK 真实执行）显式写全四元组，并由专项测试覆盖；optional 仅服务于模型自报（模型无法知道真实退出码）与历史测试夹具（大量 { command, result, notes } 字面量不在各任务可改范围）。
+rationale: |-
+  任务 §12 字面反对「宽泛 optional 隐藏缺失字段」，但本任务 allowed_paths 仅列 8 个测试文件，而 execute-task.test.ts / review-task.test.ts / finalize-task.test.ts / claude-sdk-reviewer.test.ts / status-rebuild.test.ts / task-doc-repo.test.ts / index-repo.test.ts 等均构造 { command, result, notes } 字面量且不在本任务可改范围。若四元组在 z.infer 上必填（default / nullable 均使 output 类型必有），这些不可改测试文件会编译失败、typecheck 红线。optional 是 allowed_paths 约束下的唯一兼容方式。未使用 as unknown 或 default 隐藏缺失字段——四元组在 z.infer 上为可选（field?: T），系统验证路径显式写全 + 测试覆盖。
+consequences: |-
+  旧三字段字面量仍合法（模型产出 JSON 与历史夹具零迁移）；系统验证记录的完整性由 VerifyTaskUseCase 构造时显式写全 + verify-task.test.ts / result-schema.test.ts 专项覆盖保证，不依赖 optional 兜底。模型自报记录经 normalizeModelVerification（invocation-impl）统一标 source='model'，系统记录标 source='system'，overlay 后同名系统记录覆盖模型记录。后续若历史夹具全部迁移完毕，可考虑收紧为必填（独立任务）。关联 DEC-042（门禁只认系统记录 passed）/ FR-011（系统验证）/ FR-012（验证失败）。
+```
+
+落地自 `TASK-039-core-system-verification-contract.result.md`。ResultVerification 扩展 source / exit_code / duration_ms / output_summary 四元组为 optional（DEC-041）：allowed_paths 仅 8 个测试文件，大量构造 { command, result, notes } 字面量的测试不在可改范围，必填会致 typecheck 红线；optional 兼容模型自报（无法知道真实退出码）与历史夹具，系统验证路径（VerifyTaskUseCase / SDK）显式写全四元组 + 专项测试覆盖，不靠 optional 兜底。置 proposed（§12 张力权衡，待 Orchestrator 确认是否后续收紧为必填）。
+
+## DEC-042 完成门禁只认 allowlist 命令的系统记录 result===passed
+
+```yaml
+id: DEC-042
+title: "完成门禁只认 allowlist 命令的系统记录 result===passed"
+status: accepted
+scope: src/core/rules/verification-rules.ts + src/application/execution/verify-task.ts
+created_from_task: TASK-039
+decision: |-
+  isVerificationGatePassed（core/rules/verification-rules.ts）的完成门禁：allowlist 每条命令在系统记录中必须 result === 'passed'；任意 failed / skipped / 未执行（无系统记录）均返回 ok:false。门禁只看系统记录（source='system'），模型自报的 passed 不参与门禁。
+rationale: |-
+  FR-012「任一必需验证失败时不得合并」+ §11 验收「未执行命令不能伪装 passed」「no_review 接受规则不再把任意 skipped 当作通过」。旧 isProductAcceptable（execute-task / state-orchestrator）把 skipped 当通过（verification.every(v => v.result !== 'failed')），不足以支撑无人值守门禁；新门禁保守地只接受 passed，skipped 的合法/非法区分留给后续精细化（当前 skipped 在权限缺失/超时映射路径出现，本就应 blocked）。
+consequences: |-
+  VerifyTaskUseCase 门禁不通过即 blocked + needs-human + 提议 ISSUES 项；no_review 任务必须有全部必需验证系统记录 passed 才进 done。旧 isProductAcceptable 保持不变（处理模型自报的 CLI 旧路径），新门禁由系统验证用例承担，串行 Orchestrator 接入后生效。关联 DEC-041（四元组 optional 兼容）/ FR-012（验证失败）/ §11 验收。
+```
+
+落地自 `TASK-039-core-system-verification-contract.result.md`。isVerificationGatePassed 完成门禁只认 allowlist 命令的系统记录 result === 'passed'（DEC-042）：任意 failed / skipped / 未执行 → blocked，模型自报 passed 不算数（FR-012 + §11 验收）。置 accepted（§11 验收明确要求、无争议）。
