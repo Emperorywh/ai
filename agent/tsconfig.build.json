@@ -1,0 +1,13 @@
+{
+  /*
+   * 生产构建只编译 src，避免把测试产物发布到 dist。
+   * 类型检查仍使用主 tsconfig，同时覆盖 src 与 test。
+   */
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["test", "node_modules", "dist"]
+}

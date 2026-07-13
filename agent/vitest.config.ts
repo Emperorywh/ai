@@ -3,12 +3,7 @@ import { defineConfig } from 'vitest/config'
 /**
  * Vitest 配置。
  *
- * passWithNoTests: true —— 脚手架阶段尚无测试用例时，
- * 保证 `npm test` 退出码为 0，与 TASK-001 验收标准一致。
- * 后续任务接入真实测试后该选项仍然无害（有用例时正常跑）。
+ * MVP 已有核心回归用例，因此不允许“没有测试”被视为成功。
+ * 使用 Vitest 默认失败语义，避免 CI 在测试意外丢失时静默通过。
  */
-export default defineConfig({
-  test: {
-    passWithNoTests: true,
-  },
-})
+export default defineConfig({})
