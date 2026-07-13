@@ -132,9 +132,14 @@ export class ClaudeCodeAgent implements CodingAgentPort {
       abortController,
       settingSources: ['user', 'project', 'local'],
       includePartialMessages: false,
+      /**
+       * 访谈与规划只消费调用方显式提供的文本，不需要访问项目工具。
+       * `tools: []` 才会关闭内置工具；结构化输出失败由 SDK 自身的有限重试负责，
+       * 因此这里不再用单轮上限截断正常的输出校验流程。
+       */
       ...(input.execution
         ? { permissionMode: 'bypassPermissions', allowDangerouslySkipPermissions: true }
-        : { permissionMode: 'dontAsk', allowedTools: [], maxTurns: 1 }),
+        : { permissionMode: 'dontAsk', tools: [] }),
     }
 
     let result: SDKResultMessage | null = null

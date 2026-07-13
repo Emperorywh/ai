@@ -2,10 +2,12 @@ import { createInterface } from 'node:readline/promises'
 import { Command } from 'commander'
 import { GenerateSpecificationUseCase } from '../../application/index.js'
 import { createRuntime } from '../composition.js'
+import { ReadlineInterviewIO } from '../readline-interview-io.js'
 
 /**
  * 访谈命令负责终端问答，深度和完成判断交给 Claude。
- * 用户可直接自然语言回答，每轮答案都会显式进入下一轮访谈上下文。
+ * 用户可输入或粘贴多行自然语言、代码和列表，显式命令统一提交本轮回答。
+ * 聚合后的完整答案会显式进入下一轮访谈上下文，不依赖终端隐藏状态。
  */
 export function registerInterviewCommand(program: Command): void {
   program
@@ -15,12 +17,8 @@ export function registerInterviewCommand(program: Command): void {
     .action(async (requirementParts: string[]) => {
       const runtime = createRuntime(process.cwd())
       const readline = createInterface({ input: process.stdin, output: process.stdout })
-      const useCase = new GenerateSpecificationUseCase(runtime.agent, runtime.repository, {
-        ask: async (question) => {
-          console.log(`\nClaude：${question}`)
-          return readline.question('你：')
-        },
-      })
+      const interviewIO = new ReadlineInterviewIO(readline)
+      const useCase = new GenerateSpecificationUseCase(runtime.agent, runtime.repository, interviewIO)
 
       try {
         console.log('正在分析初始需求并开始访谈……')
