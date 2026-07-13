@@ -1,26 +1,23 @@
 import { Command, CommanderError } from 'commander'
 import { registerInitCommand } from './commands/init.js'
-import { registerInterviewCommand } from './commands/interview.js'
-import { registerPlanCommand } from './commands/plan.js'
 import { registerRunCommand } from './commands/run.js'
 import { registerStatusCommand } from './commands/status.js'
 
 /**
- * CLI 只暴露 MVP 五个动作，命令名称直接对应产品主流程。
+ * CLI 只暴露初始化、任务执行和状态查询三个运行时动作。
+ * 规格访谈与任务拆分由初始化生成的提示词交给外部 AI 工具完成。
  * 所有业务异常在这里统一转换为简洁的非零退出码。
  */
 export function createProgram(): Command {
   const program = new Command()
   program
     .name('caw')
-    .description('规格访谈驱动的 Claude Code 任务执行器')
+    .description('标准文档驱动的 Claude Code 任务执行器')
     .version('0.1.0')
     .exitOverride((error: CommanderError) => {
       throw error
     })
   registerInitCommand(program)
-  registerInterviewCommand(program)
-  registerPlanCommand(program)
   registerRunCommand(program)
   registerStatusCommand(program)
   return program

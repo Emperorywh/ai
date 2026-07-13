@@ -1,23 +1,14 @@
 import type {
-  InterviewReply,
-  TaskDraft,
   TaskExecutionReport,
   TaskRecord,
   TaskStatus,
 } from '../core/workflow.js'
 
-export interface InterviewMessage {
-  readonly role: 'user' | 'assistant'
-  readonly content: string
-}
-
 /**
- * AI 能力按产品动作表达，而不是暴露底层 SDK 会话细节。
- * 应用层因此可以独立测试，基础设施层也可以替换具体模型实现。
+ * 应用层只依赖“执行一个任务”的产品能力，不感知 Claude SDK 会话细节。
+ * 规格与任务由外部 AI 工具按提示词生成，不再进入运行时 Agent 端口。
  */
-export interface CodingAgentPort {
-  interview(initialRequirement: string, transcript: readonly InterviewMessage[]): Promise<InterviewReply>
-  createTaskPlan(specification: string): Promise<readonly TaskDraft[]>
+export interface TaskExecutionAgentPort {
   executeTask(input: {
     readonly specification: string
     readonly progress: string
@@ -26,24 +17,13 @@ export interface CodingAgentPort {
 }
 
 /**
- * Markdown 文档是工作流的唯一事实来源。
- * 仓储接口只暴露三个核心文档概念：规格、任务和进度。
+ * 任务执行用例只依赖运行阶段真正需要的文件能力。
+ * 初始化提示词属于 CLI 基础设施职责，不进入应用层仓储端口。
  */
-export interface WorkflowRepositoryPort {
-  initialize(): { readonly created: readonly string[]; readonly skipped: readonly string[] }
+export interface TaskWorkflowRepositoryPort {
   readSpecification(): string
-  writeSpecification(specification: string): void
-  replaceTasks(tasks: readonly TaskDraft[]): readonly TaskRecord[]
   listTasks(): readonly TaskRecord[]
   updateTaskStatus(taskId: string, status: TaskStatus): void
   readProgress(): string
   writeProgress(progress: string): void
-}
-
-/**
- * 访谈输入输出属于边界交互，由 CLI 实现。
- * 用例只决定何时追问以及何时持久化最终规格。
- */
-export interface InterviewIOPort {
-  ask(question: string): Promise<string>
 }

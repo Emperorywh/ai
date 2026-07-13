@@ -1,4 +1,4 @@
-import { ClaudeCodeAgent, FileWorkflowRepository } from '../infrastructure/index.js'
+import { ClaudeCodeTaskAgent, FileWorkflowRepository } from '../infrastructure/index.js'
 
 /**
  * CLI 是唯一的 composition root，集中创建真实基础设施。
@@ -6,10 +6,10 @@ import { ClaudeCodeAgent, FileWorkflowRepository } from '../infrastructure/index
  */
 export function createRuntime(projectRoot: string, reporter?: (message: string) => void): {
   readonly repository: FileWorkflowRepository
-  readonly agent: ClaudeCodeAgent
+  readonly agent: ClaudeCodeTaskAgent
 } {
   return {
     repository: new FileWorkflowRepository(projectRoot),
-    agent: new ClaudeCodeAgent(projectRoot, reporter),
+    agent: new ClaudeCodeTaskAgent(projectRoot, reporter),
   }
 }

@@ -1,15 +1,12 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { ExecuteNextTaskUseCase, type CodingAgentPort } from '../../src/application/index.js'
-import type {
-  InterviewReply,
-  TaskDraft,
-  TaskExecutionReport,
-  TaskRecord,
-} from '../../src/core/workflow.js'
+import { ExecuteNextTaskUseCase, type TaskExecutionAgentPort } from '../../src/application/index.js'
+import type { TaskExecutionReport, TaskRecord } from '../../src/core/workflow.js'
 import { FileWorkflowRepository } from '../../src/infrastructure/file-workflow-repository.js'
+import { SPEC_PLACEHOLDER } from '../../src/infrastructure/workflow-initialization.js'
+import { writeExternalWorkflow } from '../support/workflow-fixture.js'
 
 const roots: string[] = []
 
@@ -17,7 +14,7 @@ const roots: string[] = []
  * 执行 Fake 会捕获规格、历史进度与当前任务三个上下文输入。
  * 测试据此确认独立任务会话不依赖前一个模型会话的隐藏记忆。
  */
-class ExecutionAgent implements CodingAgentPort {
+class ExecutionAgent implements TaskExecutionAgentPort {
   input: { specification: string; progress: string; task: TaskRecord } | null = null
   report: TaskExecutionReport | Error = {
     status: 'completed',
@@ -26,14 +23,6 @@ class ExecutionAgent implements CodingAgentPort {
     changedFiles: ['src/example.ts'],
     verification: ['npm test 通过'],
     blocker: '',
-  }
-
-  interview(): Promise<InterviewReply> {
-    throw new Error('本测试不访谈')
-  }
-
-  createTaskPlan(): Promise<readonly TaskDraft[]> {
-    throw new Error('本测试不规划')
   }
 
   executeTask(input: {
@@ -51,8 +40,7 @@ function createRepository(): FileWorkflowRepository {
   roots.push(root)
   const repository = new FileWorkflowRepository(root)
   repository.initialize()
-  repository.writeSpecification('# SPEC\n\n总目标')
-  repository.replaceTasks([
+  writeExternalWorkflow(root, [
     { title: '第一项', requirement: '当前需求', acceptanceCriteria: ['当前标准'] },
     { title: '第二项', requirement: '后续需求', acceptanceCriteria: ['后续标准'] },
   ])
@@ -97,5 +85,18 @@ describe('ExecuteNextTaskUseCase', () => {
 
     expect(repository.listTasks()[0]?.metadata.status).toBe('blocked')
     expect(repository.readProgress()).toContain('鉴权失败')
+  })
+
+  it('外部规格尚未生成时不进入任务运行状态', async () => {
+    const repository = createRepository()
+    writeFileSync(join(repository.projectRoot, 'docs/SPEC.md'), SPEC_PLACEHOLDER, 'utf8')
+    const agent = new ExecutionAgent()
+
+    await expect(new ExecuteNextTaskUseCase(agent, repository).execute()).rejects.toThrow(
+      '规格文档尚未生成',
+    )
+
+    expect(repository.listTasks()[0]?.metadata.status).toBe('pending')
+    expect(agent.input).toBeNull()
   })
 })

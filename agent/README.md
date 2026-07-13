@@ -1,23 +1,31 @@
-# CAW MVP
+# CAW
 
-一个只做三件事的命令行工具：深度访谈生成规格、从规格生成需求任务、用独立 Claude Code 会话顺序实现任务。
+一个标准文档驱动的 Claude Code 任务执行器。
+
+CAW 不负责需求访谈和任务规划。初始化时会生成两份可交给任意 AI 工具使用的提示词；外部 AI 负责产出规格与任务文档，CAW 只负责按顺序执行任务并维护状态。
+
+## 工作流
+
+```text
+caw init
+  → 使用规格提示词生成 docs/SPEC.md
+  → 使用任务提示词生成 docs/tasks/TASK-XXX.md
+  → caw status
+  → caw run
+  → 重复 caw run，直到全部任务完成
+```
+
+运行时只保留三个命令：
+
+- `caw init [targetDir]`：初始化事实文档和 AI 提示词；
+- `caw status`：查看任务状态；
+- `caw run`：执行第一个未完成任务。
 
 ## 运行要求
 
 - Node.js 20 或更高版本；
-- Claude Code CLI 已安装并可以运行；
-- Claude Code 已配置可用的模型提供方和访问令牌；
-- Anthropic 官方服务或 CC Switch 配置的 Anthropic 兼容服务均可作为提供方，实际兼容性取决于对应服务是否支持结构化输出和 Claude Code 工具调用。
-
-可以先检查本机环境：
-
-```powershell
-node --version
-claude --version
-claude auth status
-```
-
-`claude auth status` 只反映 Claude CLI 保存的登录状态，不能单独证明实际请求会发送到哪个模型提供方。使用 CC Switch 时，应以 Claude 用户配置中的 `ANTHROPIC_BASE_URL`、`ANTHROPIC_MODEL` 和令牌配置为准。
+- Claude Code Agent SDK 能够访问可用的模型提供方；
+- 已正确配置 Anthropic 官方服务或兼容服务所需的地址、模型和令牌。
 
 ## 安装与构建
 
@@ -25,107 +33,109 @@ claude auth status
 
 ```powershell
 npm ci
-npm run build
-```
-
-如需先验证代码质量，可以执行：
-
-```powershell
 npm run typecheck
 npm run lint
 npm test
-```
-
-## 启动方式一：注册 `caw` 命令
-
-在 CAW 项目根目录执行一次：
-
-```powershell
+npm run build
 npm link
-caw --version
 ```
 
-之后进入需要开发的目标项目：
+## 初始化目标项目
+
+进入需要开发的目标项目：
 
 ```powershell
 cd C:\path\to\target-project
-
 caw init .
-caw interview "描述你的初始需求"
-caw plan
+```
+
+初始化会创建：
+
+```text
+AGENTS.md
+docs/SPEC.md
+docs/PROGRESS.md
+docs/tasks/
+prompts/generate-specification.md
+prompts/generate-tasks.md
+```
+
+已有文件不会被覆盖。
+
+## 使用其他 AI 生成规格
+
+打开 `prompts/generate-specification.md`，在末尾补充初始需求，然后把整份提示词交给你选择的 AI 工具。
+
+提示词要求 AI 先进行逐轮需求访谈，信息充分后生成 `docs/SPEC.md` 的完整内容。具备文件访问能力的 AI 可以直接写入目标路径；否则把最终输出手动保存为 `docs/SPEC.md`。
+
+该阶段只生成产品规格，不拆任务、不设计技术架构、不修改代码。
+
+## 使用其他 AI 拆分任务
+
+把 `prompts/generate-tasks.md` 交给 AI 工具，并让它读取或同时提供完整的 `docs/SPEC.md`。
+
+AI 必须生成顺序编号的任务文件：
+
+```text
+docs/tasks/TASK-001.md
+docs/tasks/TASK-002.md
+...
+```
+
+每个任务使用统一协议：
+
+```markdown
+---
+id: TASK-001
+title: 任务标题
+status: pending
+---
+
+# TASK-001 — 任务标题
+
+## 需求
+
+描述用户可观察的需求。
+
+## 验收标准
+
+- 可验证标准
+```
+
+任务只描述需求与验收标准，不指定文件路径、技术分层或实现方案。
+
+CAW 在执行前会校验任务编号连续、文件名与 Frontmatter ID 一致、正文包含需求与至少一条验收标准。外部 AI 输出不符合协议时会直接报错，不会静默执行。
+
+## 执行任务
+
+准备好规格和任务文档后执行：
+
+```powershell
 caw status
 caw run
 ```
 
-除了 `init` 可以接收目标目录，其余命令都以当前工作目录作为目标项目根目录。因此，运行 `interview`、`plan`、`status` 和 `run` 前必须先进入目标项目。
+每次 `caw run` 只处理第一个未完成任务。重复执行，直到 `caw status` 显示全部任务为 `completed`。
 
-`interview` 中手动输入普通回答时，按一次 Enter 就会直接提交。现代终端中的多行粘贴会被识别为一个完整粘贴块，其中的换行和空白行都会保留；粘贴结束后按一次 Enter 提交，不需要再输入 `/done`。粘贴换行在编辑行中显示为 `↵n`，提交给 Claude 时会恢复为真实换行。
+每个任务都会启动新的、不可恢复的 Claude Code 会话，并显式注入：
 
-初始需求中明确提供本地文件或目录时，`interview` 会使用 `Read`、`Grep`、`Glob` 检查相关资料。访谈阶段不会开放写文件或执行命令的工具；`plan` 仍然不访问项目文件，实际代码修改只发生在 `run` 阶段。
+- `docs/SPEC.md`：总目标和完整规格；
+- `docs/PROGRESS.md`：前序任务完成的能力和重要架构事实；
+- `docs/tasks/TASK-XXX.md`：当前需求和验收标准。
 
-如果不再需要全局命令，可以解除注册：
+Claude Code 不会修改这些工作流事实文档。任务完成或阻塞后，CAW 统一更新任务状态和 `docs/PROGRESS.md`。
 
-```powershell
-npm unlink --global coding-agent-workflow
-```
+## 状态语义
 
-## 启动方式二：不注册全局命令
+- `pending`：尚未执行；
+- `running`：已经开始执行；
+- `completed`：验收标准已满足，不再执行；
+- `blocked`：本次没有可靠完成，下次 `caw run` 会重试。
 
-也可以直接运行构建后的 CLI 入口。先在 CAW 项目根目录记录入口的绝对路径：
+严格顺序执行意味着前面的阻塞任务不会被后续任务绕过。
 
-```powershell
-cd C:\path\to\coding-agent-workflow
-$env:CAW_ENTRY = (Resolve-Path .\dist\cli\index.js).Path
-```
+## 运行安全
 
-在同一个 PowerShell 会话中进入目标项目并执行：
+`caw run` 使用 Claude Code 完整工具能力，并跳过交互式权限确认。首次运行应使用一次性目录或受 Git 管理的测试项目，并确认当前目录就是预期目标项目。
 
-```powershell
-cd C:\path\to\target-project
-
-node $env:CAW_ENTRY init .
-node $env:CAW_ENTRY interview "描述你的初始需求"
-node $env:CAW_ENTRY plan
-node $env:CAW_ENTRY status
-node $env:CAW_ENTRY run
-```
-
-## 完整验证示例
-
-建议先在一次性目录或受 Git 管理的测试项目中验证，不要直接对重要项目执行首次测试：
-
-```powershell
-mkdir C:\code\ai\caw-demo
-cd C:\code\ai\caw-demo
-
-caw init .
-caw interview "开发一个简单的命令行待办事项工具"
-caw plan
-caw status
-caw run
-```
-
-重复执行 `caw run`，每次只处理第一个未完成任务，直到 `caw status` 显示全部任务完成：
-
-```powershell
-caw run
-caw status
-```
-
-每个任务都会启动全新的 Claude Code 会话，并显式读取：
-
-- `docs/SPEC.md`：总目标与完整规格；
-- `docs/PROGRESS.md`：以前完成的能力与重要事实；
-- `docs/tasks/TASK-XXX.md`：当前要满足的需求与验收标准。
-
-任务文档不会指定文件路径、技术分层或实现方案。任务完成或阻塞后，系统会更新任务状态和 `docs/PROGRESS.md`。
-
-## 运行安全说明
-
-`caw run` 会让 Claude Code 在当前项目中检查、修改文件并执行命令。当前实现使用跳过权限确认的执行模式，因此首次验证应满足以下条件：
-
-- 确认当前目录就是预期的目标项目；
-- 优先使用一次性目录或干净的 Git 工作区；
-- 执行前保存重要的未提交修改；
-- 不要在包含无关敏感文件的上级目录运行；
-- 真实的 `interview`、`plan` 和 `run` 都可能产生模型调用费用。
+系统不会自动创建 Git 分支、提交、回滚，也不会在 SDK 异常后撤销已经产生的文件变更。

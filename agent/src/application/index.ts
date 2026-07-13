@@ -3,7 +3,5 @@
  * 具体基础设施不会通过该入口泄漏到业务编排中。
  */
 export * from './ports.js'
-export * from './generate-specification.js'
-export * from './generate-tasks.js'
 export * from './execute-next-task.js'
 export * from './progress.js'

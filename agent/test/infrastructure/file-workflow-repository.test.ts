@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { FileWorkflowRepository } from '../../src/infrastructure/file-workflow-repository.js'
+import { writeExternalWorkflow } from '../support/workflow-fixture.js'
 
 const roots: string[] = []
 
@@ -21,24 +22,37 @@ afterEach(() => {
 })
 
 describe('FileWorkflowRepository', () => {
-  it('只初始化三个核心文档', () => {
+  it('初始化事实文档和两份跨 AI 工具提示词', () => {
     const repository = createRepository()
     const result = repository.initialize()
 
-    expect(result.created).toEqual(['AGENTS.md', 'docs/SPEC.md', 'docs/PROGRESS.md'])
+    expect(result.created).toEqual([
+      'AGENTS.md',
+      'docs/SPEC.md',
+      'docs/PROGRESS.md',
+      'prompts/generate-specification.md',
+      'prompts/generate-tasks.md',
+    ])
+    expect(
+      readFileSync(join(repository.projectRoot, 'prompts/generate-specification.md'), 'utf8'),
+    ).toContain('docs/SPEC.md')
+    expect(readFileSync(join(repository.projectRoot, 'prompts/generate-tasks.md'), 'utf8')).toContain(
+      'docs/tasks/TASK-XXX.md',
+    )
     expect(repository.listTasks()).toEqual([])
   })
 
-  it('生成的任务只包含需求、验收标准和最小状态', () => {
+  it('读取外部 AI 按提示词生成的标准任务文档', () => {
     const repository = createRepository()
     repository.initialize()
-    const tasks = repository.replaceTasks([
+    writeExternalWorkflow(repository.projectRoot, [
       {
         title: '允许用户创建项目',
         requirement: '用户可以创建一个带名称的项目。',
         acceptanceCriteria: ['创建成功后能够看到项目', '项目名称不能为空'],
       },
     ])
+    const tasks = repository.listTasks()
 
     expect(tasks[0]?.metadata).toEqual({
       id: 'TASK-001',
@@ -49,10 +63,22 @@ describe('FileWorkflowRepository', () => {
     expect(tasks[0]?.document).not.toContain('layer:')
   })
 
+  it('拒绝不连续的外部任务编号', () => {
+    const repository = createRepository()
+    repository.initialize()
+    writeExternalWorkflow(repository.projectRoot, [
+      { title: '第一项', requirement: '需求一', acceptanceCriteria: ['标准一'] },
+      { title: '第二项', requirement: '需求二', acceptanceCriteria: ['标准二'] },
+    ])
+    rmSync(join(repository.projectRoot, 'docs/tasks/TASK-001.md'))
+
+    expect(() => repository.listTasks()).toThrow('任务编号必须从 TASK-001 开始连续排列')
+  })
+
   it('更新状态时保留任务需求正文', () => {
     const repository = createRepository()
     repository.initialize()
-    repository.replaceTasks([
+    writeExternalWorkflow(repository.projectRoot, [
       { title: '任务', requirement: '原始需求', acceptanceCriteria: ['可以验收'] },
     ])
 

@@ -1,6 +1,6 @@
 /**
- * 基础设施公共出口只包含文件仓储与 Claude Code 适配器。
- * MVP 不再暴露 Git、SQLite、MCP 或 Reviewer 等非核心能力。
+ * 基础设施公共出口只包含文件仓储与任务执行适配器。
+ * 规格和任务提示词由文件仓储在初始化阶段写入目标项目。
  */
 export * from './file-workflow-repository.js'
-export * from './claude-code-agent.js'
+export * from './claude-code-task-agent.js'
