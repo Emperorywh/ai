@@ -158,6 +158,87 @@ describe('WorktreeAdapter', () => {
 })
 
 /* ============================================================ *
+ * WorktreeAdapter — listChangedFiles（TASK-040 四类 Git 工作区状态 + rename）
+ * ============================================================ */
+
+describe('WorktreeAdapter — listChangedFiles（TASK-040）', () => {
+  it('识别 tracked 修改 / staged / untracked 三类变更', () => {
+    const adapter = new WorktreeAdapter(root, worktreesDir)
+    const wtPath = adapter.create('main', 'TASK-040A')
+
+    // untracked:新文件未 add(被 .git/info/exclude 忽略的 node_modules 不计入)。
+    writeFileSync(join(wtPath, 'untracked.ts'), 'new\n')
+    // tracked 修改(unstaged):改基线已跟踪的 README.md。
+    writeFileSync(join(wtPath, 'README.md'), '# changed\n')
+    // staged:新文件 + git add(已暂存未提交)。
+    writeFileSync(join(wtPath, 'staged.ts'), 's\n')
+    gitOk(['add', 'staged.ts'], wtPath)
+
+    const files = adapter.listChangedFiles(wtPath)
+    expect(files).toEqual(expect.arrayContaining(['untracked.ts', 'README.md', 'staged.ts']))
+    expect(files).toHaveLength(3)
+  })
+
+  it('识别删除(tracked 文件被移除)', () => {
+    // 基线先提交一个待删文件。
+    writeFileSync(join(root, 'to-delete.txt'), 'x\n')
+    gitOk(['add', 'to-delete.txt'], root)
+    gitOk(['commit', '-m', 'add to-delete'], root)
+
+    const adapter = new WorktreeAdapter(root, worktreesDir)
+    const wtPath = adapter.create('main', 'TASK-040B')
+    // 删除 tracked 文件(工作区移除,未 staged)。
+    rmSync(join(wtPath, 'to-delete.txt'))
+
+    const files = adapter.listChangedFiles(wtPath)
+    expect(files).toContain('to-delete.txt')
+  })
+
+  it('staged rename 只列新路径,不重复计入旧路径', () => {
+    // 基线先提交待重命名文件。
+    writeFileSync(join(root, 'old-name.txt'), 'x\n')
+    gitOk(['add', 'old-name.txt'], root)
+    gitOk(['commit', '-m', 'add old-name'], root)
+
+    const adapter = new WorktreeAdapter(root, worktreesDir)
+    const wtPath = adapter.create('main', 'TASK-040C')
+    gitOk(['mv', 'old-name.txt', 'new-name.txt'], wtPath)
+
+    const files = adapter.listChangedFiles(wtPath)
+    expect(files).toContain('new-name.txt')
+    // rename 旧路径不应被重复计入(避免把已不存在的路径报为变更)。
+    expect(files).not.toContain('old-name.txt')
+  })
+
+  it('无变更 → 空数组', () => {
+    const adapter = new WorktreeAdapter(root, worktreesDir)
+    const wtPath = adapter.create('main', 'TASK-040D')
+    expect(adapter.listChangedFiles(wtPath)).toEqual([])
+  })
+
+  it('路径含空格时原样返回(-z 不转义)', () => {
+    const adapter = new WorktreeAdapter(root, worktreesDir)
+    const wtPath = adapter.create('main', 'TASK-040E')
+    mkdirSync(join(wtPath, 'dir with space'), { recursive: true })
+    writeFileSync(join(wtPath, 'dir with space', 'file.ts'), 'x\n')
+
+    const files = adapter.listChangedFiles(wtPath)
+    expect(files).toContain('dir with space/file.ts')
+  })
+
+  it('忽略被 .gitignore 的文件(如 node_modules)', () => {
+    const adapter = new WorktreeAdapter(root, worktreesDir)
+    const wtPath = adapter.create('main', 'TASK-040F')
+    // node_modules 被 .git/info/exclude 忽略(夹具 initRepo 已加)。
+    mkdirSync(join(wtPath, 'node_modules', 'pkg'), { recursive: true })
+    writeFileSync(join(wtPath, 'node_modules', 'pkg', 'index.js'), 'module.exports=1\n')
+
+    const files = adapter.listChangedFiles(wtPath)
+    expect(files).not.toContain(expect.stringContaining('node_modules'))
+  })
+})
+
+/* ============================================================ *
  * GitMergeAdapter
  * ============================================================ */
 

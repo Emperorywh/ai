@@ -211,6 +211,57 @@ export class WorktreeAdapter {
     }
     this.bases.delete(taskId)
   }
+
+  /**
+   * 枚举 worktree 相对基线的全部变更文件（TASK-040 / WorkspaceInspectionPort）。
+   *
+   * 覆盖四类 Git 工作区状态（任务 §11 验收）：
+   *   - tracked 内容修改（unstaged）。
+   *   - staged 新增 / 修改（已 git add）。
+   *   - untracked 新文件（未被 .gitignore 忽略，--untracked-files=all 含全部）。
+   *   - 删除（tracked 已移除）。
+   *
+   * 实现：`git status --porcelain=v1 --untracked-files=all -z`，NUL 分隔记录、不转义路径
+   * （含空格 / 非_ascii 的路径原样输出，避免非 -z 模式的引号包裹与截断）。每条记录形如
+   * `XY <path>`（X=staged 状态码、Y=unstaged 状态码、第 3 列空格、其后路径）；rename(R) /
+   * copy(C) 的 staged 形态后跟一条无前缀的旧路径记录，需跳过以避免把已不存在的旧路径计入变更。
+   *
+   * @param worktreePath worktree 根目录绝对路径（不依赖适配器内部 taskId→path 映射，Port 通用）。
+   * @returns 变更文件相对 worktree 根的路径数组（正斜杠、去 rename 旧路径、去重由 git 保证）。
+   */
+  listChangedFiles(worktreePath: string): string[] {
+    const out = runGit(
+      ['status', '--porcelain=v1', '--untracked-files=all', '-z'],
+      worktreePath,
+    )
+    const files: string[] = []
+    // -z 模式:每条记录以 NUL 结尾;split('\0') 后,rename/copy 的新路径与旧路径为相邻独立段。
+    const records = out.split('\0')
+    let i = 0
+    while (i < records.length) {
+      const rec = records[i] ?? ''
+      // 末尾 NUL 产生空串,以及非 -z 残留换行——空串跳过。
+      if (rec === '') {
+        i += 1
+        continue
+      }
+      // 记录格式:XY<space>path(X/Y 各 1 字符状态码 + 1 空格 + 路径),最少 3 字符。
+      if (rec.length < 3) {
+        i += 1
+        continue
+      }
+      const xStatus = rec[0] ?? ''
+      const path = rec.slice(3)
+      if (path !== '') files.push(path)
+      // staged rename(R) / copy(C):下一段是旧路径(无 XY 前缀),跳过避免计入已不存在路径。
+      if (xStatus === 'R' || xStatus === 'C') {
+        i += 2
+      } else {
+        i += 1
+      }
+    }
+    return files
+  }
 }
 
 /* ============================================================ *

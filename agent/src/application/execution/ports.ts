@@ -250,6 +250,40 @@ export interface VerificationRunnerPort {
 }
 
 /* ============================================================ *
+ * 工作区变更检查 Port：WorkspaceInspectionPort（TASK-040 / SPEC FR-039 / AC-011）
+ * ============================================================ */
+
+/**
+ * 工作区变更检查 Port（对应 infra WorktreeAdapter.listChangedFiles，TASK-040）。
+ *
+ * 把「枚举 worktree 相对基线的实际变更文件」抽象为单一 listChangedFiles 方法，供
+ * ExecuteTaskUseCase 在 Executor 返回后做路径越界审计（FR-039「执行后必须用 Git diff
+ * 再校验一次」）。Application（path-audit + execute-task）只经此 Port 依赖外部枚举能力，
+ * **不感知 git status / porcelain 细节**——真实实现落在 infrastructure（WorktreeAdapter），
+ * 测试以 fake 注入覆盖。
+ *
+ * 变更覆盖范围（SPEC §9 / 任务 §11 验收「changed-files 能识别四类 Git 工作区状态」）：
+ *   - tracked 文件的内容修改（unstaged）。
+ *   - staged（已 git add）的新增 / 修改。
+ *   - untracked 新文件（未被 .gitignore 忽略）。
+ *   - 删除（tracked 但已移除）。
+ *   合并 = `git status --porcelain --untracked-files=all` 的全集，按相对 worktree 根的
+ *   正斜杠路径返回（去重、去 rename 残留旧路径）。
+ *
+ * 方法以 worktreePath 为参数（不依赖适配器内部 taskId→path 映射），使 Port 可被任意
+ * 持有 worktree 路径的调用方（ExecuteTaskUseCase / Orchestrator）复用，与 TaskDocRepositoryPort
+ * 等基础设施 Port 同形（无 name 字段——它是能力 Port 而非可替换执行器，不需要日志区分实现）。
+ */
+export interface WorkspaceInspectionPort {
+  /**
+   * 枚举 worktree 相对基线的全部变更文件（tracked/staged/unstaged/untracked + 删除）。
+   * @param worktreePath worktree 根目录绝对路径。
+   * @returns 变更文件相对 worktree 根的路径数组（正斜杠、去 rename 旧路径）。
+   */
+  listChangedFiles(worktreePath: string): string[]
+}
+
+/* ============================================================ *
  * §18 启动提示构建器（Readme.md §18，Executor 初始指令唯一文本来源）
  * ============================================================ */
 

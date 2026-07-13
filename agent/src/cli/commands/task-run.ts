@@ -15,7 +15,15 @@ import type {
 } from '../../application/ports.js'
 // TASK-036：执行契约（Port + 输入输出）自 application execution/ports 导入（单一来源）；
 // 具体执行器实现类仍从 infrastructure 导入（composition root wiring）。
-import type { TaskExecutorPort } from '../../application/execution/ports.js'
+// TASK-040：WorkspaceInspectionPort（路径审计）/ VerificationRunnerPort（系统验证）同源。
+import type {
+  TaskExecutorPort,
+  VerificationRunnerPort,
+  WorkspaceInspectionPort,
+} from '../../application/execution/ports.js'
+// TASK-040:路径审计 / 系统验证 outcome 类型(供 TaskRunOutcome 携带,CLI 输出与测试观测)。
+import type { PathAuditOutcome } from '../../application/execution/path-audit.js'
+import type { VerifyTaskOutcome } from '../../application/execution/verify-task.js'
 import type {
   Layer,
   Permission,
@@ -95,6 +103,16 @@ export interface TaskRunOutcome {
   /** 合并冲突文件清单（仅合并冲突时非空）。 */
   readonly conflicts: readonly string[]
   /**
+   * TASK-040 路径越界审计结果（workspaceInspector 注入时定义；未注入为 undefined）。
+   * ok=false 时 finalStatus=blocked（needs-human 门禁，FR-039/AC-011）。
+   */
+  readonly pathAudit?: PathAuditOutcome
+  /**
+   * TASK-040 系统验证结果（verificationRunner 注入时定义；未注入为 undefined）。
+   * status='blocked' 时 no_review 任务 finalStatus=blocked，普通任务仍 reviewing 交 Reviewer。
+   */
+  readonly systemVerification?: VerifyTaskOutcome
+  /**
    * §7 cost/usage 摘要（采集自 SDK result 消息，写入本字段供 CLI 输出与测试断言）。
    * SDK 路径下非空；DryRun / 无 result 消息到达时为 undefined（§7 cost 取自 result 消息）。
    */
@@ -130,6 +148,16 @@ export interface TaskRunOptions {
   ) => void
   /** 项目级验证命令声明（默认从 docs/TESTING.md 解析；测试可注入）。 */
   readonly testingCommands?: readonly TestingCommand[]
+  /**
+   * 工作区变更检查 Port（TASK-040，可选）：注入后 Executor 返回即做路径越界审计（FR-039）。
+   * 默认不注入 → 跳过路径审计（保持 DryRun / 既有 CLI 行为；真实验证门禁由 Orchestrator 接入）。
+   */
+  readonly workspaceInspector?: WorkspaceInspectionPort
+  /**
+   * 系统验证执行 Port（TASK-040，可选）：注入后独立执行验证 allowlist 覆盖模型自报（FR-011）。
+   * 默认不注入 → 跳过系统验证（DryRun 在临时仓库无 package.json，真实跑 typecheck/test 会失败）。
+   */
+  readonly verificationRunner?: VerificationRunnerPort
 }
 
 /* ============================================================ *
@@ -177,6 +205,9 @@ export async function runTask(
     executor,
     openWorktreeRepo: (wtPath) => new TaskDocRepository(join(wtPath, 'docs', 'tasks')),
     prepareWorktree: (wtPath, permissions) => restorer(wtPath, projectRoot, permissions),
+    // TASK-040：可选注入——未传入(undefined)时 ExecuteTaskUseCase 跳过对应阶段（向后兼容）。
+    workspaceInspector: options.workspaceInspector,
+    verificationRunner: options.verificationRunner,
   })
 
   // 执行阶段（领域编排全部在用例内）→ 结构化结果（finalStatus / worktreePath / task / result）。
@@ -215,6 +246,8 @@ export async function runTask(
     worktreePath: executed.worktreePath,
     merged,
     conflicts,
+    pathAudit: executed.pathAudit,
+    systemVerification: executed.systemVerification,
   }
 }
 
@@ -748,6 +781,9 @@ export interface RunTaskWithAssemblyOptions {
     permissions: readonly Permission[],
   ) => void
   readonly testingCommands?: readonly TestingCommand[]
+  /** TASK-040：透传工作区检查 / 系统验证 Port（可选注入）。 */
+  readonly workspaceInspector?: WorkspaceInspectionPort
+  readonly verificationRunner?: VerificationRunnerPort
 }
 
 /**
@@ -785,6 +821,8 @@ export async function runTaskWithAssembly(
       idAllocator: options.idAllocator,
       nodeModulesRestorer: options.nodeModulesRestorer,
       testingCommands: options.testingCommands,
+      workspaceInspector: options.workspaceInspector,
+      verificationRunner: options.verificationRunner,
     })
     return { ...outcome, cost: observability.getCost() }
   } finally {

@@ -1,10 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { serializeDocument, TaskDocRepository } from '../../src/infrastructure/index.js'
-import type { TaskExecutorPort } from '../../src/application/execution/ports.js'
+import { serializeDocument, TaskDocRepository, WorktreeAdapter } from '../../src/infrastructure/index.js'
+import type {
+  TaskExecutorPort,
+  VerificationRunnerInput,
+  VerificationRunnerPort,
+  VerificationRunnerResult,
+} from '../../src/application/execution/ports.js'
 import type { SdkRunReport } from '../../src/infrastructure/sdk/claude-sdk-adapter.js'
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import {
@@ -18,6 +23,7 @@ import { CliExitCode, runCli } from '../../src/cli/framework.js'
 import type { GitMergePort } from '../../src/application/ports.js'
 import type {
   ResultFrontmatter,
+  ResultVerification,
   TaskFrontmatter,
   TaskId,
   TaskStatus,
@@ -827,3 +833,205 @@ function spyOnConsole(method: 'log' | 'warn'): string[] {
   })
   return buffer
 }
+
+/* ============================================================ *
+ * TASK-040:fake runner / 路径越界 executor / 模型 verification executor
+ * ============================================================ */
+
+/** 构造合法 .result.md（可选模型自报 verification），模拟 Executor 产出。 */
+function fakeResultExecutor(
+  taskId: TaskId,
+  verification: ResultVerification[] = [],
+): TaskExecutorPort {
+  return {
+    name: 'fake-result',
+    async execute(input) {
+      const result: ResultFrontmatter = {
+        task_id: taskId,
+        execution_status: 'completed',
+        modified_files: [],
+        created_files: [],
+        deleted_files: [],
+        execution_commits: [],
+        verification,
+        global_update_requests: { progress: [], decisions: [], issues: [] },
+        next_action: 'review',
+      }
+      writeFileSync(input.result_file, serializeDocument(result, `# ${taskId} fake\n`), 'utf8')
+      return { result_file: input.result_file, execution_status: 'completed' }
+    },
+  }
+}
+
+/** 构造越界 Executor：产出合法 result + 在 worktree 写一个 allowed 外文件（模拟模型越界）。 */
+function trespassingExecutor(taskId: TaskId, trespassRelPath: string): TaskExecutorPort {
+  return {
+    name: 'fake-trespass',
+    async execute(input) {
+      const result: ResultFrontmatter = {
+        task_id: taskId,
+        execution_status: 'completed',
+        modified_files: [],
+        created_files: [],
+        deleted_files: [],
+        execution_commits: [],
+        verification: [],
+        global_update_requests: { progress: [], decisions: [], issues: [] },
+        next_action: 'review',
+      }
+      writeFileSync(input.result_file, serializeDocument(result, `# ${taskId} fake\n`), 'utf8')
+      // 模拟模型越界：写一个 allowed 外文件。
+      const full = join(input.worktree_path, trespassRelPath)
+      mkdirSync(dirname(full), { recursive: true })
+      writeFileSync(full, '越界内容\n', 'utf8')
+      return { result_file: input.result_file, execution_status: 'completed' }
+    },
+  }
+}
+
+/** 构造 fake VerificationRunnerPort：按命令脚本化返回结果。 */
+function fakeRunner(scripts: Record<string, VerificationRunnerResult>): VerificationRunnerPort {
+  return {
+    name: 'fake-runner',
+    async run(input: VerificationRunnerInput): Promise<VerificationRunnerResult> {
+      const r = scripts[input.command]
+      if (!r) throw new Error(`fake runner 未脚本化命令：${input.command}`)
+      return r
+    },
+  }
+}
+
+/** fake runner passed 结果。 */
+function passedRunner(command: string): VerificationRunnerResult {
+  return { command, result: 'passed', exitCode: 0, durationMs: 100, outputSummary: `${command} 通过` }
+}
+
+/** fake runner failed 结果。 */
+function failedRunner(command: string): VerificationRunnerResult {
+  return { command, result: 'failed', exitCode: 1, durationMs: 200, outputSummary: `${command} 失败摘要` }
+}
+
+/* ============================================================ *
+ * TASK-040:路径审计 + 系统验证接入（ExecuteTaskUseCase 经可选 Port 注入）
+ * ============================================================ */
+
+describe('task:run — TASK-040 路径审计 + 系统验证接入', () => {
+  it('路径越界 → blocked(needs-human)+ pathAudit.ok=false + 越界文件入违规清单', async () => {
+    const task = mkTask({ id: 'TASK-090', name: 'trespass', allowedPaths: ['src/allowed.ts'] })
+    commitTaskDef(root, task)
+
+    const outcome = await runTask('TASK-090', {
+      projectRoot: root,
+      worktreesDir,
+      nodeModulesRestorer: noopNodeModules,
+      workspaceInspector: new WorktreeAdapter(root, worktreesDir),
+      executor: trespassingExecutor('TASK-090', 'docs/out-of-scope.md'),
+    })
+
+    expect(outcome.finalStatus).toBe('blocked')
+    expect(outcome.pathAudit?.ok).toBe(false)
+    expect(
+      outcome.pathAudit?.violations.some((v) => v.path === 'docs/out-of-scope.md'),
+    ).toBe(true)
+    expect(mainRepo().readTask('TASK-090').status).toBe('blocked')
+  })
+
+  it('系统验证 passed（普通任务）→ reviewing（交 Reviewer）', async () => {
+    const task = mkTask({ id: 'TASK-091', name: 'svp', noReview: false })
+    commitTaskDef(root, task)
+
+    const outcome = await runTask('TASK-091', {
+      projectRoot: root,
+      worktreesDir,
+      nodeModulesRestorer: noopNodeModules,
+      verificationRunner: fakeRunner({
+        'npm run typecheck': passedRunner('npm run typecheck'),
+      }),
+    })
+
+    expect(outcome.finalStatus).toBe('reviewing')
+    expect(outcome.systemVerification?.status).toBe('passed')
+  })
+
+  it('系统验证 passed（no_review）→ done', async () => {
+    const task = mkTask({ id: 'TASK-092', name: 'svdone', noReview: true })
+    commitTaskDef(root, task)
+
+    const outcome = await runTask('TASK-092', {
+      projectRoot: root,
+      worktreesDir,
+      nodeModulesRestorer: noopNodeModules,
+      verificationRunner: fakeRunner({
+        'npm run typecheck': passedRunner('npm run typecheck'),
+      }),
+    })
+
+    expect(outcome.finalStatus).toBe('done')
+  })
+
+  it('系统验证 failed（no_review）→ blocked（完成门禁）', async () => {
+    const task = mkTask({ id: 'TASK-093', name: 'svblock', noReview: true })
+    commitTaskDef(root, task)
+
+    const outcome = await runTask('TASK-093', {
+      projectRoot: root,
+      worktreesDir,
+      nodeModulesRestorer: noopNodeModules,
+      verificationRunner: fakeRunner({
+        'npm run typecheck': failedRunner('npm run typecheck'),
+      }),
+    })
+
+    expect(outcome.finalStatus).toBe('blocked')
+    expect(outcome.systemVerification?.status).toBe('blocked')
+  })
+
+  it('模型自报 passed + 系统验证 failed → 以系统结果为准（no_review blocked,AC-010）', async () => {
+    const task = mkTask({ id: 'TASK-094', name: 'override', noReview: true })
+    commitTaskDef(root, task)
+
+    const outcome = await runTask('TASK-094', {
+      projectRoot: root,
+      worktreesDir,
+      nodeModulesRestorer: noopNodeModules,
+      // Executor 写模型自报 passed verification。
+      executor: fakeResultExecutor('TASK-094', [
+        { command: 'npm run typecheck', result: 'passed', notes: '模型自报通过' },
+      ]),
+      // 系统真实执行 failed。
+      verificationRunner: fakeRunner({
+        'npm run typecheck': failedRunner('npm run typecheck'),
+      }),
+    })
+
+    // 门禁只认系统记录 → blocked（模型 passed 被系统 failed 覆盖）。
+    expect(outcome.finalStatus).toBe('blocked')
+    const rec = outcome.systemVerification?.verification.find(
+      (v) => v.command === 'npm run typecheck',
+    )
+    expect(rec?.result).toBe('failed')
+    expect(rec?.source).toBe('system')
+  })
+
+  it('DryRun 只写 .result.md → 路径审计排除 result_file 后通过（不误判越界）', async () => {
+    const task = mkTask({
+      id: 'TASK-095',
+      name: 'resultok',
+      noReview: false,
+      allowedPaths: ['src/x.ts'],
+    })
+    commitTaskDef(root, task)
+
+    const outcome = await runTask('TASK-095', {
+      projectRoot: root,
+      worktreesDir,
+      nodeModulesRestorer: noopNodeModules,
+      workspaceInspector: new WorktreeAdapter(root, worktreesDir),
+      // 不注入 runner：聚焦路径审计（result_file 排除）。
+    })
+
+    // DryRun 只写 .result.md（默认允许），排除后无越界 → 审计过,普通任务 reviewing。
+    expect(outcome.pathAudit?.ok).toBe(true)
+    expect(outcome.finalStatus).toBe('reviewing')
+  })
+})

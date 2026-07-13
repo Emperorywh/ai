@@ -28,6 +28,7 @@
  */
 import { join } from 'node:path'
 import type {
+  Issue,
   Permission,
   ResultFrontmatter,
   TaskFrontmatter,
@@ -50,8 +51,15 @@ import {
   refreshSourceFiles,
   type DependencyResultSummary,
 } from '../context-pack-generator.js'
-import type { TaskExecutorPort } from './ports.js'
+import type {
+  TaskExecutorPort,
+  VerificationRunnerPort,
+  WorkspaceInspectionPort,
+} from './ports.js'
 import { buildStartupPrompt } from './ports.js'
+// TASK-040：路径审计纯函数 + 系统验证用例（直接从具体模块导入，避免循环）。
+import { auditPaths, type PathAuditOutcome, type PathViolation } from './path-audit.js'
+import { VerifyTaskUseCase, type VerifyTaskOutcome } from './verify-task.js'
 
 /* ============================================================ *
  * 用例依赖（Ports）与输入输出
@@ -81,6 +89,17 @@ export interface ExecuteTaskPorts {
   readonly openWorktreeRepo: (wtPath: string) => TaskDocRepositoryPort
   /** R7 工作区准备（恢复 node_modules 等）；permissions 决定是否在 worktree 内重装依赖。 */
   readonly prepareWorktree: (wtPath: string, permissions: readonly Permission[]) => void
+  /**
+   * 工作区变更检查 Port（TASK-040，可选）：注入后 Executor 返回即做路径越界审计（FR-039）。
+   * 未注入（undefined）→ 跳过路径审计，保持与 TASK-037 行为一致（向后兼容既有测试与 DryRun CLI）。
+   */
+  readonly workspaceInspector?: WorkspaceInspectionPort
+  /**
+   * 系统验证执行 Port（TASK-040，可选）：注入后 Executor 返回即独立执行验证 allowlist 覆盖模型自报（FR-011）。
+   * 未注入（undefined）→ 跳过系统验证，状态映射回退到模型自报 verification（向后兼容）。
+   * 串行 Orchestrator（TASK-044）与显式启用真实验证的 CLI 路径注入真实 Runner。
+   */
+  readonly verificationRunner?: VerificationRunnerPort
 }
 
 /** ExecuteTaskUseCase.execute 的调用参数（非注入依赖，每次执行可能不同）。 */
@@ -111,8 +130,18 @@ export interface ExecuteTaskOutcome {
   readonly worktreePath: string
   /** 刷新 context_pack 后的任务投影（合并 MergeTask 的 id/depends_on/result_file 来源）。 */
   readonly task: TaskFrontmatter
-  /** 从 worktree 仓储读到的 .result.md（合并回写需要 global_update_requests）。 */
+  /** 从 worktree 仓储读到的 .result.md（合并回写需要 global_update_requests；TASK-040 起含系统验证覆盖 + 越界 / 验证失败 issue 提议）。 */
   readonly result: ResultFrontmatter
+  /**
+   * 路径越界审计结果（TASK-040，workspaceInspector 注入时定义；未注入为 undefined）。
+   * ok=false 时 finalStatus 必为 blocked（needs-human 门禁，FR-039/AC-011）。
+   */
+  readonly pathAudit?: PathAuditOutcome
+  /**
+   * 系统验证结果（TASK-040，verificationRunner 注入时定义；未注入为 undefined）。
+   * status='blocked' 时 no_review 任务 finalStatus=blocked，普通任务仍 reviewing 交 Reviewer。
+   */
+  readonly systemVerification?: VerifyTaskOutcome
 }
 
 /* ============================================================ *
@@ -147,9 +176,11 @@ export class ExecuteTaskUseCase {
    *   7. R7 工作区准备（经 Port，恢复 node_modules）。
    *   8. 组装 §18 启动提示 → Executor 在 worktree 内执行、产出 .result.md。
    *   9. 读 .result.md（worktree 仓储——产物尚未合并入 main，§12 显式区分）。
-   *  10. applyResult 状态映射（no_review 免审任务由本用例校验产物决定 done/blocked）。
+   *  10. （TASK-040，可选注入）路径越界审计 + 系统验证，结果写回 worktree .result.md。
+   *  11. 状态映射：路径越界→blocked（needs-human）；否则按系统验证（若注入）/ 模型自报
+   *      映射（reviewing / done / blocked / failed，no_review 免审任务由验证门禁决定 done/blocked）。
    *
-   * @returns ExecuteTaskOutcome 携带 finalStatus / worktreePath / 刷新后的 task / 读到的 result。
+   * @returns ExecuteTaskOutcome 携带 finalStatus / worktreePath / 刷新后的 task / 读到的 result / pathAudit / systemVerification。
    */
   async execute(input: ExecuteTaskInput): Promise<ExecuteTaskOutcome> {
     const { taskRepo } = this.ports
@@ -217,11 +248,35 @@ export class ExecuteTaskUseCase {
     const worktreeRepo = this.ports.openWorktreeRepo(wtPath)
     const result = worktreeRepo.readResult(taskId)
 
-    // 11. 状态映射：把 result 映射为目标状态（no_review + completed + review 时校验产物三分，§7/§10）。
-    // orchestratorVerified 镜像 StateOrchestrator.isResultAcceptable（验证结果无 failed）：
-    // 免审任务由本用例校验产物，通过→done / 未通过→blocked。
-    const orchestratorVerified = isProductAcceptable(result)
-    orchestrator.applyResult(taskId, result, { orchestratorVerified })
+    // 11. 路径审计 + 系统验证（TASK-040 / SPEC FR-039 / FR-011）。
+    //     两阶段均经可选 Port 注入：Executor 返回后先做路径越界审计（FR-039），再独立执行
+    //     验证 allowlist 覆盖模型自报（FR-011）。二者结果写回 worktree .result.md（§9 数据流）。
+    //     未注入对应 Port → 跳过该阶段，保持与 TASK-037 行为一致（向后兼容既有测试与 DryRun CLI）。
+    const audited = await this.auditAndVerify(
+      refreshedTask,
+      result,
+      wtPath,
+      input.testingCommands,
+    )
+
+    // 12. 状态映射（§9 数据流）。
+    if (audited.pathAudit !== undefined && !audited.pathAudit.ok) {
+      // 路径越界 → running→blocked（needs-human 门禁，不交 Reviewer，FR-039 / AC-011）。
+      // 直接 transition，不依赖 mapResultToStatus 的 blocked 分支（语义明确）。
+      orchestrator.transition(taskId, 'blocked', {
+        no_review: refreshedTask.no_review,
+        confirmed: false,
+      })
+    } else {
+      // 否则按系统验证（若注入）或模型自报（未注入）决定 orchestratorVerified：
+      //   - 普通任务 completed+review → reviewing（验证失败仍交 Reviewer，§9）。
+      //   - no_review + 验证 passed → done；no_review + 验证失败 → blocked（§7 三分）。
+      const orchestratorVerified =
+        audited.systemVerification !== undefined
+          ? audited.systemVerification.status === 'passed'
+          : isProductAcceptable(audited.result)
+      orchestrator.applyResult(taskId, audited.result, { orchestratorVerified })
+    }
 
     const finalStatus = taskRepo.readTask(taskId).status
     return {
@@ -230,8 +285,103 @@ export class ExecuteTaskUseCase {
       executor: this.ports.executor.name,
       worktreePath: wtPath,
       task: refreshedTask,
-      result,
+      result: audited.result,
+      pathAudit: audited.pathAudit,
+      systemVerification: audited.systemVerification,
     }
+  }
+
+  /* ============================================================ *
+   * TASK-040：路径审计 + 系统验证（可选注入，向后兼容）
+   * ============================================================ */
+
+  /**
+   * 路径审计 + 系统验证（TASK-040 / SPEC FR-039 / FR-011）。
+   *
+   * 两个阶段均经可选 Port 注入：workspaceInspector / verificationRunner 任一缺失则对应阶段
+   * 跳过。返回写回 worktree 的最终 result（含系统验证覆盖的 verification + 路径越界 / 验证
+   * 失败 issue 提议）与两阶段结构化结果，供 execute 做状态映射与 outcome 携带。
+   *
+   * 阶段顺序（§9 数据流「先枚举实际变更，再运行系统验证」）：
+   *   A. 路径越界审计：枚举变更（排除默认允许的 result_file）→ auditPaths。
+   *      越界 → 系统覆盖 result 为 blocked + needs-human + 越界 issue 提议（FR-039 / AC-011）。
+   *   B. 系统验证：VerifyTaskUseCase 独立执行 allowlist → 系统记录覆盖模型自报（FR-011.5）。
+   *      失败 issue 提议并入 result（供后续回写 ISSUES）。
+   *   C. 有审计 / 验证覆盖时写回 worktree .result.md（使 Reviewer / 人工读到真实结论）。
+   */
+  private async auditAndVerify(
+    task: TaskFrontmatter,
+    result: ResultFrontmatter,
+    wtPath: string,
+    testingCommands: readonly TestingCommand[],
+  ): Promise<{
+    readonly result: ResultFrontmatter
+    readonly pathAudit: PathAuditOutcome | undefined
+    readonly systemVerification: VerifyTaskOutcome | undefined
+  }> {
+    let augmented: ResultFrontmatter = result
+    let pathAudit: PathAuditOutcome | undefined
+    let systemVerification: VerifyTaskOutcome | undefined
+
+    // 阶段 A：路径越界审计（FR-039「执行后用 Git diff 再校验一次」）。
+    if (this.ports.workspaceInspector !== undefined) {
+      const changedRaw = this.ports.workspaceInspector.listChangedFiles(wtPath)
+      // result_file 为 workflow_outputs 默认允许写入（§3.2，不计入 allowed_paths），审计前排除——
+      // 否则 DryRun / Executor 写 .result.md 会被误判越界。
+      const resultFileRel = task.workflow_outputs.result_file
+      const changedForAudit = changedRaw.filter(
+        (f) => normalizeForCompare(f) !== normalizeForCompare(resultFileRel),
+      )
+      pathAudit = auditPaths({
+        changedFiles: changedForAudit,
+        allowedPaths: task.allowed_paths,
+        forbiddenPaths: task.forbidden_paths,
+      })
+      if (!pathAudit.ok) {
+        const issue = buildPathViolationIssue(task.id, pathAudit.violations)
+        augmented = {
+          ...augmented,
+          execution_status: 'blocked',
+          next_action: 'needs-human',
+          global_update_requests: {
+            ...augmented.global_update_requests,
+            issues: [...augmented.global_update_requests.issues, issue],
+          },
+        }
+      }
+    }
+
+    // 阶段 B：系统验证（FR-011「Executor 完成后独立执行 allowlist」），系统记录覆盖模型自报。
+    if (this.ports.verificationRunner !== undefined) {
+      const verifyUseCase = new VerifyTaskUseCase({ runner: this.ports.verificationRunner })
+      systemVerification = await verifyUseCase.verify({
+        taskId: task.id,
+        worktreePath: wtPath,
+        taskLayer: task.layer,
+        taskPermissions: task.permissions,
+        taskVerification: task.verification,
+        testingCommands,
+        modelVerification: augmented.verification,
+      })
+      augmented = {
+        ...augmented,
+        verification: [...systemVerification.verification],
+        global_update_requests: {
+          ...augmented.global_update_requests,
+          issues: [
+            ...augmented.global_update_requests.issues,
+            ...systemVerification.proposedIssues,
+          ],
+        },
+      }
+    }
+
+    // 阶段 C：有审计 / 验证覆盖时写回 worktree .result.md。
+    if (pathAudit !== undefined || systemVerification !== undefined) {
+      this.ports.openWorktreeRepo(wtPath).writeResult(augmented)
+    }
+
+    return { result: augmented, pathAudit, systemVerification }
   }
 }
 
@@ -354,4 +504,43 @@ function taskFileFromResult(resultFile: string): string {
 /** 判定错误是否为「文档不存在」（TaskDocRepository 抛错的稳定前缀，DEC-008）。 */
 function isDocMissing(err: unknown): boolean {
   return err instanceof Error && err.message.startsWith('文档不存在')
+}
+
+/* ============================================================ *
+ * TASK-040：路径审计辅助
+ * ============================================================ */
+
+/**
+ * 路径规范化用于 result_file 排除比较（与 path-audit.normalizePath 同源）。
+ *
+ * Git status 输出正斜杠相对路径，result_file（frontmatter）也是正斜杠；规范化仅统一
+ * Windows 反斜杠与尾部斜杠差异，使二者可按相同形态比较以排除默认允许的 result_file。
+ */
+function normalizeForCompare(path: string): string {
+  return path
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/\/+$/, '')
+}
+
+/**
+ * 构造「工作区路径越界」ISSUES 提议项（FR-039 / AC-011）。
+ *
+ * severity='high'：越界改动禁止合并，需人工修正改动落回 allowed_paths 内。id 留空，
+ * 由 Orchestrator / Finalize 回写分配 ISS-XXX（blocked 时 .result.md 携带，待人工处理）。
+ */
+function buildPathViolationIssue(taskId: TaskId, violations: readonly PathViolation[]): Issue {
+  const detail = violations
+    .map((v) => `${v.path}(${v.kind}${v.matchedPattern ? `=${v.matchedPattern}` : ''})`)
+    .join('; ')
+  return {
+    id: '',
+    title: '工作区路径越界，禁止合并',
+    status: 'open',
+    severity: 'high',
+    scope: 'verification',
+    created_from_task: taskId,
+    owner: '',
+    recommended_action: `修正越界改动使其落在 allowed_paths 内且不命中 forbidden_paths：${detail}`,
+  }
 }
