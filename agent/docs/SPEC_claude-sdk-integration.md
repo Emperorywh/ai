@@ -2,12 +2,25 @@
 spec_id: SPEC_claude-sdk-integration
 title: 接入 Claude Agent SDK 作为 Task Executor / Reviewer 执行引擎
 source: 用户访谈(2026-07-10) + Readme.md §5.2/§5.3/§8/§10/§15/§16/§18 + 现有 executor-contract.ts / claude-sdk-adapter.ts / task-run.ts / task-review.ts / result-schema.ts / review-schema.ts
-status: draft
+status: implemented
 created: 2026-07-10
+implemented: 2026-07-13
 owner: Orchestrator
+superseded_by: SPEC_orchestrator-hard-gates-and-recovery
 ---
 
 # SPEC — 接入 Claude Agent SDK 作为 Task Executor / Reviewer 执行引擎
+
+> **实施状态说明（2026-07-13）**：本规格的 P0 目标已经在当前代码中完成，包括真实
+> Claude Agent SDK Executor、独立 SDK Reviewer、Provider Profile、CLI 接线、流式日志、
+> cost/usage、JSON 重试降级和真实 API 条件测试。本文保留为 SDK 接入阶段的历史实施基线，
+> 不再作为后续功能迭代的活动规格。文中的旧文件路径、旧行号和“当前无真实实现”等现状描述
+> 不再代表当前代码。
+>
+> 后续迭代以 `docs/SPEC_orchestrator-hard-gates-and-recovery.md` 为准。新规格明确取代本文
+> F2“模型自报全部客观事实”、F3“禁止执行后路径审计与系统验证”、F4“完全无执行策略上限”
+> 三项长期架构取向；保留本文关于 SDK 会话隔离、Provider Profile、结构化输出重试、可观测性
+> 和中断处理的已实施设计。
 
 > 本规格把 `infrastructure/sdk` 的 `ClaudeSdkInvocation` 从「接口骨架」落地为「真实调用
 > `@anthropic-ai/claude-agent-sdk` 的执行引擎」,并对称地为 `task:review` 提供一个 SDK 版
