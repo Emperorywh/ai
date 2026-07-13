@@ -5,6 +5,14 @@ import { ClaudeCodeTaskAgent } from '../../src/infrastructure/claude-code-task-a
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({ query: vi.fn() }))
 
 const queryMock = vi.mocked(query)
+const EXECUTION_INPUT = {
+  specification: '# SPEC\n\n总目标',
+  progress: '# PROGRESS\n\n历史事实',
+  task: {
+    metadata: { id: 'TASK-001', title: '展示地图', status: 'running' },
+    document: '# TASK-001\n\n当前需求',
+  },
+} as const
 
 /**
  * 每次 SDK 调用都创建独立异步消息流，只模拟任务适配器依赖的最小协议。
@@ -40,14 +48,7 @@ describe('ClaudeCodeTaskAgent', () => {
     })
     const agent = new ClaudeCodeTaskAgent('C:\\target-project')
 
-    await agent.executeTask({
-      specification: '# SPEC\n\n总目标',
-      progress: '# PROGRESS\n\n历史事实',
-      task: {
-        metadata: { id: 'TASK-001', title: '展示地图', status: 'running' },
-        document: '# TASK-001\n\n当前需求',
-      },
-    })
+    await agent.executeTask(EXECUTION_INPUT)
 
     const request = queryMock.mock.calls[0]?.[0]
     expect(request?.prompt).toContain('总目标')
@@ -69,5 +70,27 @@ describe('ClaudeCodeTaskAgent', () => {
     expect(request?.options).not.toHaveProperty('continue')
     expect(request?.options).not.toHaveProperty('maxTurns')
     expect(request?.options).not.toHaveProperty('tools')
+  })
+
+  it('连续任务调用分别创建新的 SDK 查询和中断控制器', async () => {
+    mockStructuredOutput({
+      status: 'completed',
+      summary: '已完成',
+      progress: '能力已实现',
+      changedFiles: [],
+      verification: [],
+      blocker: '',
+    })
+    const agent = new ClaudeCodeTaskAgent('C:\\target-project')
+
+    await agent.executeTask(EXECUTION_INPUT)
+    await agent.executeTask(EXECUTION_INPUT)
+
+    expect(queryMock).toHaveBeenCalledTimes(2)
+    const firstOptions = queryMock.mock.calls[0]?.[0].options
+    const secondOptions = queryMock.mock.calls[1]?.[0].options
+    expect(firstOptions?.abortController).not.toBe(secondOptions?.abortController)
+    expect(firstOptions?.persistSession).toBe(false)
+    expect(secondOptions?.persistSession).toBe(false)
   })
 })

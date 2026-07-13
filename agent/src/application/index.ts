@@ -4,4 +4,5 @@
  */
 export * from './ports.js'
 export * from './execute-next-task.js'
+export * from './execute-workflow.js'
 export * from './progress.js'

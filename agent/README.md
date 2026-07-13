@@ -11,15 +11,14 @@ caw init
   → 使用规格提示词生成 docs/SPEC.md
   → 使用任务提示词生成 docs/tasks/TASK-XXX.md
   → caw status
-  → caw run
-  → 重复 caw run，直到全部任务完成
+  → caw run 自动顺序执行全部任务
 ```
 
 运行时只保留三个命令：
 
 - `caw init [targetDir]`：初始化事实文档和 AI 提示词；
 - `caw status`：查看任务状态；
-- `caw run`：执行第一个未完成任务。
+- `caw run`：为每个未完成任务启动独立会话并顺序执行到结束或阻塞。
 
 ## 运行要求
 
@@ -115,7 +114,7 @@ caw status
 caw run
 ```
 
-每次 `caw run` 只处理第一个未完成任务。重复执行，直到 `caw status` 显示全部任务为 `completed`。
+一次 `caw run` 会等待当前任务执行完成，然后自动为下一任务创建全新的 Claude Code 会话。全部任务完成后命令退出；如果当前任务返回 `blocked` 或 SDK 异常，工作流立即停止，不会越过任务或无限重试。
 
 每个任务都会启动新的、不可恢复的 Claude Code 会话，并显式注入：
 
@@ -124,6 +123,8 @@ caw run
 - `docs/tasks/TASK-XXX.md`：当前需求和验收标准。
 
 Claude Code 不会修改这些工作流事实文档。任务完成或阻塞后，CAW 统一更新任务状态和 `docs/PROGRESS.md`。
+
+这里不需要在同一个会话中执行 `/clear`：当前 SDK 查询结束后，CAW 丢弃该会话，再调用一次新的 `query()`。新会话不传 `resume/continue`，也不保存历史会话，跨任务上下文只来自规格、进度和当前任务文档。
 
 ## 状态语义
 
