@@ -25,7 +25,7 @@ agent/
       index.ts
     application/                # 编排用例，不依赖具体基础设施实现
       ports.ts                  # application→infra 窄接口
-      execution/                # Ports（TaskExecutorPort / TaskReviewerPort / VerificationRunnerPort，TASK-036/039）+ execute-task.ts（TASK-037）/ review-task.ts + finalize-task.ts（TASK-038）/ verify-task.ts（TASK-039）单任务执行 / 审查 / 共享完成 / 系统验证用例
+      execution/                # Ports（TaskExecutorPort / TaskReviewerPort / VerificationRunnerPort / WorkspaceInspectionPort，TASK-036/039/040）+ execute-task.ts（TASK-037，TASK-040 接入路径审计+系统验证）/ review-task.ts + finalize-task.ts（TASK-038）/ verify-task.ts（TASK-039）/ path-audit.ts（TASK-040）单任务执行 / 审查 / 共享完成 / 系统验证 / 路径越界审计用例
       planning-workflow.ts
       context-pack-generator.ts
       scheduler.ts
@@ -35,7 +35,8 @@ agent/
     infrastructure/             # 外部系统适配，不承载业务规则
       fs/                       # frontmatter-parser / task-doc-repo / global-doc-repo
       sqlite/                   # schema / index-repo
-      git/                      # worktree-adapter
+      git/                      # worktree-adapter（含 listChangedFiles，TASK-040）
+      process/                  # verification-runner（TASK-040 真实子进程 Runner）
       sdk/                      # claude-sdk-adapter / mcp/
       index.ts
     cli/                        # 命令入口，不拥有核心状态机
@@ -95,9 +96,19 @@ core 不反向依赖任何层
 - 单任务系统验证用例 `VerifyTaskUseCase` 自 TASK-039 起位于 `application/execution/verify-task.ts`：把
   Executor 完成后的系统验证阶段（allowlist 计算 → requires_permissions 校验 → 串行 Runner → 系统记录覆盖
   模型自报 → 完成门禁，FR-011 / FR-012）收敛为 application 用例，经 Ports（`VerificationRunnerPort`）注入依赖，
-  零 infra import；只定义契约不实现子进程（真实 Runner 由 TASK-040 落地）。系统验证四元组（source / exit_code /
-  duration_ms / output_summary）按 DEC-041 在 `ResultVerification` 上为 optional——模型自报与历史夹具可缺省，
-  系统验证路径显式写全；完成门禁按 DEC-042 只认 allowlist 命令的系统记录 `result === 'passed'`。
+  零 infra import；系统验证四元组（source / exit_code / duration_ms / output_summary）按 DEC-041 在
+  `ResultVerification` 上为 optional——模型自报与历史夹具可缺省，系统验证路径显式写全；完成门禁按 DEC-042 只认
+  allowlist 命令的系统记录 `result === 'passed'`。
+- 工作区变更检查 Port `WorkspaceInspectionPort` + 路径越界审计 `auditPaths` + 真实验证 Runner `ProcessVerificationRunner`
+  自 TASK-040 起落地：`WorkspaceInspectionPort`（`listChangedFiles(worktreePath)`，基础设施能力 Port 无 name）收敛在
+  `application/execution/ports.ts`；`auditPaths`（`application/execution/path-audit.ts`）是纯函数（路径段比较 + glob 匹配
+  + forbidden 优先，结构化违规返回，路径工具与 core/rules/permission-rules.ts 同源独立实现）；`ProcessVerificationRunner`
+  （`infrastructure/process/verification-runner.ts`）implements `VerificationRunnerPort`，经 spawn(shell:true) 采集真实退出码
+  /耗时/输出摘要，超时映射 failed+exitCode=null，Windows 用 taskkill /T /F 杀进程树（DEC-044）；`WorktreeAdapter.listChangedFiles`
+  结构满足 WorkspaceInspectionPort。`ExecuteTaskUseCase` 经**可选** `workspaceInspector` / `verificationRunner` 注入路径审计
+  （排除 result_file 默认允许）+ 系统验证阶段（DEC-043，未注入=原行为向后兼容）：Executor 返回先审计 → 越界 blocked+needs-human；
+  再调 VerifyTaskUseCase 覆盖模型自报；CLI task:run 默认不注入（DryRun 兼容），串行 Orchestrator（TASK-044）注入真实 Port
+  启用真实验证门禁。
 
 ## 5. layer 与物理分层的关系
 

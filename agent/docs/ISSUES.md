@@ -445,3 +445,19 @@ recommended_action: |-
 ```
 
 提议自 `TASK-035-cli-task-review-wiring.result.md`。CI 真实 API 契约断言（system init model 字段 + GLM 档位前缀）本地无 key 未经实证（2 skipped），首次 CI 配置 secret 跑通时需确认（R-API/R-PROVIDER/ISS-022）。medium 优先级，非阻塞（SPEC §11 真实集成在 CI）。
+
+## ISS-025 POSIX 下 ProcessVerificationRunner 超时 kill 不杀孙进程，依赖容器进程组隔离
+
+```yaml
+id: ISS-025
+title: "POSIX 下 ProcessVerificationRunner 超时 kill 不杀孙进程，依赖容器进程组隔离"
+status: open
+severity: low
+scope: src/infrastructure/process/verification-runner.ts
+created_from_task: TASK-040
+owner: ""
+recommended_action: |-
+  Windows 已用 taskkill /pid /T /F 杀进程树（覆盖本机测试环境，DEC-044）。POSIX 下当前 SIGTERM+SIGKILL 仅杀 shell 直接进程，孙进程（真实命令）可能短暂孤儿。生产串行 Orchestrator 通常在容器内运行，进程组隔离由容器保障，影响有限。若需 POSIX 原生进程树清理，可后续用 spawn({ detached: true }) + process.kill(-pid)（detached 让子成独立进程组），作为独立增强任务评估。关联 DEC-044（Windows taskkill 已覆盖）/ §12 风险点（僵尸进程）。
+```
+
+提议自 `TASK-040-infra-verification-and-path-audit.result.md`。POSIX 进程树清理待增强（ISS-025，low，生产容器保障，非阻塞）。

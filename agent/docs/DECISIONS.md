@@ -826,3 +826,39 @@ consequences: |-
 ```
 
 落地自 `TASK-039-core-system-verification-contract.result.md`。isVerificationGatePassed 完成门禁只认 allowlist 命令的系统记录 result === 'passed'（DEC-042）：任意 failed / skipped / 未执行 → blocked，模型自报 passed 不算数（FR-012 + §11 验收）。置 accepted（§11 验收明确要求、无争议）。
+
+## DEC-043 ExecuteTaskUseCase 路径审计与系统验证经可选 Port 注入，未注入保持原行为
+
+```yaml
+id: DEC-043
+title: "ExecuteTaskUseCase 路径审计与系统验证经可选 Port 注入，未注入保持原行为"
+status: accepted
+scope: src/application/execution/execute-task.ts + src/cli/commands/task-run.ts
+created_from_task: TASK-040
+decision: |-
+  ExecuteTaskPorts 新增可选 workspaceInspector / verificationRunner，ExecuteTaskOutcome 对应新增 pathAudit / systemVerification。任一 Port 未注入（undefined）即跳过对应阶段，状态映射回退到 TASK-037 的 isProductAcceptable（模型自报 verification）。CLI task:run 默认不注入（保持 DryRun / 既有 CLI 测试行为）；串行 Orchestrator（TASK-044）注入真实 Port 启用真实验证门禁。路径审计前显式排除 workflow_outputs.result_file（§3.2 默认允许写入，不计 allowed_paths）。
+rationale: |-
+  任务 §2「将系统验证和路径审计接入单任务执行用例与现有 task-run」要求接入，但 execute-task.test.ts 不在本任务 allowed_paths（不可改），且 DryRun 在临时仓库真实跑 npm run typecheck/test 会因无 package.json 失败。可选注入是唯一兼顾「接入能力」与「向后兼容既有测试 / DryRun CLI」的方式：未注入=零行为变化，注入=真实验证门禁生效。
+consequences: |-
+  ExecuteTaskUseCase 既有测试（不注入）零影响；CLI task:run 既有测试（不注入）零影响；新增 task-run 接入测试（注入 fake/真实 Port）验证路径审计 + 系统验证 + AC-010 模型自报被系统覆盖。串行 Orchestrator 注入真实 WorkspaceInspectionPort（WorktreeAdapter）+ ProcessVerificationRunner 即获得无人值守真实验证门禁。result_file 排除使 DryRun（只写 .result.md）不误判越界。关联 DEC-041（四元组 optional）/ DEC-042（门禁只认系统记录）/ DEC-044（Runner 跨平台进程语义）/ FR-039（路径越界）/ FR-011（系统验证）。
+```
+
+落地自 `TASK-040-infra-verification-and-path-audit.result.md`。ExecuteTaskUseCase 路径审计 + 系统验证经可选 Port 注入，未注入保持 TASK-037 行为（DEC-043）。置 accepted（接入与兼容的唯一调和，实际沿用）。
+
+## DEC-044 ProcessVerificationRunner 跨平台超时映射与 Windows 进程树清理
+
+```yaml
+id: DEC-044
+title: "ProcessVerificationRunner 跨平台超时映射与 Windows 进程树清理"
+status: accepted
+scope: src/infrastructure/process/verification-runner.ts
+created_from_task: TASK-040
+decision: |-
+  ProcessVerificationRunner 经 spawn(command, { shell: true, cwd: worktreePath, env: process.env, windowsHide: true }) 执行；退出码 0→passed、非 0→failed、超时→failed+exitCode=null+outputSummary 注明超时、spawn 失败（error 事件）→failed+exitCode=null+启动失败摘要。超时 timer 内立即 finish(null)（不等 close 事件），避免 shell 模式孙进程持有 stdio 致 close 迟迟不触发、promise 卡死；settled 守卫防 close 后续重复 resolve。Windows 用 taskkill /pid /T /F 杀整个进程树（含孙进程，解决 child.kill 只杀 shell 致孙进程孤儿占用 cwd）；POSIX 走 SIGTERM+300ms 后 SIGKILL（进程组隔离由生产容器保障，ISS-025）。stdout/stderr 各累计上限 16KB（超出截断标注），合并摘要再截断到 4KB。
+rationale: |-
+  任务 §12「命令字符串跨平台执行和进程中断容易产生僵尸进程；必须明确 shell、cwd、环境继承、终止和输出截断语义」+ §11「spawn 失败、非零退出和中断均显式返回」+ §8「输出必须设上限」。Windows shell 模式下 child.kill 无法清理孙进程是实测问题（超时测试 rmSync EBUSY），taskkill /T /F 是 Windows 杀进程树的标准手段；POSIX 进程组彻底清理需 detached + kill(-pid)，但 detached 让子脱离父，生产容器已有隔离，本任务先用 SIGTERM+SIGKILL 尽力（ISS-025 跟踪增强）。
+consequences: |-
+  真实退出码 / 耗时 / 摘要正确写入 verification 记录；超时映射稳定（Windows 测试 922ms 收口，不再 5s testTimeout）；输出上限避免巨型日志进入 result.verification。POSIX 下孙进程清理的彻底性留作 ISS-025（low，生产容器保障）。关联 DEC-041（四元组 system 路径写全）/ FR-011.4（真实退出码/耗时/摘要）/ §12 风险点（僵尸进程）。
+```
+
+落地自 `TASK-040-infra-verification-and-path-audit.result.md`。ProcessVerificationRunner 跨平台超时映射 + Windows taskkill /T /F 进程树清理（DEC-044）。置 accepted（§12 明文要求、实测验证）。
