@@ -1,0 +1,44 @@
+{
+  "name": "claude-task-orchestrator",
+  "version": "0.1.0",
+  "description": "基于 Claude Agent SDK 的单并发任务编排器",
+  "type": "module",
+  "bin": {
+    "claude-task-orchestrator": "./dist/cli/index.js"
+  },
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint src test",
+    "start": "tsx src/cli/index.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@11.10.0",
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.207",
+    "commander": "^15.0.0",
+    "minimatch": "^10.2.5",
+    "yaml": "^2.9.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.2",
+    "@types/node": "^26.1.1",
+    "eslint": "^9.39.2",
+    "tsx": "^4.23.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.63.0",
+    "vitest": "^4.1.10"
+  }
+}
