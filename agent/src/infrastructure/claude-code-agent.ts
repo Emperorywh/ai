@@ -14,17 +14,26 @@ import {
   type TaskExecutionReport,
   type TaskRecord,
 } from '../core/workflow.js'
+import {
+  resolveClaudeCodeSessionAccess,
+  type ClaudeCodeSessionKind,
+} from './claude-code-session-policy.js'
 
+/**
+ * 访谈负责澄清产品需求，也允许核对用户明确提供的本地需求资料。
+ * 文件访问由会话策略限制为只读工具，系统提示词只决定何时应主动读取。
+ */
 const INTERVIEW_SYSTEM_PROMPT = `你是一名资深产品分析师，负责通过深度访谈把模糊需求变成可验收的产品规格。
 
 规则：
 1. 只讨论需求，不设计技术架构或指定实现方式。
-2. 每轮最多提出一个最有信息增益的问题，问题要具体、易回答。
-3. 主动覆盖目标、用户、核心流程、范围、非目标、业务规则、数据、状态、异常、边界和验收标准。
-4. 不要重复已经回答的问题；能合理推导的内容直接推导并在规格中标明。
-5. 信息足够时返回完整 Markdown 规格，status 设为 complete；否则 status 设为 question。
-6. complete 时 question 必须为空；question 时 specification 必须为空。
-7. 规格必须清楚区分目标、范围、非目标、核心流程、功能需求、业务规则、边界情况和验收标准。`
+2. 初始需求明确提供本地文件或目录时，优先使用只读工具检查相关内容，不要求用户重复粘贴能够读取的资料。
+3. 每轮最多提出一个最有信息增益的问题，问题要具体、易回答。
+4. 主动覆盖目标、用户、核心流程、范围、非目标、业务规则、数据、状态、异常、边界和验收标准。
+5. 不要重复已经回答的问题；能合理推导的内容直接推导并在规格中标明。
+6. 信息足够时返回完整 Markdown 规格，status 设为 complete；否则 status 设为 question。
+7. complete 时 question 必须为空；question 时 specification 必须为空。
+8. 规格必须清楚区分目标、范围、非目标、核心流程、功能需求、业务规则、边界情况和验收标准。`
 
 const PLANNING_SYSTEM_PROMPT = `你是一名需求规划师，负责把最终规格拆成可顺序执行的最小任务。
 
@@ -56,7 +65,7 @@ interface StructuredSessionInput<T> {
   readonly systemPrompt: Options['systemPrompt']
   readonly outputSchema: Record<string, unknown>
   readonly validator: z.ZodType<T>
-  readonly execution: boolean
+  readonly sessionKind: ClaudeCodeSessionKind
 }
 
 /**
@@ -87,7 +96,7 @@ export class ClaudeCodeAgent implements CodingAgentPort {
       systemPrompt: INTERVIEW_SYSTEM_PROMPT,
       outputSchema: INTERVIEW_REPLY_JSON_SCHEMA as unknown as Record<string, unknown>,
       validator: InterviewReplySchema,
-      execution: false,
+      sessionKind: 'interview',
     })
   }
 
@@ -97,7 +106,7 @@ export class ClaudeCodeAgent implements CodingAgentPort {
       systemPrompt: PLANNING_SYSTEM_PROMPT,
       outputSchema: TASK_PLAN_JSON_SCHEMA as unknown as Record<string, unknown>,
       validator: TaskPlanSchema,
-      execution: false,
+      sessionKind: 'planning',
     })
     return plan.tasks
   }
@@ -116,7 +125,7 @@ export class ClaudeCodeAgent implements CodingAgentPort {
       },
       outputSchema: TASK_EXECUTION_JSON_SCHEMA as unknown as Record<string, unknown>,
       validator: TaskExecutionReportSchema,
-      execution: true,
+      sessionKind: 'execution',
     })
   }
 
@@ -133,19 +142,16 @@ export class ClaudeCodeAgent implements CodingAgentPort {
       settingSources: ['user', 'project', 'local'],
       includePartialMessages: false,
       /**
-       * 访谈与规划只消费调用方显式提供的文本，不需要访问项目工具。
-       * `tools: []` 才会关闭内置工具；结构化输出失败由 SDK 自身的有限重试负责，
-       * 因此这里不再用单轮上限截断正常的输出校验流程。
+       * 会话类型显式决定工具能力，SDK 细节不会泄漏到应用用例。
+       * 结构化输出失败由 SDK 自身的有限重试负责，不再设置单轮上限截断校验流程。
        */
-      ...(input.execution
-        ? { permissionMode: 'bypassPermissions', allowDangerouslySkipPermissions: true }
-        : { permissionMode: 'dontAsk', tools: [] }),
+      ...resolveClaudeCodeSessionAccess(input.sessionKind),
     }
 
     let result: SDKResultMessage | null = null
     try {
       for await (const message of query({ prompt: input.prompt, options })) {
-        if (input.execution) reportSdkActivity(message, this.reportActivity)
+        if (input.sessionKind === 'execution') reportSdkActivity(message, this.reportActivity)
         if (message.type === 'result') result = message
       }
     } finally {

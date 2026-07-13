@@ -28,8 +28,8 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-describe('ClaudeCodeAgent 只推理会话', () => {
-  it('访谈显式关闭工具且不设置单轮上限', async () => {
+describe('ClaudeCodeAgent 会话能力策略', () => {
+  it('访谈只开放并自动批准本地资料读取工具', async () => {
     mockStructuredOutput({ status: 'question', question: '地图面向哪些用户？', specification: '' })
     const agent = new ClaudeCodeAgent('C:\\target-project')
 
@@ -38,10 +38,11 @@ describe('ClaudeCodeAgent 只推理会话', () => {
     const options = queryMock.mock.calls[0]?.[0].options
     expect(options).toMatchObject({
       permissionMode: 'dontAsk',
-      tools: [],
+      tools: ['Read', 'Grep', 'Glob'],
+      allowedTools: ['Read', 'Grep', 'Glob'],
     })
-    expect(options).not.toHaveProperty('allowedTools')
     expect(options).not.toHaveProperty('maxTurns')
+    expect(options?.systemPrompt).toContain('优先使用只读工具检查相关内容')
   })
 
   it('规划复用相同的无工具结构化会话策略', async () => {
@@ -63,6 +64,36 @@ describe('ClaudeCodeAgent 只推理会话', () => {
       permissionMode: 'dontAsk',
       tools: [],
     })
+    expect(options).not.toHaveProperty('allowedTools')
+    expect(options).not.toHaveProperty('maxTurns')
+  })
+
+  it('执行会话保持完整工具与跳过权限确认策略', async () => {
+    mockStructuredOutput({
+      status: 'completed',
+      summary: '已完成',
+      progress: '地图能力已实现',
+      changedFiles: ['src/map.ts'],
+      verification: ['npm test'],
+      blocker: '',
+    })
+    const agent = new ClaudeCodeAgent('C:\\target-project')
+
+    await agent.executeTask({
+      specification: '# SPEC',
+      progress: '# PROGRESS',
+      task: {
+        metadata: { id: 'TASK-001', title: '展示地图', status: 'running' },
+        document: '# TASK-001',
+      },
+    })
+
+    const options = queryMock.mock.calls[0]?.[0].options
+    expect(options).toMatchObject({
+      permissionMode: 'bypassPermissions',
+      allowDangerouslySkipPermissions: true,
+    })
+    expect(options).not.toHaveProperty('tools')
     expect(options).not.toHaveProperty('allowedTools')
     expect(options).not.toHaveProperty('maxTurns')
   })
