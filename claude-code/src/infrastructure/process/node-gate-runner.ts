@@ -1,8 +1,13 @@
 /*
- * 门禁进程通过 command + args 直接启动，不经过 shell，因此配置不会被二次解释或串联执行。
+ * 门禁进程始终保留 command + args 的结构化边界，不让业务层拼接命令字符串。
+ * cross-spawn 只在 Windows 基础设施层解析 pnpm.cmd 等命令 shim，其余调度语义保持跨平台一致。
  * 多个门禁严格按声明顺序运行，首个失败即停止，输出保留尾部以控制状态文件体积。
  */
-import { spawn, type ChildProcess } from "node:child_process";
+import type {
+  ChildProcess,
+  ChildProcessWithoutNullStreams,
+} from "node:child_process";
+import spawn from "cross-spawn";
 import type { GateDefinition } from "../../domain/manifest.js";
 import type { GateExecutionState } from "../../domain/run-state.js";
 import type { GateRunner } from "../../ports/gate-runner.js";
@@ -47,13 +52,17 @@ export class NodeGateRunner implements GateRunner {
       let stopping = false;
       let forceKillTimer: NodeJS.Timeout | undefined;
 
+      /*
+       * stdio 已固定为两个 pipe，因此 stdout/stderr 在运行期必然存在。
+       * cross-spawn 的兼容类型未保留 Node 对该配置的细化重载，这里只补足基础设施类型不变量。
+       */
       const child = spawn(gate.command, gate.args, {
         cwd,
         shell: false,
         windowsHide: true,
         detached: process.platform !== "win32",
         stdio: ["ignore", "pipe", "pipe"],
-      });
+      }) as ChildProcessWithoutNullStreams;
 
       const appendOutput = (current: string, chunk: Buffer): string => {
         const next = current + chunk.toString("utf8");

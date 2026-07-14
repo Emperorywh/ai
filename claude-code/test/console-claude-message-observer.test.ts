@@ -29,7 +29,12 @@ describe("ConsoleClaudeMessageObserver", () => {
     observer.onMessage(context, createAssistantToolUse());
     observer.onMessage(context, createToolProgress());
     observer.onMessage(context, createToolResult());
+    /*
+     * SDK 会连续发送累计推理 token 事件；观察器应把它们折叠为一次开始提示，
+     * 不再把每次估算变化打印到终端。
+     */
     observer.onMessage(context, createThinkingTokens());
+    observer.onMessage(context, createThinkingTokens(1300));
     observer.onMessage(context, createSuccessResult());
     observer.onStderr(context, "diagnostic line\nsecond line\n");
 
@@ -37,7 +42,9 @@ describe("ConsoleClaudeMessageObserver", () => {
     expect(stdout).toContain("调用工具 Read：file_path=src/index.ts");
     expect(stdout).toContain("工具 Read 已运行 2.5 秒");
     expect(stdout).toContain("工具 Read 完成：读取完成");
-    expect(stdout).toContain("Claude 正在推理，约 1200 tokens");
+    expect(stdout.match(/Claude 开始推理/gu)).toHaveLength(1);
+    expect(stdout).not.toContain("thinking_tokens");
+    expect(stdout).not.toContain("1200 tokens");
     expect(stdout).toContain("Claude 会话成功（3 轮，$0.2500）");
     expect(stderr).toContain("Claude stderr：diagnostic line");
     expect(stderr).toContain("Claude stderr：second line");
@@ -91,11 +98,11 @@ function createToolResult(): SDKMessage {
   } as SDKMessage;
 }
 
-function createThinkingTokens(): SDKMessage {
+function createThinkingTokens(estimatedTokens = 1200): SDKMessage {
   return {
     type: "system",
     subtype: "thinking_tokens",
-    estimated_tokens: 1200,
+    estimated_tokens: estimatedTokens,
     estimated_tokens_delta: 100,
   } as SDKMessage;
 }

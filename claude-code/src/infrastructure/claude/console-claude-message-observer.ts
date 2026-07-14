@@ -15,6 +15,7 @@ const MAX_INLINE_DETAIL_CHARACTERS = 400;
 export class ConsoleClaudeMessageObserver implements ClaudeMessageObserver {
   private assistantTextOpen = false;
   private streamedAssistantText = false;
+  private thinkingStarted = false;
   private readonly toolNames = new Map<string, string>();
 
   public constructor(
@@ -171,6 +172,11 @@ export class ConsoleClaudeMessageObserver implements ClaudeMessageObserver {
     message: Extract<SDKMessage, { type: "result" }>,
   ): void {
     this.closeAssistantText();
+    /*
+     * result 是一次 Agent 会话的稳定终点。这里清理推理展示状态，
+     * 确保同一个观察器被后续 TASK 复用时仍会输出一次新的“开始推理”。
+     */
+    this.thinkingStarted = false;
     const metrics = `${message.num_turns} 轮，$${message.total_cost_usd.toFixed(4)}`;
     if (message.subtype === "success") {
       this.writeLine(context, `Claude 会话成功（${metrics}）`);
@@ -192,6 +198,12 @@ export class ConsoleClaudeMessageObserver implements ClaudeMessageObserver {
   ): void {
     switch (message.subtype) {
       case "init":
+        /*
+         * init 明确划分了 SDK 会话边界，也覆盖上一次消息流异常结束、没有 result 的场景。
+         * 展示状态在此重新初始化，避免跨 TASK 或重试会话泄漏隐式状态。
+         */
+        this.thinkingStarted = false;
+        this.toolNames.clear();
         this.writeLine(
           context,
           `Claude Code ${message.claude_code_version} 已初始化，模型 ${message.model}`,
@@ -201,7 +213,14 @@ export class ConsoleClaudeMessageObserver implements ClaudeMessageObserver {
         this.writeLine(context, `Claude 状态：${message.status ?? "空闲"}`);
         return;
       case "thinking_tokens":
-        this.writeLine(context, `Claude 正在推理，约 ${message.estimated_tokens} tokens`);
+        /*
+         * SDK 会高频上报累计 token 估算；终端只需要一次阶段开始提示。
+         * token 数不属于业务结果，抑制后续更新可避免日志淹没有效的工具与任务事件。
+         */
+        if (!this.thinkingStarted) {
+          this.thinkingStarted = true;
+          this.writeLine(context, "Claude 开始推理");
+        }
         return;
       case "api_retry":
         this.writeLine(
