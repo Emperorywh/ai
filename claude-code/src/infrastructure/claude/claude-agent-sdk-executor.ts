@@ -192,7 +192,14 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
       throw new ConfigurationError("新 sessionId 与 resumeSessionId 不能同时提供");
     }
     const tools = request.access === "write" ? [...WRITE_TOOLS] : [...READ_TOOLS];
-    const outputSchema = z.toJSONSchema(request.resultSchema);
+    /*
+     * Claude Code 当前使用 Draft-07 校验 --json-schema；Zod 4 默认生成 Draft 2020-12，
+     * 会让子进程在 session init 前因无法解析元 schema 而退出。方言转换属于 SDK 适配职责，
+     * 领域层仍只维护唯一的 Zod 输出契约，不复制第二套 JSON Schema。
+     */
+    const outputSchema = z.toJSONSchema(request.resultSchema, {
+      target: "draft-07",
+    });
     const systemRules = request.access === "write"
       ? "你是单 TASK 写入 Worker。只执行当前任务，不创建子 Agent，不启动浏览器，不 push 或部署。"
       : "你是独立只读 Reviewer。不得编辑文件、创建子 Agent、启动浏览器或执行部署。";

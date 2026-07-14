@@ -145,6 +145,29 @@ describe("ClaudeAgentSdkExecutor", () => {
   });
 
   /*
+   * Zod 4 默认输出 Draft 2020-12，但 Claude Code 的 --json-schema 校验器使用 Draft-07。
+   * 回归测试从 SDK 公开输入边界观察最终 schema，避免方言转换退化后再次在 init 前退出。
+   */
+  it("向 Claude Code 传递 Draft-07 结构化输出契约", async () => {
+    let outputSchema: Record<string, unknown> | undefined;
+    const queryFactory: AgentQueryFactory = ({ options }) => {
+      outputSchema = options?.outputFormat?.schema;
+      return createFakeQuery(messageStream([
+        createInitMessage(SESSION_ID),
+        createSuccessResult(SESSION_ID),
+      ]));
+    };
+    const executor = new ClaudeAgentSdkExecutor(queryFactory);
+
+    const outcome = await executor.run(createRequest());
+
+    expect(outcome.ok).toBe(true);
+    expect(outputSchema?.$schema).toBe(
+      "http://json-schema.org/draft-07/schema#",
+    );
+  });
+
+  /*
    * OAuth 凭据属于 Claude Code 的 user 设置来源，空来源会导致已登录环境在 SDK 中失效。
    * 其余扩展能力仍由空 MCP、空 skills 和工具白名单独立关闭，不依赖清空设置来源。
    */
