@@ -6,6 +6,10 @@ import { lstat, mkdir, unlink, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { ConfigurationError } from "../domain/errors.js";
 
+/*
+ * TASK 正文只承载用户意图、期望效果和必要背景，不要求用户预先设计实现边界。
+ * AI 应根据真实代码自主理解架构、推导方案并完成实现，模板不替它规定工作步骤。
+ */
 const SAMPLE_FILES: Readonly<Record<string, string>> = {
   "orchestrator.yaml": `version: 1
 project:
@@ -71,23 +75,12 @@ tasks:
 
 请记录所有 Worker 都必须遵守的架构、编码和测试约束。
 `,
-  "tasks/TASK-001.md": `# TASK-001 实现第一个独立任务
+  "tasks/TASK-001.md": `# TASK-001
 
-## 目标
+## 任务描述
 
-请写清本任务唯一、可验证的交付目标。
-
-## 输入与边界
-
-- 明确允许修改的模块。
-- 明确不可修改的契约。
-- 明确依赖的前置任务输出。
-
-## 完成条件
-
-- 自动门禁全部通过。
-- 不存在范围外文件变更。
-- 独立 Reviewer 审核通过。
+请直接描述希望 AI 完成的任务、期望效果和必要背景。
+AI 将自行阅读项目、分析架构、设计方案并完成实现。
 `,
 };
 
