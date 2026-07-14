@@ -2,7 +2,7 @@
  * 持久化测试使用独立临时目录验证原子状态快照、latest 指针和进程级独占锁。
  * 锁文件解析失败必须保持失败关闭，只有合法且确认失活的 PID 记录才允许自动回收。
  */
-import { mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -57,6 +57,24 @@ describe("FileStateStore", () => {
     await expect(
       store.writeArtifact(initial.runId, "../escape.md", "unsafe"),
     ).rejects.toThrow("非法产物名称");
+  });
+
+  it("拒绝没有版本 2 标记的旧状态快照", async () => {
+    const directory = await createTemporaryDirectory();
+    const store = new FileStateStore(directory);
+    const runDirectory = join(directory, "runs", "run-old-state");
+    await mkdir(runDirectory, { recursive: true });
+    /*
+     * 旧状态不能被隐式补默认值，否则 gateRuns、候选归档和依赖阻塞语义会变得不可推导。
+     * 明确拒绝后，操作者只能创建符合当前契约的新运行。
+     */
+    await writeFile(
+      join(runDirectory, "state.json"),
+      JSON.stringify({ runId: "run-old-state", status: "running" }),
+      "utf8",
+    );
+
+    await expect(store.load("run-old-state")).rejects.toThrow("运行状态损坏");
   });
 });
 

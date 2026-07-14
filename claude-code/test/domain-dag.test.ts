@@ -7,7 +7,7 @@ import { createStableTaskOrder } from "../src/domain/dag.js";
 import type { TaskDefinition } from "../src/domain/manifest.js";
 
 /**
- * 测试任务补齐 Manifest 解析后的默认字段，让用例只突出依赖关系。
+ * 测试任务补齐 TASK 目录解析后的字段，让用例只突出依赖关系。
  * 每次调用都创建独立数组，避免测试之间通过可变集合共享隐式状态。
  */
 function createTask(
@@ -36,7 +36,7 @@ function createTask(
 }
 
 describe("createStableTaskOrder", () => {
-  it("以 Manifest 原始顺序稳定裁决同时满足依赖的任务", () => {
+  it("以任务目录原始顺序稳定裁决同时满足依赖的任务", () => {
     const tasks = [
       createTask("TASK-003", ["TASK-001"]),
       createTask("TASK-002"),

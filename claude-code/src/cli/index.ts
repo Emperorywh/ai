@@ -41,15 +41,15 @@ program
 
 program
   .command("validate")
-  .description("校验 Manifest、任务 DAG、路径和全部声明文档")
+  .description("校验 Manifest、完整 TASK 目录、路径和任务 DAG")
   .option("-m, --manifest <path>", "Manifest 文件", DEFAULT_MANIFEST)
   .action(async (options: ManifestOptions) => {
     const loaded = await loadManifest(resolve(options.manifest));
     process.stdout.write([
       "配置校验通过",
       `项目：${loaded.projectRoot}`,
-      `任务数：${loaded.manifest.tasks.length}`,
-      `任务队列：${loaded.manifest.tasks.map((task) => task.id).join(" → ")}`,
+      `任务数：${loaded.tasks.length}`,
+      `任务队列：${loaded.tasks.map((task) => task.id).join(" → ")}`,
       `内容哈希：${loaded.manifestHash}`,
       "",
     ].join("\n"));

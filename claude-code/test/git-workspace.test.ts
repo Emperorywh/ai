@@ -1,9 +1,9 @@
 /*
- * GitWorkspace 测试使用独立本地仓库验证候选指纹、提交原子性和恢复 trailer 协议。
+ * GitWorkspace 测试使用独立仓库验证候选指纹、隔离 worktree、归档引用和原子提交。
  * 所有 Git 身份与提交配置都限制在临时目录，不读取或修改用户的真实仓库配置。
  */
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -178,6 +178,111 @@ describe("GitWorkspace", () => {
     expect((await runGit(fixture.root, ["rev-parse", "HEAD"])).trim()).toBe(
       fixture.initialHead,
     );
+  });
+
+  it("门禁候选在独立 worktree 中变化且只通过显式提升回写", async () => {
+    const fixture = await createGitFixture();
+    await writeFile(join(fixture.root, ".gitignore"), "dependencies/\n", "utf8");
+    await runGit(fixture.root, ["add", "--all", "--", "."]);
+    await runGit(fixture.root, ["commit", "--quiet", "--no-verify", "-m", "声明共享依赖"]);
+    await mkdir(join(fixture.root, "dependencies"));
+    await writeFile(
+      join(fixture.root, "dependencies", "runtime.txt"),
+      "shared dependency\n",
+      "utf8",
+    );
+    await writeFile(
+      join(fixture.root, "feature.ts"),
+      "export const version = 1;\n",
+      "utf8",
+    );
+    const candidate = await fixture.workspace.captureCandidate();
+    const verification = await fixture.workspace.openVerificationWorkspace({
+      runId: "run-isolated-gate",
+      taskId: "TASK-ISOLATED",
+      sharedPaths: ["dependencies"],
+      expectedCandidate: candidate,
+    });
+
+    /*
+     * 隔离目录中的写入在 promoteCandidate 前不得影响源工作区。
+     * 提升后源候选必须与隔离候选指纹完全相同，随后 worktree 可独立释放。
+     */
+    try {
+      await writeFile(
+        join(verification.projectRoot, "feature.ts"),
+        "export const version = 2;\n",
+        "utf8",
+      );
+      await writeFile(
+        join(verification.projectRoot, "generated.ts"),
+        "export const generated = true;\n",
+        "utf8",
+      );
+      const isolatedCandidate = await verification.captureCandidate();
+
+      await expect(readFile(
+        join(verification.projectRoot, "dependencies", "runtime.txt"),
+        "utf8",
+      )).resolves.toBe("shared dependency\n");
+      await expect(readFile(join(fixture.root, "feature.ts"), "utf8")).resolves.toBe(
+        "export const version = 1;\n",
+      );
+      await expect(access(join(fixture.root, "generated.ts"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+
+      await verification.promoteCandidate(["feature.ts", "generated.ts"]);
+      const promoted = await fixture.workspace.captureCandidate();
+      expect(promoted.fingerprint).toBe(isolatedCandidate.fingerprint);
+    } finally {
+      await verification.dispose();
+    }
+
+    const worktreeList = await runGit(fixture.root, ["worktree", "list", "--porcelain"]);
+    expect(worktreeList.match(/^worktree /gmu)).toHaveLength(1);
+  });
+
+  it("终态候选归档到持久 Git 引用后清理主工作区", async () => {
+    const fixture = await createGitFixture();
+    await writeFile(
+      join(fixture.root, "README.md"),
+      "# 临时仓库\n\n阻塞中的修改。\n",
+      "utf8",
+    );
+    await writeFile(
+      join(fixture.root, "feature.ts"),
+      "export const blocked = true;\n",
+      "utf8",
+    );
+    await runGit(fixture.root, ["add", "--all", "--", "."]);
+
+    const archive = await fixture.workspace.quarantineCandidate({
+      runId: "run-quarantine",
+      taskId: "TASK-BLOCKED",
+    });
+
+    expect(archive.changedFiles).toEqual(["README.md", "feature.ts"]);
+    expect(archive.reference).toMatch(/^refs\/claude-task-orchestrator\/quarantine\//u);
+    await expect(fixture.workspace.assertClean()).resolves.toBeUndefined();
+    await expect(access(join(fixture.root, "feature.ts"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    expect(
+      await runGit(fixture.root, ["show", `${archive.reference}:feature.ts`]),
+    ).toBe("export const blocked = true;\n");
+    expect(
+      await runGit(fixture.root, ["show", `${archive.reference}:README.md`]),
+    ).toContain("阻塞中的修改");
+    /*
+     * 模拟 Git ref 已写入但 RunState 尚未 checkpoint 的崩溃窗口。
+     * 第二次归档必须找回原引用和文件清单，不能因为工作区已干净而丢失归档事实。
+     */
+    const recovered = await fixture.workspace.quarantineCandidate({
+      runId: "run-quarantine",
+      taskId: "TASK-BLOCKED",
+    });
+    expect(recovered).toEqual(archive);
   });
 
   it("正常提交写入精确 trailers，并按任务、父提交和候选恢复", async () => {

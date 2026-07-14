@@ -1,6 +1,6 @@
 /*
- * Manifest 是任务队列的唯一机器契约：依赖、路径边界、门禁和资源上限都在这里显式声明。
- * Markdown 只承载任务叙述，运行状态由独立状态库存储，二者不会相互污染。
+ * Manifest 只声明项目级策略，TASK Markdown 前置元数据是任务目录的唯一机器事实源。
+ * 依赖、路径边界和门禁与任务正文同文件演进，目录新增 TASK 不会再被静默遗漏。
  */
 import { z } from "zod";
 
@@ -13,11 +13,10 @@ export const gateDefinitionSchema = z.object({
   timeoutMinutes: z.number().int().positive().max(240).default(15),
 }).strict();
 
-export const taskDefinitionSchema = z.object({
+export const taskDocumentMetadataSchema = z.object({
   id: z.string().trim().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
   title: nonEmptyString,
-  file: nonEmptyString,
-  dependsOn: z.array(nonEmptyString).default([]),
+  dependsOn: z.array(nonEmptyString),
   scope: z.object({
     allow: z.array(nonEmptyString).min(1),
     deny: z.array(nonEmptyString).default([]),
@@ -28,10 +27,14 @@ export const taskDefinitionSchema = z.object({
   manualAcceptance: z.array(nonEmptyString).default([]),
 }).strict();
 
+export const taskDefinitionSchema = taskDocumentMetadataSchema.extend({
+  file: nonEmptyString,
+}).strict();
+
 const effortSchema = z.enum(["low", "medium", "high", "xhigh", "max"]);
 
 export const taskManifestSchema = z.object({
-  version: z.literal(1),
+  version: z.literal(2),
   project: z.object({
     root: nonEmptyString.default("."),
     spec: nonEmptyString.optional(),
@@ -65,10 +68,16 @@ export const taskManifestSchema = z.object({
   }).strict().default({
     commitMessagePrefix: "task",
   }),
-  tasks: z.array(taskDefinitionSchema).min(1),
+  taskCatalog: z.object({
+    directory: nonEmptyString,
+  }).strict(),
+  verification: z.object({
+    sharedPaths: z.array(nonEmptyString).default([]),
+  }).strict().default({ sharedPaths: [] }),
 }).strict();
 
 export type GateDefinition = z.infer<typeof gateDefinitionSchema>;
+export type TaskDocumentMetadata = z.infer<typeof taskDocumentMetadataSchema>;
 export type TaskDefinition = z.infer<typeof taskDefinitionSchema>;
 export type TaskManifest = z.infer<typeof taskManifestSchema>;
 
@@ -79,6 +88,7 @@ export interface TextDocument {
 
 export interface LoadedTaskManifest {
   readonly manifest: TaskManifest;
+  readonly tasks: readonly TaskDefinition[];
   readonly manifestPath: string;
   readonly projectRoot: string;
   readonly manifestHash: string;

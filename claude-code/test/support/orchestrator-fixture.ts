@@ -4,6 +4,7 @@
  */
 import type { AgentRunOutcome } from "../../src/domain/agent-result.js";
 import {
+  taskDefinitionSchema,
   taskManifestSchema,
   type LoadedTaskManifest,
   type TaskDefinition,
@@ -18,7 +19,12 @@ import type { EventLogger, RunEvent } from "../../src/ports/event-logger.js";
 import type { GateRunner } from "../../src/ports/gate-runner.js";
 import type { RunLock, RunLockHandle } from "../../src/ports/run-lock.js";
 import type { StateStore } from "../../src/ports/state-store.js";
-import type { ChangeAuditResult, Workspace } from "../../src/ports/workspace.js";
+import type {
+  CandidateSnapshot,
+  ChangeAuditResult,
+  VerificationWorkspace,
+  Workspace,
+} from "../../src/ports/workspace.js";
 
 export class FakeClock implements Clock {
   private milliseconds = Date.parse("2026-07-13T00:00:00.000Z");
@@ -89,10 +95,12 @@ export class PassingGateRunner implements GateRunner {
   public active = 0;
   public maxActive = 0;
   public readonly taskOrder: string[] = [];
+  public readonly workingDirectories: string[] = [];
 
-  public async run(_cwd: string, gates: Parameters<GateRunner["run"]>[1]) {
+  public async run(cwd: string, gates: Parameters<GateRunner["run"]>[1]) {
     this.active += 1;
     this.maxActive = Math.max(this.maxActive, this.active);
+    this.workingDirectories.push(cwd);
     await Promise.resolve();
     this.active -= 1;
     return gates.map((gate) => ({
@@ -111,6 +119,8 @@ export class PassingGateRunner implements GateRunner {
 export class RecordingWorkspace implements Workspace {
   public readonly commits: string[] = [];
   public cleanChecks = 0;
+  public verificationDisposals = 0;
+  public quarantines = 0;
 
   public async getStateDirectory(): Promise<string> {
     return "/state";
@@ -135,10 +145,34 @@ export class RecordingWorkspace implements Workspace {
     };
   }
 
-  public async captureCandidate() {
+  public async captureCandidate(): Promise<CandidateSnapshot> {
+    return createCandidate("stable-candidate");
+  }
+
+  /*
+   * 默认验证副本与源候选完全一致，具体用例可覆写工厂模拟门禁副作用。
+   * Fake 仍保留独立生命周期计数，确保应用服务不会泄漏验证工作区。
+   */
+  public async openVerificationWorkspace(input: {
+    expectedCandidate: CandidateSnapshot;
+  }): Promise<VerificationWorkspace> {
     return {
-      fingerprint: "stable-candidate",
-      diff: "diff --git a/file b/file",
+      projectRoot: "/verification",
+      auditChanges: (task) => this.auditChanges(task),
+      captureCandidate: () => Promise.resolve(input.expectedCandidate),
+      promoteCandidate: () => Promise.resolve(),
+      dispose: () => {
+        this.verificationDisposals += 1;
+        return Promise.resolve();
+      },
+    };
+  }
+
+  public async quarantineCandidate() {
+    this.quarantines += 1;
+    return {
+      reference: `refs/quarantine/${this.quarantines}`,
+      changedFiles: ["src/candidate.ts"],
     };
   }
 
@@ -208,7 +242,7 @@ export function createLoadedManifest(
   }[],
 ): LoadedTaskManifest {
   const manifest = taskManifestSchema.parse({
-    version: 1,
+    version: 2,
     project: {
       root: ".",
       contextFiles: [],
@@ -223,7 +257,14 @@ export function createLoadedManifest(
     review: {
       enabled: false,
     },
-    tasks: taskInputs.map((input) => ({
+    taskCatalog: {
+      directory: "tasks",
+    },
+    verification: {
+      sharedPaths: [],
+    },
+  });
+  const tasks = taskInputs.map((input) => taskDefinitionSchema.parse({
       id: input.id,
       title: input.id,
       file: `tasks/${input.id}.md`,
@@ -238,10 +279,9 @@ export function createLoadedManifest(
         args: ["test"],
       }],
       manualAcceptance: [],
-    })),
-  });
+    }));
   const taskDocuments = new Map(
-    manifest.tasks.map((task) => [
+    tasks.map((task) => [
       task.id,
       { path: task.file, content: `# ${task.id}` },
     ]),
@@ -249,6 +289,7 @@ export function createLoadedManifest(
 
   return {
     manifest,
+    tasks,
     manifestPath: "/project/orchestrator.yaml",
     projectRoot: "/project",
     manifestHash: "manifest-hash",
@@ -256,7 +297,24 @@ export function createLoadedManifest(
     contextDocuments: [],
     protectedPaths: [
       "orchestrator.yaml",
-      ...manifest.tasks.map((task) => task.file),
+      ...tasks.map((task) => task.file),
     ],
+  };
+}
+
+/*
+ * 候选快照包含结构化文件记录，使门禁变化测试不依赖 diff 文本或暂存区表现。
+ * fingerprint 参数由用例控制，文件哈希同步变化以维持快照内部语义一致。
+ */
+export function createCandidate(fingerprint: string): CandidateSnapshot {
+  return {
+    fingerprint,
+    diff: "diff --git a/file b/file",
+    files: [{
+      path: "src/candidate.ts",
+      kind: "file",
+      mode: 0o100644,
+      contentHash: fingerprint,
+    }],
   };
 }

@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { writeSampleProject } from "../src/cli/sample-project-writer.js";
+import { YamlManifestRepository } from "../src/infrastructure/tasks/yaml-manifest-repository.js";
 
 const temporaryRoots: string[] = [];
 
@@ -36,6 +37,14 @@ describe("writeSampleProject", () => {
     expect(result.skippedFiles).toEqual([]);
     await expect(access(join(root, "orchestrator.yaml"))).resolves.toBeUndefined();
     await expect(access(join(root, "tasks", "TASK-001.md"))).resolves.toBeUndefined();
+    /*
+     * 初始化成功不仅代表文件存在，生成的版本 2 任务目录还必须能被生产仓储完整加载。
+     * 该断言防止模板与严格 Schema 在后续演进中形成两套不兼容契约。
+     */
+    const loaded = await new YamlManifestRepository().load(
+      join(root, "orchestrator.yaml"),
+    );
+    expect(loaded.tasks.map((task) => task.id)).toEqual(["TASK-001"]);
   });
 
   it("保留已有普通文件并使重复初始化稳定收敛", async () => {

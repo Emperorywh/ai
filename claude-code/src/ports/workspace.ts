@@ -18,6 +18,34 @@ export interface WorkspaceIdentity {
 export interface CandidateSnapshot {
   readonly fingerprint: string;
   readonly diff: string;
+  readonly files: readonly CandidateFileSnapshot[];
+}
+
+export interface CandidateFileSnapshot {
+  readonly path: string;
+  readonly kind: "file" | "symlink" | "deleted";
+  readonly mode: number;
+  readonly contentHash: string;
+}
+
+export interface CandidateArchive {
+  readonly reference?: string | undefined;
+  readonly changedFiles: readonly string[];
+}
+
+/*
+ * 验证工作区拥有候选源码的隔离副本，门禁只能改变这个副本。
+ * 应用层显式决定是否提升变化；释放操作必须清理临时 Git worktree。
+ */
+export interface VerificationWorkspace {
+  readonly projectRoot: string;
+  auditChanges(
+    task: TaskDefinition,
+    protectedPaths: readonly string[],
+  ): Promise<ChangeAuditResult>;
+  captureCandidate(): Promise<CandidateSnapshot>;
+  promoteCandidate(paths: readonly string[]): Promise<void>;
+  dispose(): Promise<void>;
 }
 
 export interface Workspace {
@@ -29,6 +57,16 @@ export interface Workspace {
     protectedPaths: readonly string[],
   ): Promise<ChangeAuditResult>;
   captureCandidate(): Promise<CandidateSnapshot>;
+  openVerificationWorkspace(input: {
+    runId: string;
+    taskId: string;
+    sharedPaths: readonly string[];
+    expectedCandidate: CandidateSnapshot;
+  }): Promise<VerificationWorkspace>;
+  quarantineCandidate(input: {
+    runId: string;
+    taskId: string;
+  }): Promise<CandidateArchive>;
   commitTask(input: {
     runId: string;
     task: TaskDefinition;

@@ -1,6 +1,6 @@
 /*
- * QueueOrchestrator 是单并发组合根：稳定拓扑排序后，只 await 当前 TASK 的一个阶段再继续。
- * 它独占运行锁、持久化每个 checkpoint，并在任何终态阻止下游任务被错误释放。
+ * QueueOrchestrator 是单并发 DAG 驱动器：每轮只推进一个 TASK 阶段并持久化 checkpoint。
+ * 终态候选先隔离，依赖子图显式阻塞，互不依赖的可运行节点继续执行到全局收敛。
  */
 import { randomUUID } from "node:crypto";
 import { createStableTaskOrder } from "../domain/dag.js";
@@ -9,6 +9,8 @@ import type { LoadedTaskManifest, TaskDefinition } from "../domain/manifest.js";
 import {
   createInitialRunState,
   finishRun,
+  replaceTaskFields,
+  transitionTask,
   type RunState,
 } from "../domain/run-state.js";
 import type { Clock } from "../ports/clock.js";
@@ -43,7 +45,7 @@ export class QueueOrchestrator {
       await this.workspace.assertClean();
       const workspaceIdentity = await this.workspace.getIdentity();
       const now = this.now();
-      const orderedTasks = createStableTaskOrder(loaded.manifest.tasks);
+      const orderedTasks = createStableTaskOrder(loaded.tasks);
       const state = createInitialRunState({
         runId,
         manifestPath: loaded.manifestPath,
@@ -87,7 +89,7 @@ export class QueueOrchestrator {
     const lock = await this.runLock.acquire(runId);
     try {
       await this.assertResumeWorkspaceCompatible(existing);
-      const orderedTasks = createStableTaskOrder(loaded.manifest.tasks);
+      const orderedTasks = createStableTaskOrder(loaded.tasks);
       await this.checkpoint(
         existing,
         undefined,
@@ -129,42 +131,33 @@ export class QueueOrchestrator {
         return { state, artifacts: [] };
       }
 
-      const currentTask = orderedTasks.find(
-        (task) => state.tasks[task.id]?.status !== "completed",
+      const stateAfterQuarantine = await this.quarantineNextTerminalCandidate(
+        state,
+        orderedTasks,
       );
+      if (stateAfterQuarantine !== undefined) {
+        state = stateAfterQuarantine;
+        continue;
+      }
+
+      const stateAfterDependencyPropagation = await this.propagateNextDependencyBlock(
+        state,
+        orderedTasks,
+      );
+      if (stateAfterDependencyPropagation !== undefined) {
+        state = stateAfterDependencyPropagation;
+        continue;
+      }
+
+      const currentTask = this.selectRunnableTask(state, orderedTasks);
       if (currentTask === undefined) {
-        const completedState = finishRun(state, "completed", this.now());
-        const artifacts = await this.writeCompletionArtifacts(loaded, completedState);
-        await this.checkpoint(
-          completedState,
-          undefined,
-          "run_completed",
-          "全部任务完成",
-        );
-        return { state: completedState, artifacts };
+        return this.finishConvergedRun(loaded, state, orderedTasks);
       }
 
       const taskState = state.tasks[currentTask.id];
       if (taskState === undefined) {
         throw new ConfigurationError(`运行状态缺少任务 ${currentTask.id}`);
       }
-      if (taskState.status === "blocked" || taskState.status === "failed") {
-        const status = taskState.status === "blocked" ? "blocked" : "failed";
-        state = finishRun(
-          state,
-          status,
-          this.now(),
-          taskState.failureReason ?? `任务 ${currentTask.id} ${taskState.status}`,
-        );
-        await this.checkpoint(
-          state,
-          currentTask.id,
-          `run_${status}`,
-          state.failureReason ?? status,
-        );
-        return { state, artifacts: [] };
-      }
-
       this.assertDependenciesCompleted(state, currentTask);
 
       const result = await this.taskExecution.step({
@@ -197,6 +190,152 @@ export class QueueOrchestrator {
     }
 
     return { state, artifacts: [] };
+  }
+
+  /*
+   * 终态候选归档是释放主工作区的前置条件；每轮只处理一个任务并立即 checkpoint。
+   * 崩溃恢复会通过确定性 Git ref 找回已归档候选，不会重复覆盖或丢失文件树。
+   */
+  private async quarantineNextTerminalCandidate(
+    state: RunState,
+    orderedTasks: readonly TaskDefinition[],
+  ): Promise<RunState | undefined> {
+    const task = orderedTasks.find((candidate) => {
+      const taskState = state.tasks[candidate.id];
+      return (taskState?.status === "blocked" || taskState?.status === "failed")
+        && taskState.candidateArchive === undefined;
+    });
+    if (task === undefined) {
+      return undefined;
+    }
+
+    const archive = await this.workspace.quarantineCandidate({
+      runId: state.runId,
+      taskId: task.id,
+    });
+    const nextState = replaceTaskFields(
+      state,
+      task.id,
+      {
+        candidateArchive: {
+          ...(archive.reference === undefined ? {} : { reference: archive.reference }),
+          changedFiles: archive.changedFiles,
+          archivedAt: this.now(),
+        },
+      },
+      this.now(),
+    );
+    await this.checkpoint(
+      nextState,
+      task.id,
+      "task_candidate_quarantined",
+      archive.reference === undefined
+        ? "终态任务没有未提交候选，工作区保持干净"
+        : `终态任务候选已隔离到 ${archive.reference}`,
+      { changedFiles: archive.changedFiles },
+    );
+    return nextState;
+  }
+
+  /*
+   * 依赖阻塞按拓扑顺序逐个传播，状态中会保留直接未完成依赖而不是笼统跳过。
+   * 传播只处理 pending 节点，已完成或正在执行的任务不会被回溯修改。
+   */
+  private async propagateNextDependencyBlock(
+    state: RunState,
+    orderedTasks: readonly TaskDefinition[],
+  ): Promise<RunState | undefined> {
+    const task = orderedTasks.find((candidate) => {
+      const taskState = state.tasks[candidate.id];
+      return taskState?.status === "pending"
+        && candidate.dependsOn.some((dependencyId) => {
+          const dependencyStatus = state.tasks[dependencyId]?.status;
+          return dependencyStatus === "blocked"
+            || dependencyStatus === "failed"
+            || dependencyStatus === "dependency_blocked";
+        });
+    });
+    if (task === undefined) {
+      return undefined;
+    }
+
+    const blockedDependencies = task.dependsOn.filter(
+      (dependencyId) => state.tasks[dependencyId]?.status !== "completed",
+    );
+    const reason = `依赖任务未完成：${blockedDependencies.join(", ")}`;
+    const nextState = transitionTask(
+      state,
+      task.id,
+      "dependency_blocked",
+      this.now(),
+      { failureReason: reason },
+    );
+    await this.checkpoint(
+      nextState,
+      task.id,
+      "task_dependency_blocked",
+      reason,
+    );
+    return nextState;
+  }
+
+  /*
+   * 已进入执行阶段的任务拥有当前主工作区，必须优先恢复；否则选择第一个依赖均完成的节点。
+   * blocked/failed 节点不会终止扫描，互不依赖的后续节点仍可继续推进。
+   */
+  private selectRunnableTask(
+    state: RunState,
+    orderedTasks: readonly TaskDefinition[],
+  ): TaskDefinition | undefined {
+    return orderedTasks.find((task) => {
+      const status = state.tasks[task.id]?.status;
+      return status === "executing"
+        || status === "gating"
+        || status === "reviewing"
+        || status === "committing";
+    }) ?? orderedTasks.find((task) => {
+      const status = state.tasks[task.id]?.status;
+      return (status === "pending" || status === "retry_pending")
+        && task.dependsOn.every(
+          (dependencyId) => state.tasks[dependencyId]?.status === "completed",
+        );
+    });
+  }
+
+  /*
+   * 没有可运行节点表示 DAG 已全局收敛，此时统一计算 Run 终态并生成完整产物。
+   * failed 优先于 blocked，避免部分成功掩盖任何已经耗尽重试的任务。
+   */
+  private async finishConvergedRun(
+    loaded: LoadedTaskManifest,
+    state: RunState,
+    orderedTasks: readonly TaskDefinition[],
+  ): Promise<OrchestratorResult> {
+    const allCompleted = orderedTasks.every(
+      (task) => state.tasks[task.id]?.status === "completed",
+    );
+    const terminalStatus = allCompleted
+      ? "completed" as const
+      : orderedTasks.some((task) => state.tasks[task.id]?.status === "failed")
+        ? "failed" as const
+        : "blocked" as const;
+    const failureReason = allCompleted
+      ? undefined
+      : this.describeTerminalFailures(state, orderedTasks);
+    const completedState = finishRun(
+      state,
+      terminalStatus,
+      this.now(),
+      failureReason,
+    );
+    const artifacts = await this.writeRunArtifacts(loaded, completedState);
+    await this.checkpoint(
+      completedState,
+      undefined,
+      `run_${terminalStatus}`,
+      terminalStatus === "completed" ? "全部任务完成" : failureReason ?? terminalStatus,
+    );
+    return { state: completedState, artifacts };
   }
 
   private assertResumeManifestCompatible(
@@ -282,7 +421,7 @@ export class QueueOrchestrator {
     });
   }
 
-  private async writeCompletionArtifacts(
+  private async writeRunArtifacts(
     loaded: LoadedTaskManifest,
     state: RunState,
   ): Promise<readonly string[]> {
@@ -291,7 +430,9 @@ export class QueueOrchestrator {
       "",
       `Run ID：${state.runId}`,
       "",
-      ...loaded.manifest.tasks.flatMap((task) => [
+      ...loaded.tasks
+        .filter((task) => state.tasks[task.id]?.status === "completed")
+        .flatMap((task) => [
         `## ${task.id} ${task.title}`,
         "",
         ...(task.manualAcceptance.length === 0
@@ -310,7 +451,7 @@ export class QueueOrchestrator {
       `- 创建时间：${state.createdAt}`,
       `- 完成时间：${state.updatedAt}`,
       "",
-      ...loaded.manifest.tasks.map((task) => {
+      ...loaded.tasks.map((task) => {
         const taskState = state.tasks[task.id];
         return `- ${task.id}: ${taskState?.status ?? "missing"} (${taskState?.commitSha ?? "no commit"})`;
       }),
@@ -327,14 +468,26 @@ export class QueueOrchestrator {
     ]);
   }
 
+  private describeTerminalFailures(
+    state: RunState,
+    orderedTasks: readonly TaskDefinition[],
+  ): string {
+    return orderedTasks
+      .map((task) => state.tasks[task.id])
+      .filter((taskState) => taskState?.status !== "completed")
+      .map((taskState) =>
+        `${taskState?.taskId ?? "unknown"}: ${taskState?.failureReason ?? taskState?.status ?? "missing"}`)
+      .join("；");
+  }
+
   private createRunId(): string {
     const timestamp = this.now().replaceAll(/[:.]/gu, "-");
     return `${timestamp}-${randomUUID().slice(0, 8)}`;
   }
 
   /*
-   * 队列计划在运行开始和恢复时显式输出，避免“目录中有任务文件”被误解为“已进入执行队列”。
-   * 真正的调度来源仍是 Manifest，日志只展示经过 DAG 校验后的稳定顺序。
+   * 队列计划在运行开始和恢复时显式输出，展示 TASK 目录经过严格校验后的真实 DAG 顺序。
+   * 日志中的数量必须与目录加载结果一致，便于在 Agent 启动前确认完整任务范围。
    */
   private describeTaskQueue(
     prefix: string,

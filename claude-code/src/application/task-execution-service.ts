@@ -19,7 +19,9 @@ import {
 import {
   replaceCurrentAttempt,
   replaceExpectedHead,
+  replaceTaskFields,
   transitionTask,
+  type GateRunState,
   type RetryContext,
   type RunState,
   type TaskAttemptState,
@@ -29,7 +31,11 @@ import {
 import type { AgentExecutor } from "../ports/agent-executor.js";
 import type { Clock } from "../ports/clock.js";
 import type { GateRunner } from "../ports/gate-runner.js";
-import type { Workspace } from "../ports/workspace.js";
+import type {
+  CandidateSnapshot,
+  VerificationWorkspace,
+  Workspace,
+} from "../ports/workspace.js";
 import {
   AgentSessionCheckpoint,
   type TaskCheckpointWriter,
@@ -49,6 +55,13 @@ export interface TaskStepInput {
   readonly resumeExistingExecution: boolean;
   readonly signal?: AbortSignal;
   readonly onCheckpoint?: TaskCheckpointWriter;
+}
+
+interface GateObservation {
+  readonly gateRun: GateRunState;
+  readonly candidateAfter: CandidateSnapshot;
+  readonly auditFailure?: string | undefined;
+  readonly allPassed: boolean;
 }
 
 export class TaskExecutionService {
@@ -81,6 +94,7 @@ export class TaskExecutionService {
       case "completed":
       case "blocked":
       case "failed":
+      case "dependency_blocked":
         return { state: input.state, message: `任务已处于终态 ${taskState.status}` };
     }
   }
@@ -121,7 +135,6 @@ export class TaskExecutionService {
       now,
       {
         attempts: [...taskState.attempts, attempt],
-        gateResults: [],
         candidateFingerprint: undefined,
       },
     );
@@ -275,6 +288,10 @@ export class TaskExecutionService {
   private async executeGates(
     input: TaskStepInput,
   ): Promise<TaskStepResult> {
+    const taskState = input.state.tasks[input.task.id];
+    if (taskState === undefined) {
+      throw new Error(`运行状态中不存在任务 ${input.task.id}`);
+    }
     const beforeAudit = await this.workspace.auditChanges(
       input.task,
       input.loaded.protectedPaths,
@@ -292,43 +309,143 @@ export class TaskExecutionService {
     }
 
     const candidateBeforeGates = await this.workspace.captureCandidate();
+    const startedAt = this.now();
+    const verification = await this.workspace.openVerificationWorkspace({
+      runId: input.state.runId,
+      taskId: input.task.id,
+      sharedPaths: input.loaded.manifest.verification.sharedPaths,
+      expectedCandidate: candidateBeforeGates,
+    });
 
+    /*
+     * 门禁、审计和候选捕获全部发生在隔离 worktree；finally 保证任何返回路径都会释放它。
+     * 合法副作用只有在形成诊断后才显式提升，且提升后的版本必须从第一道门禁重新验证。
+     */
+    try {
+      const observation = await this.observeGateRun(
+        input,
+        taskState,
+        candidateBeforeGates,
+        verification,
+        startedAt,
+      );
+      if (observation === undefined) {
+        return { state: input.state, message: "门禁被中止，将在恢复后重新执行" };
+      }
+      return await this.resolveGateObservation(input, verification, observation);
+    } finally {
+      await verification.dispose();
+    }
+  }
+
+  /*
+   * 观察阶段只收集隔离门禁事实并计算分类，不修改主候选或任务状态。
+   * 纯诊断结果交给决策阶段处理，避免进程执行与状态转换形成隐式耦合。
+   */
+  private async observeGateRun(
+    input: TaskStepInput,
+    taskState: TaskRunState,
+    candidateBefore: CandidateSnapshot,
+    verification: VerificationWorkspace,
+    startedAt: string,
+  ): Promise<GateObservation | undefined> {
     const results = await this.gates.run(
-      input.loaded.projectRoot,
+      verification.projectRoot,
       input.task.gates,
       input.signal,
     );
     if (input.signal?.aborted === true) {
-      return { state: input.state, message: "门禁被中止，将在恢复后重新执行" };
+      return undefined;
     }
 
-    const afterAudit = await this.workspace.auditChanges(
+    const afterAudit = await verification.auditChanges(
       input.task,
       input.loaded.protectedPaths,
     );
-    const afterAuditFailure = this.describeAuditFailure(afterAudit);
-    if (afterAuditFailure !== undefined) {
-      return this.blockTask(input, afterAuditFailure);
-    }
-    const candidateAfterGates = await this.workspace.captureCandidate();
-    if (candidateAfterGates.fingerprint !== candidateBeforeGates.fingerprint) {
-      return this.blockTask(
-        input,
-        "外部门禁修改了候选文件；门禁必须是只读验证命令",
-      );
-    }
-
+    const candidateAfter = await verification.captureCandidate();
+    const mutatedFiles = compareCandidateFiles(candidateBefore, candidateAfter);
+    const auditFailure = this.describeAuditFailure(afterAudit);
     const allPassed = results.length === input.task.gates.length
       && results.every((result) => result.exitCode === 0 && !result.timedOut);
-    if (!allPassed) {
-      const stateWithResults = this.replaceTaskFields(input.state, input.task.id, {
-        gateResults: results,
-      });
-      return this.retryOrFail(input, stateWithResults, {
-        kind: "repair",
-        reason: "外部门禁失败",
-        feedback: this.formatGateFeedback(results),
-      });
+    const outcome: GateRunState["outcome"] = auditFailure !== undefined
+      ? "boundary_violation"
+      : mutatedFiles.length > 0
+        ? "mutated"
+        : allPassed
+          ? "passed"
+          : "failed";
+    return {
+      gateRun: {
+        number: taskState.gateRuns.length + 1,
+        candidateBefore: candidateBefore.fingerprint,
+        candidateAfter: candidateAfter.fingerprint,
+        results,
+        mutatedFiles,
+        outcome,
+        startedAt,
+        finishedAt: this.now(),
+      },
+      candidateAfter,
+      ...(auditFailure === undefined ? {} : { auditFailure }),
+      allPassed,
+    };
+  }
+
+  /*
+   * 决策阶段先持久化所需的 GateRun 数据，再执行阻塞、提升、重试或放行策略。
+   * 每个分支共享同一份诊断摘要，日志、状态和后续 repair 不会出现结论漂移。
+   */
+  private async resolveGateObservation(
+    input: TaskStepInput,
+    verification: VerificationWorkspace,
+    observation: GateObservation,
+  ): Promise<TaskStepResult> {
+    const taskState = input.state.tasks[input.task.id];
+    if (taskState === undefined) {
+      throw new Error(`运行状态中不存在任务 ${input.task.id}`);
+    }
+    const { gateRun } = observation;
+    const stateWithGateRun = replaceTaskFields(
+      input.state,
+      input.task.id,
+      { gateRuns: [...taskState.gateRuns, gateRun] },
+      this.now(),
+    );
+    const details = this.describeGateRun(gateRun);
+
+    if (observation.auditFailure !== undefined) {
+      return {
+        ...this.blockTask(input, observation.auditFailure, stateWithGateRun),
+        details,
+      };
+    }
+    if (gateRun.mutatedFiles.length > 0) {
+      await verification.promoteCandidate(gateRun.mutatedFiles);
+      const promoted = await this.workspace.captureCandidate();
+      if (promoted.fingerprint !== observation.candidateAfter.fingerprint) {
+        throw new Error("隔离门禁变化提升后候选指纹不一致");
+      }
+      return {
+        ...this.retryOrFail(input, stateWithGateRun, {
+          kind: "repair",
+          reason: "外部门禁产生了候选变化",
+          feedback: this.formatGateMutationFeedback(
+            gateRun.mutatedFiles,
+            gateRun.results,
+          ),
+        }),
+        details,
+      };
+    }
+    if (!observation.allPassed) {
+      return {
+        ...this.retryOrFail(input, stateWithGateRun, {
+          kind: "repair",
+          reason: "外部门禁失败",
+          feedback: this.formatGateFeedback(gateRun.results),
+        }),
+        details,
+      };
     }
 
     const nextStatus: TaskStatus = input.loaded.manifest.review.enabled
@@ -336,18 +453,16 @@ export class TaskExecutionService {
       : "committing";
     return {
       state: transitionTask(
-        input.state,
+        stateWithGateRun,
         input.task.id,
         nextStatus,
         this.now(),
-        {
-          gateResults: results,
-          candidateFingerprint: candidateAfterGates.fingerprint,
-        },
+        { candidateFingerprint: observation.candidateAfter.fingerprint },
       ),
       message: input.loaded.manifest.review.enabled
         ? "全部门禁通过，进入独立审核"
         : "全部门禁通过，进入提交阶段",
+      details,
     };
   }
 
@@ -458,11 +573,16 @@ export class TaskExecutionService {
     }
 
     if (outcome.data.status === "rejected" || hasMaterialFindings) {
-      const stateWithReview = this.replaceTaskFields(input.state, input.task.id, {
-        reviewAttempts,
-        reviewSessionId: outcome.sessionId,
-        reviewSummary: outcome.data.summary,
-      });
+      const stateWithReview = replaceTaskFields(
+        input.state,
+        input.task.id,
+        {
+          reviewAttempts,
+          reviewSessionId: outcome.sessionId,
+          reviewSummary: outcome.data.summary,
+        },
+        this.now(),
+      );
       if (reviewAttempts >= input.loaded.manifest.review.maxAttempts) {
         return {
           state: transitionTask(
@@ -512,7 +632,9 @@ export class TaskExecutionService {
       prompt: this.promptBuilder.buildReview(
         input.loaded,
         input.task,
-        taskState.gateResults,
+        [...taskState.gateRuns].reverse().find(
+          (run) => run.outcome === "passed",
+        )?.results ?? [],
         changedFiles,
         diff,
       ),
@@ -696,33 +818,14 @@ export class TaskExecutionService {
     return replaceCurrentAttempt(state, taskId, attempt, this.now());
   }
 
-  private replaceTaskFields(
-    state: RunState,
-    taskId: string,
-    patch: Partial<Omit<TaskRunState, "taskId" | "status" | "updatedAt">>,
-  ): RunState {
-    const current = state.tasks[taskId];
-    if (current === undefined) {
-      throw new Error(`运行状态中不存在任务 ${taskId}`);
-    }
-    const now = this.now();
-    return {
-      ...state,
-      updatedAt: now,
-      tasks: {
-        ...state.tasks,
-        [taskId]: { ...current, ...patch, updatedAt: now },
-      },
-    };
-  }
-
   private blockTask(
     input: TaskStepInput,
     reason: string,
+    state: RunState = input.state,
   ): TaskStepResult {
     return {
       state: transitionTask(
-        input.state,
+        state,
         input.task.id,
         "blocked",
         this.now(),
@@ -759,6 +862,44 @@ export class TaskExecutionService {
     ].join("\n")).join("\n\n");
   }
 
+  private formatGateMutationFeedback(
+    mutatedFiles: readonly string[],
+    results: readonly {
+      name: string;
+      exitCode: number | null;
+      timedOut: boolean;
+      stdout: string;
+      stderr: string;
+    }[],
+  ): string {
+    return [
+      "门禁在隔离验证工作区产生了以下文件变化，变化已提升到主候选，但尚未被接受：",
+      ...mutatedFiles.map((path) => `- ${path}`),
+      "请检查这些生成结果是否符合任务契约；修复完成后，编排器会从第一道门禁重新验证完整候选。",
+      this.formatGateFeedback(results),
+    ].join("\n");
+  }
+
+  /*
+   * 事件日志只保存快速诊断摘要，完整 stdout/stderr 仍保留在 RunState 的 GateRun 中。
+   * 这样终端能直接看到变化文件和退出状态，同时避免 events.jsonl 重复写入大段输出。
+   */
+  private describeGateRun(gateRun: GateRunState): Readonly<Record<string, unknown>> {
+    return {
+      gateRunNumber: gateRun.number,
+      outcome: gateRun.outcome,
+      candidateBefore: gateRun.candidateBefore,
+      candidateAfter: gateRun.candidateAfter,
+      mutatedFiles: gateRun.mutatedFiles,
+      results: gateRun.results.map((result) => ({
+        name: result.name,
+        exitCode: result.exitCode,
+        timedOut: result.timedOut,
+        durationMs: result.durationMs,
+      })),
+    };
+  }
+
   private formatReviewFeedback(result: ReviewResult): string {
     const findings = result.findings.map((finding) =>
       `- [${finding.severity}] ${finding.file ?? "<unknown>"}${
@@ -770,4 +911,24 @@ export class TaskExecutionService {
   private now(): string {
     return this.clock.now().toISOString();
   }
+}
+
+/*
+ * 候选差异只比较规范化文件记录，不读取或猜测 Git 暂存状态。
+ * 返回稳定排序的路径集合，供诊断持久化和受控候选提升共同使用。
+ */
+function compareCandidateFiles(
+  before: CandidateSnapshot,
+  after: CandidateSnapshot,
+): readonly string[] {
+  const beforeByPath = new Map(before.files.map((file) => [file.path, file]));
+  const afterByPath = new Map(after.files.map((file) => [file.path, file]));
+  const paths = new Set([...beforeByPath.keys(), ...afterByPath.keys()]);
+  return [...paths].filter((path) => {
+    const left = beforeByPath.get(path);
+    const right = afterByPath.get(path);
+    return left?.kind !== right?.kind
+      || left?.mode !== right?.mode
+      || left?.contentHash !== right?.contentHash;
+  }).sort();
 }

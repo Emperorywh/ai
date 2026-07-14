@@ -5,19 +5,29 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import {
+  chmod,
+  copyFile,
   lstat,
+  mkdir,
+  mkdtemp,
   readFile,
   readlink,
   realpath,
+  rm,
+  stat,
+  symlink,
 } from "node:fs/promises";
-import { resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { minimatch } from "minimatch";
 import { ConfigurationError, InfrastructureError } from "../../domain/errors.js";
 import type { TaskDefinition } from "../../domain/manifest.js";
 import type {
   CandidateSnapshot,
+  CandidateArchive,
   ChangeAuditResult,
+  VerificationWorkspace,
   Workspace,
   WorkspaceIdentity,
 } from "../../ports/workspace.js";
@@ -99,21 +109,28 @@ export class GitWorkspace implements Workspace {
   public async captureCandidate(): Promise<CandidateSnapshot> {
     const changedFiles = await this.getChangedProjectFiles();
     const hash = createHash("sha256");
+    const files: CandidateSnapshot["files"][number][] = [];
 
     for (const relativePath of changedFiles) {
       const absolutePath = resolve(this.projectRoot, relativePath);
-      hash.update(relativePath);
-      hash.update("\0");
       try {
         const metadata = await lstat(absolutePath);
-        hash.update(String(metadata.mode));
-        hash.update("\0");
         if (metadata.isSymbolicLink()) {
-          hash.update("symlink\0");
-          hash.update(await readlink(absolutePath));
+          const target = await readlink(absolutePath);
+          files.push({
+            path: relativePath,
+            kind: "symlink",
+            mode: metadata.mode,
+            contentHash: createHash("sha256").update(target).digest("hex"),
+          });
         } else if (metadata.isFile()) {
-          hash.update("file\0");
-          hash.update(await readFile(absolutePath));
+          const content = await readFile(absolutePath);
+          files.push({
+            path: relativePath,
+            kind: "file",
+            mode: metadata.mode,
+            contentHash: createHash("sha256").update(content).digest("hex"),
+          });
         } else {
           throw new InfrastructureError(
             `候选变更包含不支持的文件类型：${relativePath}`,
@@ -121,18 +138,184 @@ export class GitWorkspace implements Workspace {
         }
       } catch (error) {
         if (isMissingPath(error)) {
-          hash.update("deleted");
+          files.push({
+            path: relativePath,
+            kind: "deleted",
+            mode: 0,
+            contentHash: createHash("sha256").update("").digest("hex"),
+          });
           continue;
         }
         throw error;
       }
+    }
+
+    /*
+     * 指纹由规范化文件记录组成，不依赖暂存区状态或 Git diff 的文本表现。
+     * 同一候选在主工作区与隔离 worktree 中会得到完全相同的可比较结果。
+     */
+    for (const file of files) {
+      hash.update(file.path);
+      hash.update("\0");
+      hash.update(file.kind);
+      hash.update("\0");
+      hash.update(String(file.mode));
+      hash.update("\0");
+      hash.update(file.contentHash);
       hash.update("\0");
     }
 
     return {
       fingerprint: hash.digest("hex"),
       diff: await this.createReviewDiff(),
+      files,
     };
+  }
+
+  /*
+   * 门禁在独立 detached worktree 中运行，主候选不会被验证命令直接改写。
+   * 只复制 Git 候选文件，并通过显式 sharedPaths 复用 node_modules 等依赖目录。
+   */
+  public async openVerificationWorkspace(input: {
+    runId: string;
+    taskId: string;
+    sharedPaths: readonly string[];
+    expectedCandidate: CandidateSnapshot;
+  }): Promise<VerificationWorkspace> {
+    const repositoryRoot = (await this.git(["rev-parse", "--show-toplevel"])).trim();
+    const projectPrefix = normalize(
+      (await this.git(["rev-parse", "--show-prefix"])).trim(),
+    );
+    const temporaryRoot = await mkdtemp(join(tmpdir(), "claude-task-verification-"));
+    const worktreeRoot = join(temporaryRoot, "worktree");
+
+    try {
+      await this.gitAt(repositoryRoot, [
+        "worktree",
+        "add",
+        "--detach",
+        worktreeRoot,
+        "HEAD",
+      ]);
+      const verificationProjectRoot = projectPrefix.length === 0
+        ? worktreeRoot
+        : resolve(worktreeRoot, projectPrefix);
+      for (const file of input.expectedCandidate.files) {
+        await copyCandidatePath(
+          this.projectRoot,
+          verificationProjectRoot,
+          file.path,
+        );
+      }
+      for (const sharedPath of input.sharedPaths) {
+        await linkSharedPath(
+          this.projectRoot,
+          verificationProjectRoot,
+          sharedPath,
+        );
+      }
+
+      const isolatedWorkspace = new GitWorkspace(verificationProjectRoot);
+      const isolatedCandidate = await isolatedWorkspace.captureCandidate();
+      if (isolatedCandidate.fingerprint !== input.expectedCandidate.fingerprint) {
+        throw new InfrastructureError(
+          `隔离验证候选与源候选不一致：${input.taskId}`,
+        );
+      }
+      return new GitVerificationWorkspace({
+        sourceProjectRoot: this.projectRoot,
+        projectRoot: verificationProjectRoot,
+        repositoryRoot,
+        worktreeRoot,
+        temporaryRoot,
+        workspace: isolatedWorkspace,
+      });
+    } catch (error) {
+      await this.removeVerificationWorktree(repositoryRoot, worktreeRoot, temporaryRoot);
+      throw error;
+    }
+  }
+
+  /*
+   * 终态任务的未提交候选先写入专用 Git 引用，再从主工作区精确清除。
+   * 这样独立 DAG 分支可以继续执行，同时阻塞任务的完整文件树仍可审计和恢复。
+   */
+  public async quarantineCandidate(input: {
+    runId: string;
+    taskId: string;
+  }): Promise<CandidateArchive> {
+    const referenceKey = createHash("sha256")
+      .update(`${input.runId}\0${input.taskId}`)
+      .digest("hex")
+      .slice(0, 32);
+    const reference = `refs/claude-task-orchestrator/quarantine/${referenceKey}`;
+    const existingCommit = (
+      await this.git(["for-each-ref", "--format=%(objectname)", reference])
+    ).trim();
+
+    /*
+     * 引用创建与状态 checkpoint 之间发生崩溃时，恢复流程必须复用已有完整归档。
+     * 即使主工作区已经部分或全部清理，也不能用不完整候选覆盖先前引用。
+     */
+    if (existingCommit.length > 0) {
+      const archivedFiles = await this.gitNullList([
+        "diff-tree",
+        "--no-commit-id",
+        "--name-only",
+        "--no-renames",
+        "-r",
+        "-z",
+        "--relative",
+        `${existingCommit}^`,
+        existingCommit,
+        "--",
+        ".",
+      ]);
+      await this.clearProjectCandidate();
+      return { reference, changedFiles: archivedFiles };
+    }
+
+    const changedFiles = await this.getChangedProjectFiles();
+    if (changedFiles.length === 0) {
+      return { changedFiles: [] };
+    }
+
+    const temporaryRoot = await mkdtemp(join(tmpdir(), "claude-task-archive-"));
+    const temporaryIndex = join(temporaryRoot, "index");
+    const environment = {
+      ...process.env,
+      GIT_INDEX_FILE: temporaryIndex,
+    };
+    try {
+      await this.gitAt(this.projectRoot, ["read-tree", "HEAD"], environment);
+      await this.gitAt(
+        this.projectRoot,
+        ["add", "--all", "--", "."],
+        environment,
+      );
+      const tree = (
+        await this.gitAt(this.projectRoot, ["write-tree"], environment)
+      ).trim();
+      const commit = (
+        await this.gitAt(
+          this.projectRoot,
+          [
+            "commit-tree",
+            tree,
+            "-p",
+            "HEAD",
+            "-m",
+            `隔离 ${input.runId} ${input.taskId} 的未完成候选`,
+          ],
+          environment,
+        )
+      ).trim();
+      await this.git(["update-ref", reference, commit]);
+      await this.clearProjectCandidate();
+      return { reference, changedFiles };
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }
   }
 
   public async commitTask(input: {
@@ -216,6 +399,21 @@ export class GitWorkspace implements Workspace {
         "候选内容已变化，拒绝提交未经当前门禁和审核的版本",
       );
     }
+  }
+
+  private async clearProjectCandidate(): Promise<void> {
+    await this.git([
+      "restore",
+      "--source=HEAD",
+      "--staged",
+      "--worktree",
+      "--",
+      ".",
+    ]);
+    for (const path of await this.getUntrackedProjectFiles()) {
+      await removeProjectFile(this.projectRoot, path);
+    }
+    await this.assertClean();
   }
 
   private async createReviewDiff(): Promise<string> {
@@ -327,7 +525,11 @@ export class GitWorkspace implements Workspace {
     return this.gitAt(this.projectRoot, args);
   }
 
-  private async gitAt(cwd: string, args: readonly string[]): Promise<string> {
+  private async gitAt(
+    cwd: string,
+    args: readonly string[],
+    environment?: NodeJS.ProcessEnv,
+  ): Promise<string> {
     try {
       const { stdout } = await execFileAsync("git", [...args], {
         cwd,
@@ -335,6 +537,7 @@ export class GitWorkspace implements Workspace {
         maxBuffer: MAX_GIT_OUTPUT_BYTES,
         windowsHide: true,
         timeout: GIT_COMMAND_TIMEOUT_MS,
+        ...(environment === undefined ? {} : { env: environment }),
       });
       return stdout;
     } catch (error) {
@@ -343,6 +546,223 @@ export class GitWorkspace implements Workspace {
         { cause: error },
       );
     }
+  }
+
+  private async removeVerificationWorktree(
+    repositoryRoot: string,
+    worktreeRoot: string,
+    temporaryRoot: string,
+  ): Promise<void> {
+    try {
+      if (await pathExists(worktreeRoot)) {
+        try {
+          await this.gitAt(repositoryRoot, [
+            "worktree",
+            "remove",
+            "--force",
+            worktreeRoot,
+          ]);
+        } catch {
+          await rm(worktreeRoot, { recursive: true, force: true });
+          await this.gitAt(repositoryRoot, ["worktree", "prune"]);
+        }
+      }
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }
+  }
+}
+
+interface GitVerificationWorkspaceInput {
+  readonly sourceProjectRoot: string;
+  readonly projectRoot: string;
+  readonly repositoryRoot: string;
+  readonly worktreeRoot: string;
+  readonly temporaryRoot: string;
+  readonly workspace: GitWorkspace;
+}
+
+/*
+ * 该适配器只暴露验证阶段需要的最小能力，不允许门禁在隔离目录中提交或操作运行状态。
+ * promoteCandidate 是唯一回写入口，调用者必须先完成 scope/protected 审计。
+ */
+class GitVerificationWorkspace implements VerificationWorkspace {
+  public readonly projectRoot: string;
+  private disposed = false;
+
+  public constructor(private readonly input: GitVerificationWorkspaceInput) {
+    this.projectRoot = input.projectRoot;
+  }
+
+  public auditChanges(
+    task: TaskDefinition,
+    protectedPaths: readonly string[],
+  ): Promise<ChangeAuditResult> {
+    return this.input.workspace.auditChanges(task, protectedPaths);
+  }
+
+  public captureCandidate(): Promise<CandidateSnapshot> {
+    return this.input.workspace.captureCandidate();
+  }
+
+  public async promoteCandidate(paths: readonly string[]): Promise<void> {
+    for (const path of paths) {
+      await copyCandidatePath(
+        this.input.projectRoot,
+        this.input.sourceProjectRoot,
+        path,
+      );
+    }
+  }
+
+  public async dispose(): Promise<void> {
+    if (this.disposed) {
+      return;
+    }
+    this.disposed = true;
+    let removalError: unknown;
+    try {
+      await execFileAsync(
+        "git",
+        ["worktree", "remove", "--force", this.input.worktreeRoot],
+        {
+          cwd: this.input.repositoryRoot,
+          encoding: "utf8",
+          maxBuffer: MAX_GIT_OUTPUT_BYTES,
+          windowsHide: true,
+          timeout: GIT_COMMAND_TIMEOUT_MS,
+        },
+      );
+    } catch (error) {
+      removalError = error;
+    }
+    await rm(this.input.temporaryRoot, { recursive: true, force: true });
+    if (removalError !== undefined) {
+      await execFileAsync("git", ["worktree", "prune"], {
+        cwd: this.input.repositoryRoot,
+        windowsHide: true,
+        timeout: GIT_COMMAND_TIMEOUT_MS,
+      }).catch(() => undefined);
+      throw new InfrastructureError(
+        `无法释放隔离验证工作区：${this.input.worktreeRoot}`,
+        { cause: removalError },
+      );
+    }
+  }
+}
+
+/*
+ * 候选复制严格按 Git 返回的项目相对路径执行，并拒绝目录型候选。
+ * 源路径不存在表示删除语义，目标文件会被精确移除而不会递归清理未知目录。
+ */
+async function copyCandidatePath(
+  sourceRoot: string,
+  targetRoot: string,
+  relativePath: string,
+): Promise<void> {
+  const sourcePath = resolveProjectPath(sourceRoot, relativePath);
+  const targetPath = resolveProjectPath(targetRoot, relativePath);
+  try {
+    const metadata = await lstat(sourcePath);
+    await mkdir(dirname(targetPath), { recursive: true });
+    await rm(targetPath, { force: true });
+    if (metadata.isSymbolicLink()) {
+      const target = await readlink(sourcePath);
+      const followed = await stat(sourcePath);
+      await symlink(
+        target,
+        targetPath,
+        followed.isDirectory()
+          ? process.platform === "win32" ? "junction" : "dir"
+          : "file",
+      );
+      return;
+    }
+    if (!metadata.isFile()) {
+      throw new InfrastructureError(`候选路径不是普通文件：${relativePath}`);
+    }
+    await copyFile(sourcePath, targetPath);
+    await chmod(targetPath, metadata.mode);
+  } catch (error) {
+    if (isMissingPath(error)) {
+      await rm(targetPath, { force: true });
+      return;
+    }
+    throw error;
+  }
+}
+
+async function linkSharedPath(
+  sourceRoot: string,
+  targetRoot: string,
+  relativePath: string,
+): Promise<void> {
+  const sourcePath = resolveProjectPath(sourceRoot, relativePath);
+  const targetPath = resolveProjectPath(targetRoot, relativePath);
+  let metadata;
+  try {
+    metadata = await stat(sourcePath);
+  } catch (error) {
+    if (isMissingPath(error)) {
+      throw new InfrastructureError(`验证共享路径不存在：${relativePath}`);
+    }
+    throw error;
+  }
+  if (await pathExists(targetPath)) {
+    throw new InfrastructureError(`验证共享路径覆盖了 Git 文件：${relativePath}`);
+  }
+  await mkdir(dirname(targetPath), { recursive: true });
+  await symlink(
+    sourcePath,
+    targetPath,
+    metadata.isDirectory()
+      ? process.platform === "win32" ? "junction" : "dir"
+      : "file",
+  );
+}
+
+async function removeProjectFile(
+  projectRoot: string,
+  relativePath: string,
+): Promise<void> {
+  const absolutePath = resolveProjectPath(projectRoot, relativePath);
+  const metadata = await lstat(absolutePath).catch((error: unknown) => {
+    if (isMissingPath(error)) {
+      return undefined;
+    }
+    throw error;
+  });
+  if (metadata === undefined) {
+    return;
+  }
+  if (!metadata.isFile() && !metadata.isSymbolicLink()) {
+    throw new InfrastructureError(`拒绝清理非文件候选：${relativePath}`);
+  }
+  await rm(absolutePath, { force: true });
+}
+
+function resolveProjectPath(projectRoot: string, relativePath: string): string {
+  const absolutePath = resolve(projectRoot, relativePath);
+  const normalizedRoot = normalize(resolve(projectRoot));
+  const normalizedPath = normalize(absolutePath);
+  if (
+    normalizedPath === normalizedRoot
+    || !normalizedPath.startsWith(`${normalizedRoot}/`)
+  ) {
+    throw new InfrastructureError(`候选路径越界：${relativePath}`);
+  }
+  return absolutePath;
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if (isMissingPath(error)) {
+      return false;
+    }
+    throw error;
   }
 }
 

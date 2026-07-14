@@ -7,11 +7,11 @@ import { dirname, resolve } from "node:path";
 import { ConfigurationError } from "../domain/errors.js";
 
 /*
- * TASK 正文只承载用户意图、期望效果和必要背景，不要求用户预先设计实现边界。
- * AI 应根据真实代码自主理解架构、推导方案并完成实现，模板不替它规定工作步骤。
+ * TASK 文档前置元数据承载调度与安全边界，正文承载用户意图和验收标准。
+ * 新任务只新增一个文档，不再同步维护 Manifest 数组，从结构上消除任务遗漏。
  */
 const SAMPLE_FILES: Readonly<Record<string, string>> = {
-  "orchestrator.yaml": `version: 1
+  "orchestrator.yaml": `version: 2
 project:
   root: .
   spec: SPEC.md
@@ -36,34 +36,13 @@ review:
 git:
   commitMessagePrefix: task
 
-# 运行队列只包含此处显式登记的任务，目录中的其他 Markdown 不会被自动执行。
-# 新增 TASK 文件时必须同时声明依赖、写入范围和门禁，避免调度器隐式猜测安全边界。
-tasks:
-  - id: TASK-001
-    title: 实现第一个独立任务
-    file: tasks/TASK-001.md
-    dependsOn: []
-    scope:
-      allow:
-        - src/**
-        - test/**
-        - package.json
-        - pnpm-lock.yaml
-      deny:
-        - .env*
-    gates:
-      - name: typecheck
-        command: pnpm
-        args:
-          - typecheck
-        timeoutMinutes: 10
-      - name: test
-        command: pnpm
-        args:
-          - test
-        timeoutMinutes: 15
-    manualAcceptance:
-      - 在本地浏览器中完成功能与视觉验收
+taskCatalog:
+  directory: tasks
+
+# 隔离验证工作区只共享显式声明的依赖目录；候选源码始终复制到独立 Git worktree。
+verification:
+  sharedPaths:
+    - node_modules
 `,
   "SPEC.md": `# 规格说明
 
@@ -77,7 +56,34 @@ tasks:
 
 请记录所有 Worker 都必须遵守的架构、编码和测试约束。
 `,
-  "tasks/TASK-001.md": `# TASK-001
+  "tasks/TASK-001.md": `---
+id: TASK-001
+title: 实现第一个独立任务
+dependsOn: []
+scope:
+  allow:
+    - src/**
+    - test/**
+    - package.json
+    - pnpm-lock.yaml
+  deny:
+    - .env*
+gates:
+  - name: typecheck
+    command: pnpm
+    args:
+      - typecheck
+    timeoutMinutes: 10
+  - name: test
+    command: pnpm
+    args:
+      - test
+    timeoutMinutes: 15
+manualAcceptance:
+  - 在本地浏览器中完成功能与视觉验收
+---
+
+# TASK-001 — 实现第一个独立任务
 
 ## 任务描述
 

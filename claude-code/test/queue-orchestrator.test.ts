@@ -16,8 +16,13 @@ import {
   RecordingRunLock,
   RecordingWorkspace,
   completedBehavior,
+  createCandidate,
   createLoadedManifest,
 } from "./support/orchestrator-fixture.js";
+import type {
+  CandidateSnapshot,
+  VerificationWorkspace,
+} from "../src/ports/workspace.js";
 
 describe("QueueOrchestrator", () => {
   it("按稳定依赖顺序执行，且任意时刻最多只有一个 Agent", async () => {
@@ -33,6 +38,11 @@ describe("QueueOrchestrator", () => {
     expect(result.state.status).toBe("completed");
     expect(fixture.agent.maxActive).toBe(1);
     expect(fixture.gates.maxActive).toBe(1);
+    expect(fixture.gates.workingDirectories).toEqual([
+      "/verification",
+      "/verification",
+      "/verification",
+    ]);
     expect(fixture.lock.maxActive).toBe(1);
     expect(fixture.workspace.commits).toEqual(["TASK-A", "TASK-B", "TASK-C"]);
     expect(fixture.agent.requests.map((request) => request.taskId)).toEqual([
@@ -141,16 +151,92 @@ describe("QueueOrchestrator", () => {
     );
   });
 
-  it("门禁改变候选内容时阻断任务且不提交", async () => {
+  it("门禁副作用在隔离工作区提升后自动修复并完整重验", async () => {
     const workspace = new MutatingCandidateWorkspace();
     const fixture = createFixture(workspace);
     const loaded = createLoadedManifest([{ id: "TASK-A" }]);
 
     const result = await fixture.orchestrator.start(loaded);
 
+    expect(result.state.status).toBe("completed");
+    expect(workspace.commits).toEqual(["TASK-A"]);
+    expect(workspace.verificationDisposals).toBe(2);
+    expect(fixture.agent.requests.map((request) => request.attemptKind)).toEqual([
+      "implementation",
+      "repair",
+    ]);
+    expect(result.state.tasks["TASK-A"]?.gateRuns.map((run) => ({
+      outcome: run.outcome,
+      mutatedFiles: run.mutatedFiles,
+    }))).toEqual([
+      { outcome: "mutated", mutatedFiles: ["src/candidate.ts"] },
+      { outcome: "passed", mutatedFiles: [] },
+    ]);
+    const mutationEvent = fixture.logger.events.find(
+      (event) => event.details?.["outcome"] === "mutated",
+    );
+    expect(mutationEvent?.type).toBe("task_progress");
+    expect(mutationEvent?.details).toMatchObject({
+      outcome: "mutated",
+      mutatedFiles: ["src/candidate.ts"],
+    });
+  });
+
+  it("任务阻塞后隔离候选、阻止依赖子图并继续独立任务", async () => {
+    const agent = new RecordingAgent((request) =>
+      request.taskId === "TASK-A"
+        ? {
+            ok: true,
+            sessionId: request.sessionId ?? "missing-session",
+            data: {
+              status: "blocked",
+              summary: "缺少产品决策",
+              blockingQuestions: ["请选择唯一交互规则"],
+              notes: [],
+            },
+            costUsd: 0.01,
+            turns: 1,
+          }
+        : completedBehavior(request));
+    const fixture = createFixture(new RecordingWorkspace(), agent);
+    const loaded = createLoadedManifest([
+      { id: "TASK-A" },
+      { id: "TASK-C", dependsOn: ["TASK-A"] },
+      { id: "TASK-B" },
+    ]);
+
+    const result = await fixture.orchestrator.start(loaded);
+
     expect(result.state.status).toBe("blocked");
-    expect(result.state.failureReason).toContain("门禁修改了候选文件");
+    expect(result.state.tasks["TASK-A"]?.status).toBe("blocked");
+    expect(result.state.tasks["TASK-A"]?.candidateArchive?.reference).toBe(
+      "refs/quarantine/1",
+    );
+    expect(result.state.tasks["TASK-C"]?.status).toBe("dependency_blocked");
+    expect(result.state.tasks["TASK-B"]?.status).toBe("completed");
+    expect(fixture.workspace.commits).toEqual(["TASK-B"]);
+    expect(agent.requests.map((request) => request.taskId)).toEqual([
+      "TASK-A",
+      "TASK-B",
+    ]);
+    expect(result.artifacts).toHaveLength(2);
+  });
+
+  it("隔离门禁越界变化只记录诊断且绝不提升到主候选", async () => {
+    const workspace = new BoundaryViolatingWorkspace();
+    const fixture = createFixture(workspace);
+    const loaded = createLoadedManifest([{ id: "TASK-A" }]);
+
+    const result = await fixture.orchestrator.start(loaded);
+
+    expect(result.state.status).toBe("blocked");
+    expect(result.state.tasks["TASK-A"]?.gateRuns).toMatchObject([{
+      outcome: "boundary_violation",
+      mutatedFiles: [".env"],
+    }]);
+    expect(workspace.promoted).toBe(false);
     expect(workspace.commits).toEqual([]);
+    expect(workspace.verificationDisposals).toBe(1);
   });
 
   it("用全新只读会话审核门禁候选后再提交", async () => {
@@ -195,13 +281,78 @@ describe("QueueOrchestrator", () => {
 });
 
 class MutatingCandidateWorkspace extends RecordingWorkspace {
-  private captures = 0;
+  private sourceCandidate = createCandidate("candidate-before");
+  private verificationRuns = 0;
 
-  public override async captureCandidate() {
-    this.captures += 1;
+  public override async captureCandidate(): Promise<CandidateSnapshot> {
+    return this.sourceCandidate;
+  }
+
+  /*
+   * 第一次验证模拟 pnpm 补全锁文件，提升后第二次验证保持稳定。
+   * Fake 不直接改主候选，只有 promoteCandidate 被应用层调用时才更新源快照。
+   */
+  public override async openVerificationWorkspace(input: {
+    expectedCandidate: CandidateSnapshot;
+  }): Promise<VerificationWorkspace> {
+    this.verificationRuns += 1;
+    const isolatedCandidate = this.verificationRuns === 1
+      ? createCandidate("candidate-generated")
+      : input.expectedCandidate;
     return {
-      fingerprint: `candidate-${this.captures}`,
+      projectRoot: "/verification",
+      auditChanges: (task) => this.auditChanges(task),
+      captureCandidate: () => Promise.resolve(isolatedCandidate),
+      promoteCandidate: () => {
+        this.sourceCandidate = isolatedCandidate;
+        return Promise.resolve();
+      },
+      dispose: () => {
+        this.verificationDisposals += 1;
+        return Promise.resolve();
+      },
+    };
+  }
+}
+
+class BoundaryViolatingWorkspace extends RecordingWorkspace {
+  public promoted = false;
+
+  /*
+   * 验证副本新增受 deny 保护的 .env，应用层必须先记录 GateRun 再阻塞任务。
+   * promoteCandidate 若被错误调用会改变 promoted，从而让测试直接暴露安全回归。
+   */
+  public override async openVerificationWorkspace(input: {
+    expectedCandidate: CandidateSnapshot;
+  }): Promise<VerificationWorkspace> {
+    const isolatedCandidate: CandidateSnapshot = {
+      fingerprint: "boundary-candidate",
       diff: "diff",
+      files: [
+        ...input.expectedCandidate.files,
+        {
+          path: ".env",
+          kind: "file",
+          mode: 0o100644,
+          contentHash: "secret",
+        },
+      ],
+    };
+    return {
+      projectRoot: "/verification",
+      auditChanges: () => Promise.resolve({
+        changedFiles: ["src/candidate.ts", ".env"],
+        violations: [".env"],
+      }),
+      captureCandidate: () => Promise.resolve(isolatedCandidate),
+      promoteCandidate: () => {
+        this.promoted = true;
+        return Promise.resolve();
+      },
+      dispose: () => {
+        this.verificationDisposals += 1;
+        return Promise.resolve();
+      },
     };
   }
 }
