@@ -22,8 +22,8 @@ export const taskDocumentMetadataSchema = z.object({
     deny: z.array(nonEmptyString).default([]),
   }).strict(),
   gates: z.array(gateDefinitionSchema).min(1),
-  maxAttempts: z.number().int().positive().max(10).optional(),
-  timeoutMinutes: z.number().int().positive().max(720).optional(),
+  maxAttempts: z.number().int().positive().optional(),
+  timeoutMinutes: z.number().int().positive().optional(),
   manualAcceptance: z.array(nonEmptyString).default([]),
 }).strict();
 
@@ -41,27 +41,29 @@ export const taskManifestSchema = z.object({
     plan: nonEmptyString.optional(),
     contextFiles: z.array(nonEmptyString).default([]),
   }).strict(),
+  /*
+   * 资源字段是显式熔断策略，省略即表示持续执行到收敛或收到外部中断。
+   * Schema 只校验正数，不再用编排器硬编码上限替用户决定任务规模。
+   */
   defaults: z.object({
-    maxAttempts: z.number().int().positive().max(10).default(3),
-    taskTimeoutMinutes: z.number().int().positive().max(720).default(45),
-    maxTurns: z.number().int().positive().max(500).default(80),
+    maxAttempts: z.number().int().positive().optional(),
+    taskTimeoutMinutes: z.number().int().positive().optional(),
+    maxTurns: z.number().int().positive().optional(),
     maxBudgetUsd: z.number().positive().optional(),
     model: nonEmptyString.default("sonnet"),
     effort: effortSchema.default("high"),
   }).strict(),
   review: z.object({
     enabled: z.boolean().default(true),
-    maxAttempts: z.number().int().positive().max(5).default(2),
+    maxAttempts: z.number().int().positive().optional(),
     model: nonEmptyString.default("sonnet"),
     effort: effortSchema.default("high"),
-    maxTurns: z.number().int().positive().max(200).default(30),
+    maxTurns: z.number().int().positive().optional(),
     maxBudgetUsd: z.number().positive().optional(),
   }).strict().default({
     enabled: true,
-    maxAttempts: 2,
     model: "sonnet",
     effort: "high",
-    maxTurns: 30,
   }),
   git: z.object({
     commitMessagePrefix: nonEmptyString.default("task"),
@@ -100,13 +102,13 @@ export interface LoadedTaskManifest {
 export function getTaskAttemptLimit(
   manifest: TaskManifest,
   task: TaskDefinition,
-): number {
+): number | undefined {
   return task.maxAttempts ?? manifest.defaults.maxAttempts;
 }
 
 export function getTaskTimeoutMinutes(
   manifest: TaskManifest,
   task: TaskDefinition,
-): number {
+): number | undefined {
   return task.timeoutMinutes ?? manifest.defaults.taskTimeoutMinutes;
 }

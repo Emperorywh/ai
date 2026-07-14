@@ -25,7 +25,6 @@ import type {
 } from "./claude-message-observer.js";
 import { createToolBoundaryHooks } from "./sdk-tool-boundary.js";
 
-const WRITE_TOOLS = ["Read", "Glob", "Grep", "Edit", "Write"] as const;
 const READ_TOOLS = ["Read", "Glob", "Grep"] as const;
 const FORCE_CLOSE_GRACE_MS = 2_000;
 const MAX_STDERR_CHARACTERS = 20_000;
@@ -78,7 +77,13 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
       controller.abort();
       forceCloseTimer = setTimeout(() => closeQuery(activeQuery), FORCE_CLOSE_GRACE_MS);
     };
-    const timeout = setTimeout(() => abortQuery("timeout"), request.timeoutMs);
+    /*
+     * 会话限制是显式选择而不是编排器默认值。未声明 timeoutMs 时只响应外部中断，
+     * 长任务可以持续工作到产出结构化终态，不会因隐藏的基础设施计时器被截断。
+     */
+    const timeout = request.timeoutMs === undefined
+      ? undefined
+      : setTimeout(() => abortQuery("timeout"), request.timeoutMs);
     const externalAbortHandler = (): void => abortQuery("external");
     request.signal?.addEventListener("abort", externalAbortHandler, { once: true });
     if (isSignalAborted(request.signal)) {
@@ -195,7 +200,9 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
         kind !== "aborted",
       );
     } finally {
-      clearTimeout(timeout);
+      if (timeout !== undefined) {
+        clearTimeout(timeout);
+      }
       if (forceCloseTimer !== undefined) {
         clearTimeout(forceCloseTimer);
       }
@@ -217,7 +224,6 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
     ) {
       throw new ConfigurationError("新 sessionId 与 resumeSessionId 不能同时提供");
     }
-    const tools = request.access === "write" ? [...WRITE_TOOLS] : [...READ_TOOLS];
     /*
      * Claude Code 当前使用 Draft-07 校验 --json-schema；Zod 4 默认生成 Draft 2020-12，
      * 会让子进程在 session init 前因无法解析元 schema 而退出。方言转换属于 SDK 适配职责，
@@ -227,29 +233,53 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
       target: "draft-07",
     });
     const systemRules = request.access === "write"
-      ? "你是单 TASK 写入 Worker。只执行当前任务，不创建子 Agent，不启动浏览器，不 push 或部署。"
+      ? "你是单 TASK 自主 Worker。只执行当前任务；可以自主使用终端、技能、MCP 和子 Agent 完成分析、编码与非浏览器验证。不要启动浏览器，不要 push 或部署。"
       : "你是独立只读 Reviewer。不得编辑文件、创建子 Agent、启动浏览器或执行部署。";
 
     /*
-     * Claude Code 的 OAuth 登录凭据通过 user 设置来源加载；传入空数组会生成
-     * --setting-sources=，从而让已登录用户在 SDK 子进程中被误判为未登录。
+     * 写入 Worker 使用 Claude Code 的完整工具面与本机/项目扩展，并明确绕过交互式授权，
+     * 让它可以自行运行命令、调用技能和组织子 Agent。文件工具仍经过项目与 TASK 路径 hook，
+     * 会话结束后还会由 Workspace 做候选审计；Reviewer 则继续保持最小只读能力。
      */
-    const settingSources: NonNullable<Options["settingSources"]> = ["user"];
+    const accessOptions: Pick<
+      Options,
+      | "tools"
+      | "allowedTools"
+      | "permissionMode"
+      | "allowDangerouslySkipPermissions"
+      | "strictMcpConfig"
+      | "mcpServers"
+      | "skills"
+      | "settingSources"
+    > = request.access === "write"
+      ? {
+          tools: { type: "preset", preset: "claude_code" },
+          permissionMode: "bypassPermissions",
+          allowDangerouslySkipPermissions: true,
+          strictMcpConfig: false,
+          skills: "all",
+          settingSources: ["user", "project", "local"],
+        }
+      : {
+          tools: [...READ_TOOLS],
+          allowedTools: [...READ_TOOLS],
+          permissionMode: "dontAsk",
+          strictMcpConfig: true,
+          mcpServers: {},
+          skills: [],
+          settingSources: ["user"],
+        };
 
     return {
       abortController,
       cwd: request.cwd,
-      tools,
-      allowedTools: tools,
-      permissionMode: "dontAsk",
-      strictMcpConfig: true,
-      mcpServers: {},
-      skills: [],
-      settingSources,
+      ...accessOptions,
       stderr: onStderr,
       hooks: createToolBoundaryHooks(request.pathBoundary),
       persistSession: true,
-      maxTurns: request.maxTurns,
+      ...(request.maxTurns === undefined
+        ? {}
+        : { maxTurns: request.maxTurns }),
       ...(request.maxBudgetUsd === undefined
         ? {}
         : { maxBudgetUsd: request.maxBudgetUsd }),

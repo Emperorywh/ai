@@ -236,7 +236,10 @@ describe("GitWorkspace", () => {
       const promoted = await fixture.workspace.captureCandidate();
       expect(promoted.fingerprint).toBe(isolatedCandidate.fingerprint);
     } finally {
-      await verification.dispose();
+      const release = await verification.dispose();
+      const repeatedRelease = await verification.dispose();
+      expect(release).toEqual({ status: "released", diagnostics: [] });
+      expect(repeatedRelease).toEqual(release);
     }
 
     const worktreeList = await runGit(fixture.root, ["worktree", "list", "--porcelain"]);

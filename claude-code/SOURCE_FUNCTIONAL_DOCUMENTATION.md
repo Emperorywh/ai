@@ -53,6 +53,7 @@
 
 - `infrastructure/tasks/yaml-manifest-repository.ts`：编译 Manifest 与 TASK 目录。
 - `infrastructure/git/git-workspace.ts`：候选指纹、验证 worktree、候选归档和提交。
+- `infrastructure/git/verification-worktree-lease.ts`：隔离 worktree 的幂等释放、Windows 重试兜底与诊断。
 - `infrastructure/process/node-gate-runner.ts`：结构化运行门禁进程。
 - `infrastructure/claude/*`：Claude Agent SDK 适配与工具边界。
 - `infrastructure/persistence/*`：状态、事件、产物和运行锁。
@@ -68,7 +69,7 @@
 Manifest 只声明：
 
 - 项目根和上下文文件；
-- Worker 默认资源上限；
+- Worker 模型、推理强度和可选资源上限；
 - Reviewer 策略；
 - Git 提交前缀；
 - TASK 目录；
@@ -121,7 +122,7 @@ pending
 
 - `completed`：门禁、审核和提交完成；
 - `blocked`：需要人工决策或触发不可自动接受的安全边界；
-- `failed`：不可重试错误或尝试耗尽；
+- `failed`：不可重试错误，或用户显式配置的尝试上限耗尽；
 - `dependency_blocked`：至少一个依赖未完成，因此不会被释放。
 
 终态 TASK 不再转换状态。候选归档等附加事实通过受限字段替换函数写入，不伪造状态转换。
@@ -174,6 +175,8 @@ Run 终态：
 
 门禁无法直接改变主候选。
 
+释放由独立 `VerificationWorktreeLease` 管理：优先执行 `git worktree remove --force`；失败后使用带重试的文件系统删除，再执行 `git worktree prune --expire now`。释放结果为 `released/deferred`，`deferred` 只作为事件诊断持久化，不能覆盖已经得到的门禁结论或阻止队列继续。
+
 ### 6.3 门禁结果
 
 每次 GateRun 持久化：
@@ -210,15 +213,9 @@ blocked/failed TASK 不能把脏工作区留给独立任务。
 
 ## 8. Worker 与 Reviewer
 
-Worker 工具固定为：
+写入 Worker 使用 Claude Code 完整工具预设和 `bypassPermissions`，加载 user/project/local 设置、全部可发现技能及已配置 MCP，可以自主使用终端和子 Agent。系统提示只保留工作流边界：聚焦当前 TASK，不启动浏览器，不 push 或部署。
 
-- `Read`
-- `Glob`
-- `Grep`
-- `Edit`
-- `Write`
-
-不开放 Bash、子 Agent、MCP、浏览器、网络或项目 hooks。所有写入都经过 projectRoot、allow、deny、protectedPaths 检查。
+文件工具调用仍经过 projectRoot、allow、deny、protectedPaths hook；终端产生的所有文件变化还会在进入门禁前由 `Workspace.auditChanges` 统一审计。越界候选不会进入门禁或提交，而是转为 blocked 并归档。这样“开发能力”与“候选准入”分层，不用削减 Agent 工具来实现 Git 安全。
 
 Reviewer 是全新只读会话，只开放读取工具。它接收：
 
@@ -228,6 +225,8 @@ Reviewer 是全新只读会话，只开放读取工具。它接收：
 - 与 fingerprint 对应的 Git diff。
 
 critical/high/medium finding 会触发 repair。
+
+实现失败、门禁失败和审核发现默认无限循环到收敛。`maxAttempts`、`taskTimeoutMinutes/timeoutMinutes`、`maxTurns`、`maxBudgetUsd` 以及审核对应字段都是显式熔断选项；省略时 SDK 不接收这些限制，本地也不创建会话计时器。外部 `AbortSignal` 始终有效，确保用户仍可中断并恢复。
 
 ## 9. Git 提交与恢复
 
@@ -277,14 +276,14 @@ critical/high/medium finding 会触发 repair。
 
 1. 新运行前整个 Git 仓库必须干净。
 2. Manifest、上下文和全部 TASK 都是受保护文件。
-3. Agent 写入必须满足 allow，且不能命中 deny/protected。
+3. 候选进入门禁和提交前必须满足 allow，且不能命中 deny/protected。
 4. 门禁不在主候选上执行。
 5. 门禁产生的新候选必须完整重验。
 6. Reviewer 只能读取。
 7. 提交只包含当前项目候选。
 8. 阻塞候选先归档再释放其他 DAG 分支。
-9. 不 push、merge、rebase、reset 分支历史、部署或启动浏览器。
-10. 所有外部进程参数保持结构化，不通过 shell 拼接。
+9. Worker 工作流明确禁止 push、merge、rebase、reset 分支历史、部署或启动浏览器。
+10. 编排器门禁进程参数保持结构化，不通过 shell 拼接。
 
 ## 12. 测试证据
 
@@ -294,6 +293,8 @@ critical/high/medium finding 会触发 repair。
 - DAG 合法性和稳定顺序；
 - TASK/Run 状态转换；
 - 隔离 worktree、副作用提升和释放；
+- worktree 释放延后时保留门禁结论并继续后续 TASK；
+- 默认超过三轮仍持续 repair，以及显式资源上限透传；
 - 终态候选 Git ref 归档与主工作区清理；
 - blocked 分支隔离、依赖阻塞和独立分支继续；
 - 门禁进程、SDK 工具边界、持久化和锁；

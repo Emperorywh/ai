@@ -20,18 +20,13 @@ project:
     - AGENTS.md
 
 defaults:
-  maxAttempts: 3
-  taskTimeoutMinutes: 45
-  maxTurns: 80
   model: sonnet
   effort: high
 
 review:
   enabled: true
-  maxAttempts: 2
   model: sonnet
   effort: high
-  maxTurns: 30
 
 git:
   commitMessagePrefix: task

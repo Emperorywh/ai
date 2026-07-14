@@ -34,8 +34,18 @@ export interface CandidateArchive {
 }
 
 /*
+ * 释放状态是临时资源生命周期事实，不是门禁通过/失败事实。
+ * deferred 必须携带诊断，但调用方仍可持久化门禁结论并推进任务状态机。
+ */
+export interface VerificationWorkspaceRelease {
+  readonly status: "released" | "deferred";
+  readonly diagnostics: readonly string[];
+}
+
+/*
  * 验证工作区拥有候选源码的隔离副本，门禁只能改变这个副本。
- * 应用层显式决定是否提升变化；释放操作必须清理临时 Git worktree。
+ * 应用层显式决定是否提升变化；释放结果独立于门禁业务结论，操作系统暂时占用文件时
+ * 返回 deferred 诊断而不是覆盖已经完成的验证结果。
  */
 export interface VerificationWorkspace {
   readonly projectRoot: string;
@@ -45,7 +55,7 @@ export interface VerificationWorkspace {
   ): Promise<ChangeAuditResult>;
   captureCandidate(): Promise<CandidateSnapshot>;
   promoteCandidate(paths: readonly string[]): Promise<void>;
-  dispose(): Promise<void>;
+  dispose(): Promise<VerificationWorkspaceRelease>;
 }
 
 export interface Workspace {

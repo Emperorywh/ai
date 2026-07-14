@@ -163,7 +163,10 @@ export class RecordingWorkspace implements Workspace {
       promoteCandidate: () => Promise.resolve(),
       dispose: () => {
         this.verificationDisposals += 1;
-        return Promise.resolve();
+        return Promise.resolve({
+          status: "released" as const,
+          diagnostics: [],
+        });
       },
     };
   }
@@ -248,9 +251,6 @@ export function createLoadedManifest(
       contextFiles: [],
     },
     defaults: {
-      maxAttempts: 3,
-      taskTimeoutMinutes: 1,
-      maxTurns: 10,
       model: "sonnet",
       effort: "high",
     },

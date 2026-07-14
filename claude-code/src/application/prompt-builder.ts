@@ -11,7 +11,8 @@ import type { GateExecutionState } from "../domain/run-state.js";
 
 const writeSafetyRules = `
 你只负责当前一个 TASK。严格遵守以下边界：
-- 不创建或调用子 Agent，不询问用户；需要关键决策时返回 blocked 和 blockingQuestions。
+- 可以自主调用子 Agent、终端、技能和 MCP 完成当前 TASK；不要询问用户，优先依据现有规格和代码自行作出可逆决策。
+- 只有缺少无法从项目推导的外部信息、凭据或不可逆产品决策时，才返回 blocked 和 blockingQuestions。
 - 不修改 Manifest、SPEC、PLAN、TASK 正文或项目策略文件。
 - 不执行 Git commit、push、reset、checkout、clean、rebase 或 merge。
 - 不部署，不启动浏览器、UI 自动化、开发服务器或 watch 进程。

@@ -3,6 +3,7 @@
  * 重点验证中止优先级、会话可信边界与终态协议，防止基础设施异常污染应用状态机。
  */
 import type {
+  Options,
   Query,
   SDKMessage,
   SDKResultMessage,
@@ -210,13 +211,13 @@ describe("ClaudeAgentSdkExecutor", () => {
   });
 
   /*
-   * OAuth 凭据属于 Claude Code 的 user 设置来源，空来源会导致已登录环境在 SDK 中失效。
-   * 其余扩展能力仍由空 MCP、空 skills 和工具白名单独立关闭，不依赖清空设置来源。
+   * 自主 Worker 应继承完整 Claude Code 能力并跳过交互授权，才能自行运行测试、使用技能/MCP
+   * 和拆分子任务。这里从 SDK 公开选项验证能力集合，避免后续又退化为五个文件工具。
    */
-  it("只启用 user 设置来源以复用本机 Claude 登录", async () => {
-    let settingSources: readonly string[] | undefined;
+  it("写入 Worker 启用完整工具与自主权限", async () => {
+    let capturedOptions: Options | undefined;
     const queryFactory: AgentQueryFactory = ({ options }) => {
-      settingSources = options?.settingSources;
+      capturedOptions = options;
       return createFakeQuery(messageStream([
         createInitMessage(SESSION_ID),
         createSuccessResult(SESSION_ID),
@@ -227,7 +228,43 @@ describe("ClaudeAgentSdkExecutor", () => {
     const outcome = await executor.run(createRequest());
 
     expect(outcome.ok).toBe(true);
-    expect(settingSources).toEqual(["user"]);
+    expect(capturedOptions?.tools).toEqual({
+      type: "preset",
+      preset: "claude_code",
+    });
+    expect(capturedOptions?.allowedTools).toBeUndefined();
+    expect(capturedOptions?.permissionMode).toBe("bypassPermissions");
+    expect(capturedOptions?.allowDangerouslySkipPermissions).toBe(true);
+    expect(capturedOptions?.strictMcpConfig).toBe(false);
+    expect(capturedOptions?.skills).toBe("all");
+    expect(capturedOptions?.settingSources).toEqual([
+      "user",
+      "project",
+      "local",
+    ]);
+  });
+
+  /*
+   * 未显式声明资源上限时，执行器不能向 SDK 注入轮数、预算或本地计时器。
+   * Fake 消息流立即完成，因此测试只观察选项，不依赖真实时间或真实 Claude 进程。
+   */
+  it("默认不注入 Agent 轮数和预算上限", async () => {
+    let capturedOptions: Options | undefined;
+    const executor = new ClaudeAgentSdkExecutor({
+      queryFactory: ({ options }) => {
+        capturedOptions = options;
+        return createFakeQuery(messageStream([
+          createInitMessage(SESSION_ID),
+          createSuccessResult(SESSION_ID),
+        ]));
+      },
+    });
+
+    const outcome = await executor.run(withoutResourceLimits(createRequest()));
+
+    expect(outcome.ok).toBe(true);
+    expect(capturedOptions?.maxTurns).toBeUndefined();
+    expect(capturedOptions?.maxBudgetUsd).toBeUndefined();
   });
 
   /*
@@ -281,6 +318,25 @@ function createRequest(
     resultSchema,
     ...overrides,
   };
+}
+
+/*
+ * exactOptionalPropertyTypes 要求“无限制”通过省略字段表达，而不是显式写入 undefined。
+ * 测试辅助函数集中完成字段剥离，避免每个用例复制完整 AgentRunRequest 夹具。
+ */
+function withoutResourceLimits<T>(
+  request: AgentRunRequest<T>,
+): AgentRunRequest<T> {
+  const {
+    maxTurns: ignoredMaxTurns,
+    maxBudgetUsd: ignoredMaxBudget,
+    timeoutMs: ignoredTimeout,
+    ...unlimitedRequest
+  } = request;
+  void ignoredMaxTurns;
+  void ignoredMaxBudget;
+  void ignoredTimeout;
+  return unlimitedRequest;
 }
 
 /*

@@ -119,9 +119,6 @@ describe("YamlManifestRepository", () => {
     expect(loaded.projectRoot).toBe(resolve(fixture.root));
     expect(loaded.manifest.version).toBe(2);
     expect(loaded.manifest.defaults).toEqual({
-      maxAttempts: 3,
-      taskTimeoutMinutes: 45,
-      maxTurns: 80,
       model: "sonnet",
       effort: "high",
     });

@@ -34,6 +34,7 @@ import type { GateRunner } from "../ports/gate-runner.js";
 import type {
   CandidateSnapshot,
   VerificationWorkspace,
+  VerificationWorkspaceRelease,
   Workspace,
 } from "../ports/workspace.js";
 import {
@@ -62,6 +63,12 @@ interface GateObservation {
   readonly candidateAfter: CandidateSnapshot;
   readonly auditFailure?: string | undefined;
   readonly allPassed: boolean;
+}
+
+interface AgentResourceLimits {
+  readonly maxTurns?: number;
+  readonly maxBudgetUsd?: number;
+  readonly timeoutMs?: number;
 }
 
 export class TaskExecutionService {
@@ -263,11 +270,11 @@ export class TaskExecutionService {
       cwd: input.loaded.projectRoot,
       model: input.loaded.manifest.defaults.model,
       effort: input.loaded.manifest.defaults.effort,
-      maxTurns: input.loaded.manifest.defaults.maxTurns,
-      ...(input.loaded.manifest.defaults.maxBudgetUsd === undefined
-        ? {}
-        : { maxBudgetUsd: input.loaded.manifest.defaults.maxBudgetUsd }),
-      timeoutMs: getTaskTimeoutMinutes(input.loaded.manifest, input.task) * 60_000,
+      ...this.buildAgentResourceLimits(
+        input,
+        input.loaded.manifest.defaults.maxTurns,
+        input.loaded.manifest.defaults.maxBudgetUsd,
+      ),
       ...(input.signal === undefined ? {} : { signal: input.signal }),
       ...(shouldResume
         ? { resumeSessionId: attempt.sessionId }
@@ -321,6 +328,8 @@ export class TaskExecutionService {
      * 门禁、审计和候选捕获全部发生在隔离 worktree；finally 保证任何返回路径都会释放它。
      * 合法副作用只有在形成诊断后才显式提升，且提升后的版本必须从第一道门禁重新验证。
      */
+    let stepResult: TaskStepResult;
+    let release: VerificationWorkspaceRelease;
     try {
       const observation = await this.observeGateRun(
         input,
@@ -330,11 +339,49 @@ export class TaskExecutionService {
         startedAt,
       );
       if (observation === undefined) {
-        return { state: input.state, message: "门禁被中止，将在恢复后重新执行" };
+        stepResult = {
+          state: input.state,
+          message: "门禁被中止，将在恢复后重新执行",
+        };
+      } else {
+        stepResult = await this.resolveGateObservation(
+          input,
+          verification,
+          observation,
+        );
       }
-      return await this.resolveGateObservation(input, verification, observation);
     } finally {
-      await verification.dispose();
+      release = await this.releaseVerificationWorkspace(verification);
+    }
+
+    if (release.status === "released") {
+      return stepResult;
+    }
+
+    /*
+     * 临时资源释放与门禁结论属于两个独立事实。Windows 文件占用只追加可观测诊断，
+     * 状态机仍按已经得到的门禁结果继续循环，后续 worktree 使用唯一目录不会相互污染。
+     */
+    return {
+      ...stepResult,
+      message: `${stepResult.message}；隔离验证目录清理已延后，不影响任务继续`,
+      details: {
+        ...stepResult.details,
+        verificationWorkspaceRelease: release,
+      },
+    };
+  }
+
+  private async releaseVerificationWorkspace(
+    verification: VerificationWorkspace,
+  ): Promise<VerificationWorkspaceRelease> {
+    try {
+      return await verification.dispose();
+    } catch (error) {
+      return {
+        status: "deferred",
+        diagnostics: [error instanceof Error ? error.message : String(error)],
+      };
     }
   }
 
@@ -470,7 +517,11 @@ export class TaskExecutionService {
     input: TaskStepInput,
     taskState: TaskRunState,
   ): Promise<TaskStepResult> {
-    if (taskState.reviewAttempts >= input.loaded.manifest.review.maxAttempts) {
+    const reviewAttemptLimit = input.loaded.manifest.review.maxAttempts;
+    if (
+      reviewAttemptLimit !== undefined
+      && taskState.reviewAttempts >= reviewAttemptLimit
+    ) {
       return {
         state: transitionTask(
           input.state,
@@ -516,7 +567,13 @@ export class TaskExecutionService {
 
     const reviewAttempts = taskState.reviewAttempts + 1;
     if (!outcome.ok) {
-      if (reviewAttempts < input.loaded.manifest.review.maxAttempts && outcome.retryable) {
+      if (
+        outcome.retryable
+        && (
+          reviewAttemptLimit === undefined
+          || reviewAttempts < reviewAttemptLimit
+        )
+      ) {
         return {
           state: transitionTask(
             input.state,
@@ -583,7 +640,10 @@ export class TaskExecutionService {
         },
         this.now(),
       );
-      if (reviewAttempts >= input.loaded.manifest.review.maxAttempts) {
+      if (
+        reviewAttemptLimit !== undefined
+        && reviewAttempts >= reviewAttemptLimit
+      ) {
         return {
           state: transitionTask(
             stateWithReview,
@@ -641,11 +701,11 @@ export class TaskExecutionService {
       cwd: input.loaded.projectRoot,
       model: input.loaded.manifest.review.model,
       effort: input.loaded.manifest.review.effort,
-      maxTurns: input.loaded.manifest.review.maxTurns,
-      ...(input.loaded.manifest.review.maxBudgetUsd === undefined
-        ? {}
-        : { maxBudgetUsd: input.loaded.manifest.review.maxBudgetUsd }),
-      timeoutMs: getTaskTimeoutMinutes(input.loaded.manifest, input.task) * 60_000,
+      ...this.buildAgentResourceLimits(
+        input,
+        input.loaded.manifest.review.maxTurns,
+        input.loaded.manifest.review.maxBudgetUsd,
+      ),
       ...(input.signal === undefined ? {} : { signal: input.signal }),
       sessionId: randomUUID(),
       pathBoundary: {
@@ -761,6 +821,28 @@ export class TaskExecutionService {
     });
   }
 
+  /*
+   * 实现与审核共享同一套“显式限制才生效”规则，避免两个调用点分别换算时间并逐渐漂移。
+   * 空对象表示完全交给 Agent 自主收敛，仅外部中断仍能终止当前阶段并保存 checkpoint。
+   */
+  private buildAgentResourceLimits(
+    input: TaskStepInput,
+    maxTurns: number | undefined,
+    maxBudgetUsd: number | undefined,
+  ): AgentResourceLimits {
+    const timeoutMinutes = getTaskTimeoutMinutes(
+      input.loaded.manifest,
+      input.task,
+    );
+    return {
+      ...(maxTurns === undefined ? {} : { maxTurns }),
+      ...(maxBudgetUsd === undefined ? {} : { maxBudgetUsd }),
+      ...(timeoutMinutes === undefined
+        ? {}
+        : { timeoutMs: timeoutMinutes * 60_000 }),
+    };
+  }
+
   private retryOrFail(
     input: TaskStepInput,
     state: RunState,
@@ -771,7 +853,10 @@ export class TaskExecutionService {
       throw new Error(`运行状态中不存在任务 ${input.task.id}`);
     }
     const attemptLimit = getTaskAttemptLimit(input.loaded.manifest, input.task);
-    if (taskState.attempts.length >= attemptLimit) {
+    if (
+      attemptLimit !== undefined
+      && taskState.attempts.length >= attemptLimit
+    ) {
       return {
         state: transitionTask(
           state,

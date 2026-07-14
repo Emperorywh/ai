@@ -45,6 +45,11 @@ describe("writeSampleProject", () => {
       join(root, "orchestrator.yaml"),
     );
     expect(loaded.tasks.map((task) => task.id)).toEqual(["TASK-001"]);
+    expect(loaded.manifest.defaults.maxAttempts).toBeUndefined();
+    expect(loaded.manifest.defaults.taskTimeoutMinutes).toBeUndefined();
+    expect(loaded.manifest.defaults.maxTurns).toBeUndefined();
+    expect(loaded.manifest.review.maxAttempts).toBeUndefined();
+    expect(loaded.manifest.review.maxTurns).toBeUndefined();
   });
 
   it("保留已有普通文件并使重复初始化稳定收敛", async () => {

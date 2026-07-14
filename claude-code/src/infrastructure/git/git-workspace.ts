@@ -28,9 +28,11 @@ import type {
   CandidateArchive,
   ChangeAuditResult,
   VerificationWorkspace,
+  VerificationWorkspaceRelease,
   Workspace,
   WorkspaceIdentity,
 } from "../../ports/workspace.js";
+import { VerificationWorktreeLease } from "./verification-worktree-lease.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_GIT_OUTPUT_BYTES = 20 * 1024 * 1024;
@@ -188,6 +190,11 @@ export class GitWorkspace implements Workspace {
     );
     const temporaryRoot = await mkdtemp(join(tmpdir(), "claude-task-verification-"));
     const worktreeRoot = join(temporaryRoot, "worktree");
+    const lease = new VerificationWorktreeLease({
+      repositoryRoot,
+      worktreeRoot,
+      temporaryRoot,
+    });
 
     try {
       await this.gitAt(repositoryRoot, [
@@ -225,13 +232,15 @@ export class GitWorkspace implements Workspace {
       return new GitVerificationWorkspace({
         sourceProjectRoot: this.projectRoot,
         projectRoot: verificationProjectRoot,
-        repositoryRoot,
-        worktreeRoot,
-        temporaryRoot,
         workspace: isolatedWorkspace,
+        lease,
       });
     } catch (error) {
-      await this.removeVerificationWorktree(repositoryRoot, worktreeRoot, temporaryRoot);
+      /*
+       * 初始化失败必须保留原始异常语义；释放诊断只描述临时资源，不能覆盖候选复制或
+       * 指纹校验的真正根因。lease 内部会完成 Git 删除、文件系统兜底和注册修剪。
+       */
+      await lease.release().catch(() => undefined);
       throw error;
     }
   }
@@ -548,38 +557,13 @@ export class GitWorkspace implements Workspace {
     }
   }
 
-  private async removeVerificationWorktree(
-    repositoryRoot: string,
-    worktreeRoot: string,
-    temporaryRoot: string,
-  ): Promise<void> {
-    try {
-      if (await pathExists(worktreeRoot)) {
-        try {
-          await this.gitAt(repositoryRoot, [
-            "worktree",
-            "remove",
-            "--force",
-            worktreeRoot,
-          ]);
-        } catch {
-          await rm(worktreeRoot, { recursive: true, force: true });
-          await this.gitAt(repositoryRoot, ["worktree", "prune"]);
-        }
-      }
-    } finally {
-      await rm(temporaryRoot, { recursive: true, force: true });
-    }
-  }
 }
 
 interface GitVerificationWorkspaceInput {
   readonly sourceProjectRoot: string;
   readonly projectRoot: string;
-  readonly repositoryRoot: string;
-  readonly worktreeRoot: string;
-  readonly temporaryRoot: string;
   readonly workspace: GitWorkspace;
+  readonly lease: VerificationWorktreeLease;
 }
 
 /*
@@ -588,7 +572,6 @@ interface GitVerificationWorkspaceInput {
  */
 class GitVerificationWorkspace implements VerificationWorkspace {
   public readonly projectRoot: string;
-  private disposed = false;
 
   public constructor(private readonly input: GitVerificationWorkspaceInput) {
     this.projectRoot = input.projectRoot;
@@ -615,39 +598,8 @@ class GitVerificationWorkspace implements VerificationWorkspace {
     }
   }
 
-  public async dispose(): Promise<void> {
-    if (this.disposed) {
-      return;
-    }
-    this.disposed = true;
-    let removalError: unknown;
-    try {
-      await execFileAsync(
-        "git",
-        ["worktree", "remove", "--force", this.input.worktreeRoot],
-        {
-          cwd: this.input.repositoryRoot,
-          encoding: "utf8",
-          maxBuffer: MAX_GIT_OUTPUT_BYTES,
-          windowsHide: true,
-          timeout: GIT_COMMAND_TIMEOUT_MS,
-        },
-      );
-    } catch (error) {
-      removalError = error;
-    }
-    await rm(this.input.temporaryRoot, { recursive: true, force: true });
-    if (removalError !== undefined) {
-      await execFileAsync("git", ["worktree", "prune"], {
-        cwd: this.input.repositoryRoot,
-        windowsHide: true,
-        timeout: GIT_COMMAND_TIMEOUT_MS,
-      }).catch(() => undefined);
-      throw new InfrastructureError(
-        `无法释放隔离验证工作区：${this.input.worktreeRoot}`,
-        { cause: removalError },
-      );
-    }
+  public dispose(): Promise<VerificationWorkspaceRelease> {
+    return this.input.lease.release();
   }
 }
 

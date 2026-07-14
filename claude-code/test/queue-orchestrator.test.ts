@@ -50,6 +50,9 @@ describe("QueueOrchestrator", () => {
       "TASK-B",
       "TASK-C",
     ]);
+    expect(fixture.agent.requests[0]?.prompt).toContain(
+      "可以自主调用子 Agent、终端、技能和 MCP",
+    );
     expect(result.artifacts).toHaveLength(2);
     expect(fixture.stateStore.snapshots.length).toBeGreaterThan(10);
     /*
@@ -107,6 +110,45 @@ describe("QueueOrchestrator", () => {
       "11111111-1111-4111-8111-111111111111",
     );
     expect(fixture.agent.requests[0]?.sessionId).toBeUndefined();
+  });
+
+  it("默认持续修复超过旧三次上限直到任务完成", async () => {
+    let implementationRuns = 0;
+    const agent = new RecordingAgent((request) => {
+      implementationRuns += 1;
+      if (implementationRuns <= 5) {
+        return {
+          ok: true,
+          sessionId: request.sessionId ?? "missing-session",
+          data: {
+            status: "failed",
+            summary: `第 ${implementationRuns} 轮仍需修复`,
+            blockingQuestions: [],
+            notes: [],
+          },
+          costUsd: 0.01,
+          turns: 1,
+        };
+      }
+      return completedBehavior(request);
+    });
+    const fixture = createFixture(new RecordingWorkspace(), agent);
+    const loaded = createLoadedManifest([{ id: "TASK-A" }]);
+
+    const result = await fixture.orchestrator.start(loaded);
+
+    expect(result.state.status).toBe("completed");
+    expect(result.state.tasks["TASK-A"]?.attempts).toHaveLength(6);
+    expect(agent.requests.map((request) => request.attemptKind)).toEqual([
+      "implementation",
+      "repair",
+      "repair",
+      "repair",
+      "repair",
+      "repair",
+    ]);
+    expect(agent.requests.every((request) =>
+      request.maxTurns === undefined && request.timeoutMs === undefined)).toBe(true);
   });
 
   it("恢复尚未初始化的 executing checkpoint 时创建全新会话", async () => {
@@ -239,6 +281,29 @@ describe("QueueOrchestrator", () => {
     expect(workspace.verificationDisposals).toBe(1);
   });
 
+  it("隔离 worktree 延迟清理不会覆盖门禁结果或中断队列", async () => {
+    const workspace = new DeferredReleaseWorkspace();
+    const fixture = createFixture(workspace);
+    const loaded = createLoadedManifest([
+      { id: "TASK-A" },
+      { id: "TASK-B", dependsOn: ["TASK-A"] },
+    ]);
+
+    const result = await fixture.orchestrator.start(loaded);
+
+    expect(result.state.status).toBe("completed");
+    expect(workspace.commits).toEqual(["TASK-A", "TASK-B"]);
+    const releaseEvents = fixture.logger.events.filter((event) =>
+      event.message.includes("清理已延后"));
+    expect(releaseEvents).toHaveLength(2);
+    expect(releaseEvents[0]?.details).toMatchObject({
+      verificationWorkspaceRelease: {
+        status: "deferred",
+        diagnostics: ["Windows 文件仍被占用"],
+      },
+    });
+  });
+
   it("用全新只读会话审核门禁候选后再提交", async () => {
     const agent = new RecordingAgent((request) =>
       request.attemptKind === "review"
@@ -309,7 +374,10 @@ class MutatingCandidateWorkspace extends RecordingWorkspace {
       },
       dispose: () => {
         this.verificationDisposals += 1;
-        return Promise.resolve();
+        return Promise.resolve({
+          status: "released" as const,
+          diagnostics: [],
+        });
       },
     };
   }
@@ -351,8 +419,32 @@ class BoundaryViolatingWorkspace extends RecordingWorkspace {
       },
       dispose: () => {
         this.verificationDisposals += 1;
-        return Promise.resolve();
+        return Promise.resolve({
+          status: "released" as const,
+          diagnostics: [],
+        });
       },
+    };
+  }
+}
+
+class DeferredReleaseWorkspace extends RecordingWorkspace {
+  /*
+   * Fake 只模拟“业务验证已完成但临时目录仍被系统占用”的释放结果。
+   * 候选、门禁和提交保持稳定，用于证明清理诊断不会改变队列状态流。
+   */
+  public override async openVerificationWorkspace(input: {
+    expectedCandidate: CandidateSnapshot;
+  }): Promise<VerificationWorkspace> {
+    return {
+      projectRoot: "/verification",
+      auditChanges: (task) => this.auditChanges(task),
+      captureCandidate: () => Promise.resolve(input.expectedCandidate),
+      promoteCandidate: () => Promise.resolve(),
+      dispose: () => Promise.resolve({
+        status: "deferred",
+        diagnostics: ["Windows 文件仍被占用"],
+      }),
     };
   }
 }

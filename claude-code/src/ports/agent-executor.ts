@@ -28,9 +28,13 @@ export interface AgentRunRequest<T> {
   readonly cwd: string;
   readonly model: string;
   readonly effort: "low" | "medium" | "high" | "xhigh" | "max";
-  readonly maxTurns: number;
+  /*
+   * 三个可选字段只传递用户显式配置的熔断策略；省略时适配器不得自行补默认限制。
+   * 外部 signal 独立存在，保证无限制会话仍然可以安全中断并从 checkpoint 恢复。
+   */
+  readonly maxTurns?: number;
   readonly maxBudgetUsd?: number;
-  readonly timeoutMs: number;
+  readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
   readonly sessionId?: string;
   readonly resumeSessionId?: string;
