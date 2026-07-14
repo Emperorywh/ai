@@ -143,6 +143,51 @@ describe("ClaudeAgentSdkExecutor", () => {
       retryable: true,
     });
   });
+
+  /*
+   * OAuth 凭据属于 Claude Code 的 user 设置来源，空来源会导致已登录环境在 SDK 中失效。
+   * 其余扩展能力仍由空 MCP、空 skills 和工具白名单独立关闭，不依赖清空设置来源。
+   */
+  it("只启用 user 设置来源以复用本机 Claude 登录", async () => {
+    let settingSources: readonly string[] | undefined;
+    const queryFactory: AgentQueryFactory = ({ options }) => {
+      settingSources = options?.settingSources;
+      return createFakeQuery(messageStream([
+        createInitMessage(SESSION_ID),
+        createSuccessResult(SESSION_ID),
+      ]));
+    };
+    const executor = new ClaudeAgentSdkExecutor(queryFactory);
+
+    const outcome = await executor.run(createRequest());
+
+    expect(outcome.ok).toBe(true);
+    expect(settingSources).toEqual(["user"]);
+  });
+
+  /*
+   * 子进程在 init 前退出时通常只有 stderr 包含根因，执行器必须把它带回稳定失败结果。
+   * 测试使用注入回调模拟诊断输出，不启动真实 Claude 进程或读取用户配置。
+   */
+  it("执行异常时保留 Claude 子进程 stderr", async () => {
+    const queryFactory: AgentQueryFactory = ({ options }) => {
+      options?.stderr?.("Not logged in · Please run /login\n");
+      return createFakeQuery(failingMessageStream("process exited with code 1"));
+    };
+    const executor = new ClaudeAgentSdkExecutor(queryFactory);
+
+    const outcome = await executor.run(createRequest());
+
+    expect(outcome).toMatchObject({
+      ok: false,
+      kind: "execution",
+    });
+    if (outcome.ok) {
+      throw new Error("测试期望执行器返回失败结果");
+    }
+    expect(outcome.message).toContain("process exited with code 1");
+    expect(outcome.message).toContain("Not logged in");
+  });
 });
 
 function createRequest(

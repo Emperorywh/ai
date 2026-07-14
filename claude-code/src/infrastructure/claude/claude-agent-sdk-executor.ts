@@ -23,6 +23,7 @@ import { createToolBoundaryHooks } from "./sdk-tool-boundary.js";
 const WRITE_TOOLS = ["Read", "Glob", "Grep", "Edit", "Write"] as const;
 const READ_TOOLS = ["Read", "Glob", "Grep"] as const;
 const FORCE_CLOSE_GRACE_MS = 2_000;
+const MAX_STDERR_CHARACTERS = 20_000;
 
 export type AgentQueryFactory = (input: Parameters<typeof query>[0]) => Query;
 
@@ -43,6 +44,7 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
     let streamCompleted = false;
     let initializedSessionId: string | undefined;
     let observerError: unknown;
+    let capturedStderr = "";
 
     const abortQuery = (reason: "timeout" | "external"): void => {
       if (abortState.reason !== undefined) {
@@ -60,7 +62,13 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
     }
 
     try {
-      const options = this.buildOptions(request, controller);
+      const options = this.buildOptions(
+        request,
+        controller,
+        (data) => {
+          capturedStderr = appendCapturedStderr(capturedStderr, data);
+        },
+      );
       if (readAbortReason(abortState) === "external") {
         return this.failure("aborted", "Agent 在启动前被外部中止", undefined, 0, 0, false);
       }
@@ -154,7 +162,7 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
           : "execution";
       return this.failure(
         kind,
-        error instanceof Error ? error.message : String(error),
+        describeExecutionError(error, capturedStderr),
         initializedSessionId,
         0,
         0,
@@ -175,6 +183,7 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
   private buildOptions<T>(
     request: AgentRunRequest<T>,
     abortController: AbortController,
+    onStderr: (data: string) => void,
   ): Options {
     if (
       request.sessionId !== undefined
@@ -188,6 +197,12 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
       ? "你是单 TASK 写入 Worker。只执行当前任务，不创建子 Agent，不启动浏览器，不 push 或部署。"
       : "你是独立只读 Reviewer。不得编辑文件、创建子 Agent、启动浏览器或执行部署。";
 
+    /*
+     * Claude Code 的 OAuth 登录凭据通过 user 设置来源加载；传入空数组会生成
+     * --setting-sources=，从而让已登录用户在 SDK 子进程中被误判为未登录。
+     */
+    const settingSources: NonNullable<Options["settingSources"]> = ["user"];
+
     return {
       abortController,
       cwd: request.cwd,
@@ -197,7 +212,8 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
       strictMcpConfig: true,
       mcpServers: {},
       skills: [],
-      settingSources: [],
+      settingSources,
+      stderr: onStderr,
       hooks: createToolBoundaryHooks(request.pathBoundary),
       persistSession: true,
       maxTurns: request.maxTurns,
@@ -283,4 +299,28 @@ function closeQuery(activeQuery: Query | undefined): void {
   } catch {
     // Query 已处于异常清理路径，关闭失败不能覆盖原始 Agent 结果。
   }
+}
+
+/*
+ * 子进程 stderr 只保留尾部，既能记录认证和参数错误，也避免异常输出无限扩大内存与状态正文。
+ * 默认不启用 Claude debug，因此这里捕获的是正常错误诊断，而不是包含大量内部上下文的调试日志。
+ */
+function appendCapturedStderr(current: string, data: string): string {
+  const next = current + data;
+  return next.length <= MAX_STDERR_CHARACTERS
+    ? next
+    : next.slice(-MAX_STDERR_CHARACTERS);
+}
+
+/*
+ * SDK 有时只抛出笼统的进程退出码，而真实原因位于 stderr；两者合并后写入 attempt summary。
+ * 若 SDK 错误已经包含相同诊断则不重复追加，保持终端和状态文件中的错误可读。
+ */
+function describeExecutionError(error: unknown, capturedStderr: string): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const stderr = capturedStderr.trim();
+  if (stderr.length === 0 || message.includes(stderr)) {
+    return message;
+  }
+  return `${message}\nClaude Code stderr:\n${stderr}`;
 }
