@@ -11,7 +11,10 @@ import {
   createOrchestratorRuntime,
   loadManifest,
 } from "./composition-root.js";
-import { writeSampleProject } from "./sample-project-writer.js";
+import {
+  writeSampleProject,
+  type SampleProjectWriteResult,
+} from "./sample-project-writer.js";
 
 const DEFAULT_MANIFEST = "orchestrator.yaml";
 const EXIT_SUCCESS = 0;
@@ -29,11 +32,11 @@ const program = new Command()
 
 program
   .command("init")
-  .description("生成不会覆盖已有文件的最小配置骨架")
+  .description("增量生成最小配置骨架，保留并跳过已有普通文件")
   .argument("[directory]", "目标项目目录", ".")
   .action(async (directory: string) => {
-    const files = await writeSampleProject(directory);
-    process.stdout.write(`已生成 ${files.length} 个文件：\n${files.join("\n")}\n`);
+    const result = await writeSampleProject(directory);
+    printInitializationResult(result);
   });
 
 program
@@ -127,6 +130,24 @@ await program.parseAsync(process.argv).catch((error: unknown) => {
 });
 
 type Runtime = Awaited<ReturnType<typeof createOrchestratorRuntime>>;
+
+/*
+ * 初始化输出区分本次创建与已有文件，重复执行不会把“无新文件”误报为失败。
+ * 跳过列表显式提醒用户现有内容没有被校验或覆盖，需要自行确认其配置是否仍然适用。
+ */
+function printInitializationResult(result: SampleProjectWriteResult): void {
+  const lines = [
+    `初始化完成：创建 ${result.createdFiles.length} 个文件，跳过 ${result.skippedFiles.length} 个已有文件。`,
+    ...(result.createdFiles.length === 0
+      ? []
+      : ["已创建：", ...result.createdFiles]),
+    ...(result.skippedFiles.length === 0
+      ? []
+      : ["已跳过（保留原内容）：", ...result.skippedFiles]),
+    "",
+  ];
+  process.stdout.write(lines.join("\n"));
+}
 
 async function executeRuntime(
   runtime: Runtime,

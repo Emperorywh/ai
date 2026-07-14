@@ -1,8 +1,8 @@
 /*
- * 初始化器只生成最小、可执行的契约骨架，不猜测业务需求，也不会覆盖任何已有文件。
- * 示例将规格、计划和任务描述保持分离，便于后续由访谈与规划流程独立维护这些文档。
+ * 初始化器在现有项目中增量生成最小契约骨架：同名普通文件保持原样，只补齐缺失文件。
+ * 路径类型冲突或写入异常会回滚本次新建内容，用户已有文件始终不进入回滚集合。
  */
-import { mkdir, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, unlink, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { ConfigurationError } from "../domain/errors.js";
 
@@ -91,26 +91,70 @@ tasks:
 `,
 };
 
-export async function writeSampleProject(directory: string): Promise<readonly string[]> {
+export interface SampleProjectWriteResult {
+  readonly createdFiles: readonly string[];
+  readonly skippedFiles: readonly string[];
+}
+
+/*
+ * 文件创建采用独占写入而不是“先检查再写入”，避免并发初始化时覆盖用户文件。
+ * 已存在的普通文件只记录为 skipped，后续重复执行能够稳定收敛到同一目录结构。
+ */
+export async function writeSampleProject(
+  directory: string,
+): Promise<SampleProjectWriteResult> {
   const root = resolve(directory);
-  const written: string[] = [];
+  const createdFiles: string[] = [];
+  const skippedFiles: string[] = [];
 
   try {
     for (const [relativePath, content] of Object.entries(SAMPLE_FILES)) {
       const absolutePath = resolve(root, relativePath);
       await mkdir(dirname(absolutePath), { recursive: true });
-      await writeFile(absolutePath, content, { encoding: "utf8", flag: "wx" });
-      written.push(absolutePath);
+      const result = await createSampleFile(absolutePath, content);
+      if (result === "created") {
+        createdFiles.push(absolutePath);
+      } else {
+        skippedFiles.push(absolutePath);
+      }
     }
   } catch (error) {
-    await Promise.all(written.map((path) => unlink(path).catch(() => undefined)));
-    if (isAlreadyExists(error)) {
-      throw new ConfigurationError("初始化已回滚：目标目录中存在同名文件");
+    await Promise.all(
+      createdFiles.map((path) => unlink(path).catch(() => undefined)),
+    );
+    if (error instanceof ConfigurationError) {
+      throw new ConfigurationError(`初始化已回滚：${error.message}`);
     }
     throw error;
   }
 
-  return written;
+  return { createdFiles, skippedFiles };
+}
+
+/*
+ * EEXIST 只对现有普通文件表示“可以跳过”。目录、符号链接和其他特殊文件都属于
+ * 明确的路径类型冲突，不能被静默当成已完成初始化，否则后续读取会产生隐式行为。
+ */
+async function createSampleFile(
+  absolutePath: string,
+  content: string,
+): Promise<"created" | "skipped"> {
+  try {
+    await writeFile(absolutePath, content, { encoding: "utf8", flag: "wx" });
+    return "created";
+  } catch (error) {
+    if (!isAlreadyExists(error)) {
+      throw error;
+    }
+
+    const metadata = await lstat(absolutePath);
+    if (metadata.isFile()) {
+      return "skipped";
+    }
+    throw new ConfigurationError(
+      `目标路径已存在且不是普通文件：${absolutePath}`,
+    );
+  }
 }
 
 function isAlreadyExists(error: unknown): boolean {
