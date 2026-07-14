@@ -49,6 +49,7 @@ program
       "配置校验通过",
       `项目：${loaded.projectRoot}`,
       `任务数：${loaded.manifest.tasks.length}`,
+      `任务队列：${loaded.manifest.tasks.map((task) => task.id).join(" → ")}`,
       `内容哈希：${loaded.manifestHash}`,
       "",
     ].join("\n"));

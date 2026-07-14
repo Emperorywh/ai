@@ -219,11 +219,16 @@ export class GitWorkspace implements Workspace {
   }
 
   private async createReviewDiff(): Promise<string> {
+    /*
+     * --relative 让 diff header 与 TASK scope 共用项目根坐标系。
+     * 父仓库子项目因此不会把仓库目录前缀泄漏到 Reviewer 提示词。
+     */
     const trackedDiff = await this.git([
       "diff",
       "--binary",
       "--no-ext-diff",
       "--unified=80",
+      "--relative",
       "HEAD",
       "--",
       ".",
@@ -245,12 +250,17 @@ export class GitWorkspace implements Workspace {
   }
 
   private async getChangedProjectFiles(): Promise<readonly string[]> {
+    /*
+     * tracked 和 untracked 列表必须都以 projectRoot 为基准，否则同一文件会因 Git 子命令不同
+     * 得到两种路径表示，并在 allow/deny/protected 审计时产生错误结论。
+     */
     const [tracked, untracked] = await Promise.all([
       this.gitNullList([
         "diff",
         "HEAD",
         "--name-only",
         "--no-renames",
+        "--relative",
         "-z",
         "--",
         ".",

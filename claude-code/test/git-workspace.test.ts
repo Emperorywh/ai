@@ -3,7 +3,7 @@
  * 所有 Git 身份与提交配置都限制在临时目录，不读取或修改用户的真实仓库配置。
  */
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -111,6 +111,44 @@ describe("GitWorkspace", () => {
     const afterStaging = await fixture.workspace.captureCandidate();
 
     expect(afterStaging.fingerprint).toBe(beforeStaging.fingerprint);
+  });
+
+  /*
+   * Git 的 tracked diff 默认输出仓库根相对路径，而 ls-files 在子目录中输出项目相对路径。
+   * 该用例锁定统一的项目根坐标系，防止 allow 中的 package.json 再次被误判为越界文件。
+   */
+  it("父仓库子项目按项目根相对路径审计 tracked 与新增文件", async () => {
+    const fixture = await createGitFixture();
+    const projectRoot = join(fixture.root, "apps", "nested-project");
+    await mkdir(join(projectRoot, "src"), { recursive: true });
+    await writeFile(join(projectRoot, "package.json"), "{\"version\":1}\n", "utf8");
+    await runGit(fixture.root, ["add", "--all", "--", "."]);
+    await runGit(fixture.root, ["commit", "--quiet", "--no-verify", "-m", "添加子项目"]);
+
+    await writeFile(join(projectRoot, "package.json"), "{\"version\":2}\n", "utf8");
+    await writeFile(
+      join(projectRoot, "src", "feature.ts"),
+      "export const enabled = true;\n",
+      "utf8",
+    );
+
+    const workspace = new GitWorkspace(projectRoot);
+    const task: TaskDefinition = {
+      ...createTask("TASK-NESTED"),
+      scope: {
+        allow: ["package.json", "src/**"],
+        deny: [],
+      },
+    };
+    const audit = await workspace.auditChanges(task, []);
+    const candidate = await workspace.captureCandidate();
+
+    expect(audit).toEqual({
+      changedFiles: ["package.json", "src/feature.ts"],
+      violations: [],
+    });
+    expect(candidate.diff).toContain("a/package.json");
+    expect(candidate.diff).not.toContain("a/apps/nested-project/package.json");
   });
 
   it("expected fingerprint 对应的候选发生变化时拒绝提交", async () => {

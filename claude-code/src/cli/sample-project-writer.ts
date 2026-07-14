@@ -36,6 +36,8 @@ review:
 git:
   commitMessagePrefix: task
 
+# 运行队列只包含此处显式登记的任务，目录中的其他 Markdown 不会被自动执行。
+# 新增 TASK 文件时必须同时声明依赖、写入范围和门禁，避免调度器隐式猜测安全边界。
 tasks:
   - id: TASK-001
     title: 实现第一个独立任务

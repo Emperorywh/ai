@@ -42,6 +42,17 @@ describe("QueueOrchestrator", () => {
     ]);
     expect(result.artifacts).toHaveLength(2);
     expect(fixture.stateStore.snapshots.length).toBeGreaterThan(10);
+    /*
+     * 启动事件展示的是 Manifest 经 DAG 校验后的真实队列，而不是目录中碰巧存在的 TASK 文件。
+     * 用户因此能在 Agent 启动前确认本次运行是否真的包含全部后续任务。
+     */
+    expect(fixture.logger.events[0]).toMatchObject({
+      type: "run_started",
+      details: { taskOrder: ["TASK-A", "TASK-B", "TASK-C"] },
+    });
+    expect(fixture.logger.events[0]?.message).toContain(
+      "TASK-A → TASK-B → TASK-C",
+    );
   });
 
   it("恢复 executing checkpoint 时复用原 TASK 会话而不创建新会话", async () => {
@@ -226,5 +237,6 @@ function createFixture(
     workspace,
     stateStore,
     lock,
+    logger,
   };
 }

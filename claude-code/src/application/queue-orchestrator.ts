@@ -57,7 +57,13 @@ export class QueueOrchestrator {
         taskIds: orderedTasks.map((task) => task.id),
         now,
       });
-      await this.checkpoint(state, undefined, "run_started", "新运行已创建");
+      await this.checkpoint(
+        state,
+        undefined,
+        "run_started",
+        this.describeTaskQueue("新运行已创建", orderedTasks),
+        { taskOrder: orderedTasks.map((task) => task.id) },
+      );
       return await this.drive(loaded, orderedTasks, state, false, signal);
     } finally {
       await lock.release();
@@ -82,7 +88,13 @@ export class QueueOrchestrator {
     try {
       await this.assertResumeWorkspaceCompatible(existing);
       const orderedTasks = createStableTaskOrder(loaded.manifest.tasks);
-      await this.checkpoint(existing, undefined, "run_resumed", "恢复已有运行");
+      await this.checkpoint(
+        existing,
+        undefined,
+        "run_resumed",
+        this.describeTaskQueue("恢复已有运行", orderedTasks),
+        { taskOrder: orderedTasks.map((task) => task.id) },
+      );
       return await this.drive(loaded, orderedTasks, existing, true, signal);
     } finally {
       await lock.release();
@@ -318,6 +330,19 @@ export class QueueOrchestrator {
   private createRunId(): string {
     const timestamp = this.now().replaceAll(/[:.]/gu, "-");
     return `${timestamp}-${randomUUID().slice(0, 8)}`;
+  }
+
+  /*
+   * 队列计划在运行开始和恢复时显式输出，避免“目录中有任务文件”被误解为“已进入执行队列”。
+   * 真正的调度来源仍是 Manifest，日志只展示经过 DAG 校验后的稳定顺序。
+   */
+  private describeTaskQueue(
+    prefix: string,
+    orderedTasks: readonly TaskDefinition[],
+  ): string {
+    return `${prefix}，队列共 ${orderedTasks.length} 个任务：${orderedTasks
+      .map((task) => task.id)
+      .join(" → ")}`;
   }
 
   private now(): string {

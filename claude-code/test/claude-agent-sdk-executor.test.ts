@@ -13,6 +13,7 @@ import {
   ClaudeAgentSdkExecutor,
   type AgentQueryFactory,
 } from "../src/infrastructure/claude/claude-agent-sdk-executor.js";
+import type { ClaudeMessageObserver } from "../src/infrastructure/claude/claude-message-observer.js";
 import type { AgentRunRequest } from "../src/ports/agent-executor.js";
 
 const SESSION_ID = "11111111-1111-4111-8111-111111111111";
@@ -28,7 +29,7 @@ describe("ClaudeAgentSdkExecutor", () => {
       factoryCalls += 1;
       return createFakeQuery(messageStream([]));
     };
-    const executor = new ClaudeAgentSdkExecutor(queryFactory);
+    const executor = new ClaudeAgentSdkExecutor({ queryFactory });
 
     const outcome = await executor.run(createRequest({
       signal: externalController.signal,
@@ -49,7 +50,7 @@ describe("ClaudeAgentSdkExecutor", () => {
       createInitMessage(SESSION_ID),
       createSuccessResult(SESSION_ID),
     ]));
-    const executor = new ClaudeAgentSdkExecutor(queryFactory);
+    const executor = new ClaudeAgentSdkExecutor({ queryFactory });
 
     const outcome = await executor.run(createRequest({
       onSessionInitialized: async (sessionId) => {
@@ -74,7 +75,7 @@ describe("ClaudeAgentSdkExecutor", () => {
       }
       return createFakeQuery(abortResultStream(sdkSignal, SESSION_ID));
     };
-    const executor = new ClaudeAgentSdkExecutor(queryFactory);
+    const executor = new ClaudeAgentSdkExecutor({ queryFactory });
 
     const outcomePromise = executor.run(createRequest({
       signal: externalController.signal,
@@ -93,8 +94,10 @@ describe("ClaudeAgentSdkExecutor", () => {
   });
 
   it("Query Factory 在 init 前失败时不伪造 session", async () => {
-    const executor = new ClaudeAgentSdkExecutor(() => {
-      throw new Error("factory failed before init");
+    const executor = new ClaudeAgentSdkExecutor({
+      queryFactory: () => {
+        throw new Error("factory failed before init");
+      },
     });
 
     const outcome = await executor.run(createRequest());
@@ -115,7 +118,7 @@ describe("ClaudeAgentSdkExecutor", () => {
         closed = true;
       },
     );
-    const executor = new ClaudeAgentSdkExecutor(queryFactory);
+    const executor = new ClaudeAgentSdkExecutor({ queryFactory });
 
     const outcome = await executor.run(createRequest());
 
@@ -132,7 +135,7 @@ describe("ClaudeAgentSdkExecutor", () => {
     const queryFactory: AgentQueryFactory = () => createFakeQuery(messageStream([
       createInitMessage(SESSION_ID),
     ]));
-    const executor = new ClaudeAgentSdkExecutor(queryFactory);
+    const executor = new ClaudeAgentSdkExecutor({ queryFactory });
 
     const outcome = await executor.run(createRequest());
 
@@ -142,6 +145,45 @@ describe("ClaudeAgentSdkExecutor", () => {
       sessionId: SESSION_ID,
       retryable: true,
     });
+  });
+
+  /*
+   * 执行器必须要求 SDK 提供增量帧，并把每条消息和 stderr 原样送到观察边界。
+   * 这样终端实时性不依赖应用 checkpoint，也不会因未来状态机调整再次退化为静默等待。
+   */
+  it("开启增量消息并实时转发全部 SDK 动态", async () => {
+    const observedMessages: SDKMessage[] = [];
+    const observedStderr: string[] = [];
+    let includePartialMessages: boolean | undefined;
+    const observer: ClaudeMessageObserver = {
+      onMessage: (_context, message) => {
+        observedMessages.push(message);
+      },
+      onStderr: (_context, data) => {
+        observedStderr.push(data);
+      },
+    };
+    const messages = [
+      createTextDelta("实时文本"),
+      createInitMessage(SESSION_ID),
+      createSuccessResult(SESSION_ID),
+    ];
+    const queryFactory: AgentQueryFactory = ({ options }) => {
+      includePartialMessages = options?.includePartialMessages;
+      options?.stderr?.("live diagnostic\n");
+      return createFakeQuery(messageStream(messages));
+    };
+    const executor = new ClaudeAgentSdkExecutor({
+      queryFactory,
+      messageObserver: observer,
+    });
+
+    const outcome = await executor.run(createRequest());
+
+    expect(outcome.ok).toBe(true);
+    expect(includePartialMessages).toBe(true);
+    expect(observedMessages).toEqual(messages);
+    expect(observedStderr).toEqual(["live diagnostic\n"]);
   });
 
   /*
@@ -157,7 +199,7 @@ describe("ClaudeAgentSdkExecutor", () => {
         createSuccessResult(SESSION_ID),
       ]));
     };
-    const executor = new ClaudeAgentSdkExecutor(queryFactory);
+    const executor = new ClaudeAgentSdkExecutor({ queryFactory });
 
     const outcome = await executor.run(createRequest());
 
@@ -180,7 +222,7 @@ describe("ClaudeAgentSdkExecutor", () => {
         createSuccessResult(SESSION_ID),
       ]));
     };
-    const executor = new ClaudeAgentSdkExecutor(queryFactory);
+    const executor = new ClaudeAgentSdkExecutor({ queryFactory });
 
     const outcome = await executor.run(createRequest());
 
@@ -197,7 +239,7 @@ describe("ClaudeAgentSdkExecutor", () => {
       options?.stderr?.("Not logged in · Please run /login\n");
       return createFakeQuery(failingMessageStream("process exited with code 1"));
     };
-    const executor = new ClaudeAgentSdkExecutor(queryFactory);
+    const executor = new ClaudeAgentSdkExecutor({ queryFactory });
 
     const outcome = await executor.run(createRequest());
 
@@ -289,6 +331,16 @@ function createInitMessage(sessionId: string): SDKMessage {
     type: "system",
     subtype: "init",
     session_id: sessionId,
+  } as SDKMessage;
+}
+
+function createTextDelta(text: string): SDKMessage {
+  return {
+    type: "stream_event",
+    event: {
+      type: "content_block_delta",
+      delta: { type: "text_delta", text },
+    },
   } as SDKMessage;
 }
 

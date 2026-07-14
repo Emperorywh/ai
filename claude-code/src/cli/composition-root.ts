@@ -7,6 +7,7 @@ import { PromptBuilder } from "../application/prompt-builder.js";
 import { QueueOrchestrator } from "../application/queue-orchestrator.js";
 import { TaskExecutionService } from "../application/task-execution-service.js";
 import { ClaudeAgentSdkExecutor } from "../infrastructure/claude/claude-agent-sdk-executor.js";
+import { ConsoleClaudeMessageObserver } from "../infrastructure/claude/console-claude-message-observer.js";
 import { GitWorkspace } from "../infrastructure/git/git-workspace.js";
 import {
   CompositeEventLogger,
@@ -44,7 +45,9 @@ export async function createOrchestratorRuntime(
     new JsonlEventLogger(stateDirectory),
   ]);
   const taskExecution = new TaskExecutionService(
-    new ClaudeAgentSdkExecutor(),
+    new ClaudeAgentSdkExecutor({
+      messageObserver: new ConsoleClaudeMessageObserver(),
+    }),
     new NodeGateRunner(),
     workspace,
     new PromptBuilder(),

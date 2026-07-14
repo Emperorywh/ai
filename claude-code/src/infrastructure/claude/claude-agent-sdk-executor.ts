@@ -6,6 +6,7 @@ import {
   query,
   type Options,
   type Query,
+  type SDKMessage,
   type SDKResultMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
@@ -18,6 +19,10 @@ import type {
   AgentExecutor,
   AgentRunRequest,
 } from "../../ports/agent-executor.js";
+import type {
+  ClaudeMessageContext,
+  ClaudeMessageObserver,
+} from "./claude-message-observer.js";
 import { createToolBoundaryHooks } from "./sdk-tool-boundary.js";
 
 const WRITE_TOOLS = ["Read", "Glob", "Grep", "Edit", "Write"] as const;
@@ -27,8 +32,23 @@ const MAX_STDERR_CHARACTERS = 20_000;
 
 export type AgentQueryFactory = (input: Parameters<typeof query>[0]) => Query;
 
+export interface ClaudeAgentSdkExecutorOptions {
+  readonly queryFactory?: AgentQueryFactory;
+  readonly messageObserver?: ClaudeMessageObserver;
+}
+
 export class ClaudeAgentSdkExecutor implements AgentExecutor {
-  public constructor(private readonly queryFactory: AgentQueryFactory = query) {}
+  private readonly queryFactory: AgentQueryFactory;
+  private readonly messageObserver: ClaudeMessageObserver | undefined;
+
+  /*
+   * 依赖通过具名选项装配，避免测试 Query Factory 与生产终端观察器依赖位置参数顺序。
+   * 未注入观察器时执行器保持纯后台行为，便于包使用者按自己的宿主环境组合输出能力。
+   */
+  public constructor(options: ClaudeAgentSdkExecutorOptions = {}) {
+    this.queryFactory = options.queryFactory ?? query;
+    this.messageObserver = options.messageObserver;
+  }
 
   public async run<T>(
     request: AgentRunRequest<T>,
@@ -45,6 +65,10 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
     let initializedSessionId: string | undefined;
     let observerError: unknown;
     let capturedStderr = "";
+    const messageContext: ClaudeMessageContext = {
+      taskId: request.taskId,
+      attemptKind: request.attemptKind,
+    };
 
     const abortQuery = (reason: "timeout" | "external"): void => {
       if (abortState.reason !== undefined) {
@@ -67,6 +91,7 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
         controller,
         (data) => {
           capturedStderr = appendCapturedStderr(capturedStderr, data);
+          this.observeStderr(messageContext, data);
         },
       );
       if (readAbortReason(abortState) === "external") {
@@ -77,6 +102,7 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
       let terminalResult: SDKResultMessage | undefined;
 
       for await (const message of activeQuery) {
+        this.observeMessage(messageContext, message);
         if (message.type === "system" && message.subtype === "init") {
           initializedSessionId = message.session_id;
           try {
@@ -229,6 +255,7 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
         : { maxBudgetUsd: request.maxBudgetUsd }),
       model: request.model,
       effort: request.effort,
+      includePartialMessages: true,
       outputFormat: {
         type: "json_schema",
         schema: outputSchema,
@@ -284,6 +311,29 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
       retryable,
     };
   }
+
+  /*
+   * 实时输出属于旁路观察能力，观察器故障不能改变 Agent 的业务结果或 checkpoint 语义。
+   * 失败会立即写入 stderr，后续 SDK 消息仍由主循环持续消费。
+   */
+  private observeMessage(
+    context: ClaudeMessageContext,
+    message: SDKMessage,
+  ): void {
+    try {
+      this.messageObserver?.onMessage(context, message);
+    } catch (error) {
+      reportObserverFailure(error);
+    }
+  }
+
+  private observeStderr(context: ClaudeMessageContext, data: string): void {
+    try {
+      this.messageObserver?.onStderr(context, data);
+    } catch (error) {
+      reportObserverFailure(error);
+    }
+  }
 }
 
 function isSignalAborted(signal: AbortSignal | undefined): boolean {
@@ -305,6 +355,15 @@ function closeQuery(activeQuery: Query | undefined): void {
     activeQuery?.close();
   } catch {
     // Query 已处于异常清理路径，关闭失败不能覆盖原始 Agent 结果。
+  }
+}
+
+function reportObserverFailure(error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  try {
+    process.stderr.write(`Claude 实时输出失败：${message}\n`);
+  } catch {
+    // stderr 本身不可写时无法继续报告，但 Agent 主流程仍必须保持可运行。
   }
 }
 
