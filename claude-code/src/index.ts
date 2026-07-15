@@ -4,6 +4,7 @@
  */
 export * from "./application/prompt-builder.js";
 export * from "./application/queue-orchestrator.js";
+export * from "./application/run-state-presentation.js";
 export * from "./application/task-execution-service.js";
 export * from "./domain/agent-result.js";
 export * from "./domain/dag.js";
@@ -17,4 +18,5 @@ export * from "./ports/gate-runner.js";
 export * from "./ports/manifest-repository.js";
 export * from "./ports/run-lock.js";
 export * from "./ports/state-store.js";
+export * from "./ports/time-formatter.js";
 export * from "./ports/workspace.js";

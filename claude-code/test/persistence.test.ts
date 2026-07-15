@@ -20,6 +20,33 @@ afterEach(async () => {
 });
 
 describe("FileStateStore", () => {
+  it("接受明确包含北京时间偏移的文件安全运行 ID", async () => {
+    const directory = await createTemporaryDirectory();
+    const store = new FileStateStore(directory);
+    const state = createInitialRunState({
+      runId: "2026-07-15T03-28-40-710+08-00-1234abcd",
+      manifestPath: "/project/orchestrator.yaml",
+      manifestHash: "hash",
+      projectRoot: "/project",
+      workspace: {
+        repositoryRoot: "/project",
+        branch: "main",
+        expectedHead: "base",
+      },
+      taskIds: ["TASK-001"],
+      now: "2026-07-14T19:28:40.710Z",
+    });
+
+    /*
+     * 加号只表达固定 UTC 偏移，不是路径分隔符；状态目录仍由严格白名单约束。
+     * round-trip 同时证明 latest 扫描和精确加载都接受新的运行 ID 契约。
+     */
+    await store.save(state);
+
+    await expect(store.load(state.runId)).resolves.toEqual(state);
+    await expect(store.getLatestRunId()).resolves.toBe(state.runId);
+  });
+
   it("连续原子覆盖状态，并维护 latest 与安全产物路径", async () => {
     const directory = await createTemporaryDirectory();
     const store = new FileStateStore(directory);

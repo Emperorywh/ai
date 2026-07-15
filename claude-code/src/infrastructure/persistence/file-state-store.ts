@@ -75,7 +75,7 @@ export class FileStateStore implements StateStore {
     try {
       const entries = await readdir(runsDirectory, { withFileTypes: true });
       const candidates = entries
-        .filter((entry) => entry.isDirectory() && /^[A-Za-z0-9._-]+$/.test(entry.name))
+        .filter((entry) => entry.isDirectory() && /^[A-Za-z0-9._+-]+$/.test(entry.name))
         .map((entry) => entry.name)
         .sort()
         .reverse();
@@ -121,7 +121,11 @@ export class FileStateStore implements StateStore {
   }
 
   private getRunDirectory(runId: string): string {
-    if (!/^[A-Za-z0-9._-]+$/.test(runId)) {
+    /*
+     * 新运行 ID 使用 `+08-00` 明示北京时间偏移；加号在 Windows 文件名中合法且不引入路径层级。
+     * 其余字符仍保持严格白名单，目录边界不因展示格式扩展而放宽。
+     */
+    if (!/^[A-Za-z0-9._+-]+$/.test(runId)) {
       throw new InfrastructureError(`非法 runId：${runId}`);
     }
     return join(this.baseDirectory, "runs", runId);

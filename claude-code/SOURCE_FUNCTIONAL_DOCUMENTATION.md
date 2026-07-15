@@ -33,6 +33,7 @@
 - `application/task-execution-service.ts`：推进单个 TASK 的一个阶段。
 - `application/prompt-builder.ts`：集中组装 Worker/Reviewer 提示词。
 - `application/agent-session-checkpoint.ts`：SDK 会话初始化和尝试状态落盘。
+- `application/run-state-presentation.ts`：把 UTC 状态显式投影为北京时间 CLI 输出。
 
 队列不解析 Markdown、不拼接 Git 命令、不执行门禁子进程。单任务服务不决定下一个 TASK。
 
@@ -46,6 +47,7 @@
 - `ports/event-logger.ts`
 - `ports/manifest-repository.ts`
 - `ports/clock.ts`
+- `ports/time-formatter.ts`
 
 隔离验证、候选归档和提交都是 `Workspace` 的显式能力，不通过应用层魔法命令实现。
 
@@ -57,6 +59,7 @@
 - `infrastructure/process/node-gate-runner.ts`：结构化运行门禁进程。
 - `infrastructure/claude/*`：Claude Agent SDK 适配与工具边界。
 - `infrastructure/persistence/*`：状态、事件、产物和运行锁。
+- `infrastructure/time/beijing-time-formatter.ts`：统一的北京时间文本与运行 ID 格式。
 
 ### 2.5 组合根与 CLI
 
@@ -271,6 +274,8 @@ critical/high/medium finding 会触发 repair。
 - Run 终态。
 
 一次 `Ctrl+C`/`SIGTERM` 中止当前 Agent 或门禁进程树并保留 `running` 状态；下次使用 `resume`。第二次中断立即退出。
+
+状态、锁和 `events.jsonl` 保存标准 UTC 时间事实，供恢复、排序和机器审计使用。控制台事件、`status` 命令与 `summary.md` 统一显示北京时间，格式为 `YYYY-MM-DDTHH:mm:ss.SSS+08:00`；新运行 ID 使用文件名安全的 `YYYY-MM-DDTHH-mm-ss-SSS+08-00-<随机后缀>`。展示转换不回写状态文件。
 
 ## 11. 安全不变量
 

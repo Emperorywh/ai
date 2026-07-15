@@ -7,6 +7,7 @@ import { PromptBuilder } from "../src/application/prompt-builder.js";
 import { QueueOrchestrator } from "../src/application/queue-orchestrator.js";
 import { TaskExecutionService } from "../src/application/task-execution-service.js";
 import { createInitialRunState, transitionTask } from "../src/domain/run-state.js";
+import { BeijingTimeFormatter } from "../src/infrastructure/time/beijing-time-formatter.js";
 import {
   FakeClock,
   MemoryStateStore,
@@ -55,6 +56,14 @@ describe("QueueOrchestrator", () => {
     );
     expect(result.artifacts).toHaveLength(2);
     expect(fixture.stateStore.snapshots.length).toBeGreaterThan(10);
+    expect(result.state.runId).toMatch(
+      /^2026-07-13T08-00-00-000\+08-00-[a-f0-9]{8}$/u,
+    );
+    expect(result.state.createdAt).toBe("2026-07-13T00:00:01.000Z");
+    const summary = [...fixture.stateStore.artifacts.entries()]
+      .find(([path]) => path.endsWith("/summary.md"))?.[1];
+    expect(summary).toContain("创建时间：2026-07-13T08:00:01.000+08:00");
+    expect(summary).not.toContain("创建时间：2026-07-13T00:00:01.000Z");
     /*
      * 启动事件展示的是 Manifest 经 DAG 校验后的真实队列，而不是目录中碰巧存在的 TASK 文件。
      * 用户因此能在 Agent 启动前确认本次运行是否真的包含全部后续任务。
@@ -458,6 +467,7 @@ function createFixture(
   const stateStore = new MemoryStateStore();
   const lock = new RecordingRunLock();
   const logger = new RecordingLogger();
+  const timeFormatter = new BeijingTimeFormatter();
   const taskExecution = new TaskExecutionService(
     agent,
     gates,
@@ -472,6 +482,7 @@ function createFixture(
     workspace,
     logger,
     clock,
+    timeFormatter,
   );
   return {
     orchestrator,

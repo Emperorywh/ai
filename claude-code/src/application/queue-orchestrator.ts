@@ -17,6 +17,7 @@ import type { Clock } from "../ports/clock.js";
 import type { EventLogger } from "../ports/event-logger.js";
 import type { RunLock } from "../ports/run-lock.js";
 import type { StateStore } from "../ports/state-store.js";
+import type { TimeFormatter } from "../ports/time-formatter.js";
 import type { Workspace } from "../ports/workspace.js";
 import type { TaskExecutionService } from "./task-execution-service.js";
 
@@ -33,6 +34,7 @@ export class QueueOrchestrator {
     private readonly workspace: Workspace,
     private readonly logger: EventLogger,
     private readonly clock: Clock,
+    private readonly timeFormatter: TimeFormatter,
   ) {}
 
   public async start(
@@ -448,8 +450,8 @@ export class QueueOrchestrator {
       "",
       `- Run ID：${state.runId}`,
       `- 状态：${state.status}`,
-      `- 创建时间：${state.createdAt}`,
-      `- 完成时间：${state.updatedAt}`,
+      `- 创建时间：${this.timeFormatter.formatTimestamp(state.createdAt)}`,
+      `- 完成时间：${this.timeFormatter.formatTimestamp(state.updatedAt)}`,
       "",
       ...loaded.tasks.map((task) => {
         const taskState = state.tasks[task.id];
@@ -481,7 +483,11 @@ export class QueueOrchestrator {
   }
 
   private createRunId(): string {
-    const timestamp = this.now().replaceAll(/[:.]/gu, "-");
+    /*
+     * runId 同时出现在终端、状态目录和验收文档，因此时间部分也必须遵循北京时间展示契约。
+     * 随机后缀继续只负责同一毫秒内的唯一性，不承载任何时间或排序语义。
+     */
+    const timestamp = this.timeFormatter.formatRunIdTimestamp(this.clock.now());
     return `${timestamp}-${randomUUID().slice(0, 8)}`;
   }
 

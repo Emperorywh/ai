@@ -5,12 +5,22 @@
 import { appendFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { EventLogger, RunEvent } from "../../ports/event-logger.js";
+import type { TimeFormatter } from "../../ports/time-formatter.js";
+
+type ConsoleWriter = (content: string) => void;
 
 export class ConsoleEventLogger implements EventLogger {
+  public constructor(
+    private readonly timeFormatter: TimeFormatter,
+    private readonly stdout: ConsoleWriter = (content) => {
+      process.stdout.write(content);
+    },
+  ) {}
+
   public log(event: RunEvent): Promise<void> {
     const task = event.taskId === undefined ? "" : ` [${event.taskId}]`;
-    process.stdout.write(
-      `${event.timestamp} [${event.runId}]${task} ${event.message}\n`,
+    this.stdout(
+      `${this.timeFormatter.formatTimestamp(event.timestamp)} [${event.runId}]${task} ${event.message}\n`,
     );
     return Promise.resolve();
   }

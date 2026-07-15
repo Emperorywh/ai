@@ -19,11 +19,14 @@ import { FileStateStore } from "../infrastructure/persistence/file-state-store.j
 import { NodeGateRunner } from "../infrastructure/process/node-gate-runner.js";
 import { SystemClock } from "../infrastructure/system-clock.js";
 import { YamlManifestRepository } from "../infrastructure/tasks/yaml-manifest-repository.js";
+import { BeijingTimeFormatter } from "../infrastructure/time/beijing-time-formatter.js";
+import type { TimeFormatter } from "../ports/time-formatter.js";
 
 export interface OrchestratorRuntime {
   readonly loaded: LoadedTaskManifest;
   readonly orchestrator: QueueOrchestrator;
   readonly stateDirectory: string;
+  readonly timeFormatter: TimeFormatter;
 }
 
 export async function loadManifest(
@@ -40,8 +43,9 @@ export async function createOrchestratorRuntime(
   const stateDirectory = await workspace.getStateDirectory();
   const stateStore = new FileStateStore(stateDirectory);
   const clock = new SystemClock();
+  const timeFormatter = new BeijingTimeFormatter();
   const logger = new CompositeEventLogger([
-    new ConsoleEventLogger(),
+    new ConsoleEventLogger(timeFormatter),
     new JsonlEventLogger(stateDirectory),
   ]);
   const taskExecution = new TaskExecutionService(
@@ -57,6 +61,7 @@ export async function createOrchestratorRuntime(
   return {
     loaded,
     stateDirectory,
+    timeFormatter,
     orchestrator: new QueueOrchestrator(
       taskExecution,
       stateStore,
@@ -64,6 +69,7 @@ export async function createOrchestratorRuntime(
       workspace,
       logger,
       clock,
+      timeFormatter,
     ),
   };
 }

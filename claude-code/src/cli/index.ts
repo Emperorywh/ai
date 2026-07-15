@@ -6,6 +6,7 @@
 import { resolve } from "node:path";
 import { Command } from "commander";
 import type { OrchestratorResult } from "../application/queue-orchestrator.js";
+import { presentRunState } from "../application/run-state-presentation.js";
 import type { RunState } from "../domain/run-state.js";
 import {
   createOrchestratorRuntime,
@@ -121,7 +122,12 @@ program
     if (state === undefined) {
       throw new Error("尚无运行状态");
     }
-    process.stdout.write(`${JSON.stringify(state, null, 2)}\n`);
+    /*
+     * status 是面向操作者的只读投影，全部时间转为北京时间后再序列化。
+     * 持久化 state.json 不参与转换，恢复逻辑仍消费原始 UTC checkpoint。
+     */
+    const displayState = presentRunState(state, runtime.timeFormatter);
+    process.stdout.write(`${JSON.stringify(displayState, null, 2)}\n`);
   });
 
 await program.parseAsync(process.argv).catch((error: unknown) => {
