@@ -33,11 +33,7 @@ export class YamlManifestRepository implements ManifestRepository {
     const projectRoot = resolve(dirname(absoluteManifestPath), manifest.project.root);
 
     await this.assertDirectory(projectRoot);
-    const manifestRelativePath = this.toProjectRelative(
-      projectRoot,
-      absoluteManifestPath,
-      "Manifest",
-    );
+    this.toProjectRelative(projectRoot, absoluteManifestPath, "Manifest");
     this.validateProjectPaths(manifest);
 
     const contextDocuments = await Promise.all(
@@ -49,11 +45,6 @@ export class YamlManifestRepository implements ManifestRepository {
     const taskDocuments = new Map(
       taskCatalog.map((entry) => [entry.task.id, entry.document] as const),
     );
-    const protectedPaths = [
-      manifestRelativePath,
-      ...contextDocuments.map((document) => document.path),
-      ...taskCatalog.map((entry) => entry.document.path),
-    ];
     /*
      * 整体 manifestHash 服务于同一 Run 的精确恢复；逐 TASK 契约指纹服务于新 Run 的安全复用。
      * 两者职责不同，不能用会被模型和重试策略影响的整体哈希替代任务完成契约。
@@ -87,13 +78,12 @@ export class YamlManifestRepository implements ManifestRepository {
       taskDocuments,
       taskContractHashes,
       contextDocuments,
-      protectedPaths: [...new Set(protectedPaths)],
     };
   }
 
   /*
    * Manifest 与 TASK 元数据分别严格解析，任何未知字段都会在 Agent 启动前失败。
-   * 版本 2 不保留旧 tasks 数组，避免同一任务同时存在两套可漂移定义。
+   * 版本 3 不兼容旧 scope、gates 与 verification 字段，能力模型只有一个事实来源。
    */
   private parseManifest(rawManifest: string): TaskManifest {
     let parsedYaml: unknown;
@@ -154,7 +144,6 @@ export class YamlManifestRepository implements ManifestRepository {
         ...metadata,
         file: relativePath,
       });
-      this.validateTaskPaths(task);
       this.validateTaskHeading(task, content);
       return {
         task,
@@ -213,21 +202,11 @@ export class YamlManifestRepository implements ManifestRepository {
     for (const path of [
       ...this.collectContextPaths(manifest),
       manifest.taskCatalog.directory,
-      ...manifest.verification.sharedPaths,
     ]) {
       this.assertSafeRelativePath(path, "项目路径");
     }
     if (normalize(manifest.taskCatalog.directory) === ".") {
       throw new ConfigurationError("TASK 目录不能直接使用项目根目录");
-    }
-    if (manifest.verification.sharedPaths.some((path) => normalize(path) === ".")) {
-      throw new ConfigurationError("验证共享路径不能直接使用项目根目录");
-    }
-  }
-
-  private validateTaskPaths(task: TaskDefinition): void {
-    for (const pattern of [...task.scope.allow, ...task.scope.deny]) {
-      this.assertSafeRelativePath(pattern, `任务 ${task.id} 的路径规则`);
     }
   }
 

@@ -1,275 +1,282 @@
 # Claude Task Orchestrator 源码功能说明
 
-本文描述版本 2 的当前架构和不变量。系统是全新契约，不兼容版本 1 Manifest、旧状态文件或 `tasks:` 数组。
+本文档描述 Manifest v3 与 RunState v3 的当前实现。系统是全新契约，不兼容包含 `scope`、`gates`、`verification` 或旧状态版本的数据。
 
-## 1. 目标
+## 1. 系统目标
 
-一次命令完成以下闭环：
+编排器负责：
 
-1. 从 TASK 目录加载全部任务；
-2. 校验静态元数据、路径边界和 DAG；
-3. 逐个执行当前可运行节点；
-4. 在隔离环境执行确定性门禁；
-5. 自动修复可恢复问题；
-6. 提交成功任务；
-7. 隔离阻塞任务并继续独立 DAG 分支；
-8. 没有可运行节点后生成完整运行结果。
+1. 从 TASK Markdown 目录加载完整任务集合；
+2. 校验静态元数据与依赖 DAG；
+3. 按稳定拓扑顺序单并发推进任务；
+4. 为每个任务启动拥有完整 Claude Code 能力的自主 Worker；
+5. 冻结 Worker 产出的完整项目候选；
+6. 可选地使用全新只读 Reviewer 审核候选；
+7. 为每个完成任务创建原子 Git 提交；
+8. 持久化 checkpoint，并支持精确恢复和跨 Run 进度复用。
+
+编排器不提供 TASK 路径白名单，不注入 SDK 路径 Hook，也不运行预声明的外部验收命令。Worker 自行选择实现与非浏览器验证方式，独立 Reviewer 负责最终代码判断。
 
 ## 2. 分层与模块边界
 
 ### 2.1 领域层
 
-- `domain/manifest.ts`：项目策略、TASK 元数据和加载结果的唯一类型契约。
-- `domain/dag.ts`：重复 ID、依赖合法性、环检测和稳定拓扑排序。
-- `domain/run-state.ts`：TASK/Run 状态、合法转换和状态 Schema。
-- `domain/task-completion.ts`：任务完成契约与依赖完成指纹。
-- `domain/agent-result.ts`：Worker 与 Reviewer 的结构化输出契约。
-- `domain/errors.ts`：配置、基础设施和状态转换错误。
+- `domain/manifest.ts`：Manifest v3、TASK 元数据与加载后契约。
+- `domain/dag.ts`：依赖合法性和稳定拓扑排序。
+- `domain/run-state.ts`：Run/TASK 状态、合法转换与状态 Schema。
+- `domain/task-completion.ts`：任务契约指纹和依赖完成指纹。
+- `domain/agent-result.ts`：Worker 与 Reviewer 的结构化结果协议。
 
-领域层不读取文件、不执行进程、不操作 Git，也不依赖 Claude SDK。
+领域层不读取文件、不执行 Git，也不依赖 Claude SDK。
 
 ### 2.2 应用层
 
-- `application/queue-orchestrator.ts`：选择可运行 DAG 节点、持久化 checkpoint、传播依赖阻塞和结束 Run。
-- `application/task-execution-service.ts`：推进单个 TASK 的一个阶段。
-- `application/prompt-builder.ts`：集中组装 Worker/Reviewer 提示词。
-- `application/agent-session-checkpoint.ts`：SDK 会话初始化和尝试状态落盘。
-- `application/run-state-presentation.ts`：把 UTC 状态显式投影为北京时间 CLI 输出。
-- `application/task-progress-reconciler.ts`：核验 Git 完成账本并生成新 Run 初始计划。
+- `application/queue-orchestrator.ts`：单并发 DAG 驱动器、checkpoint 与 Run 收敛。
+- `application/task-execution-service.ts`：实现、审核、修复和提交阶段。
+- `application/task-progress-reconciler.ts`：新 Run 的 Git 完成证据核验与复用计划。
+- `application/prompt-builder.ts`：实现、修复、恢复和审核提示词。
+- `application/agent-session-checkpoint.ts`：Claude session 初始化后的精确恢复点。
+- `application/run-state-presentation.ts`：UTC 状态到北京时间 CLI 投影。
 
-队列不解析 Markdown、不拼接 Git 命令、不执行门禁子进程。单任务服务不决定下一个 TASK。
+队列服务决定下一个 TASK；单任务服务只根据当前 TASK 状态推进一个阶段。两者不共享隐式可变状态。
 
 ### 2.3 端口层
 
-- `ports/agent-executor.ts`
-- `ports/workspace.ts`
-- `ports/gate-runner.ts`
-- `ports/state-store.ts`
-- `ports/run-lock.ts`
-- `ports/event-logger.ts`
-- `ports/manifest-repository.ts`
-- `ports/clock.ts`
-- `ports/time-formatter.ts`
+- `ports/agent-executor.ts`：自主 Worker/只读 Reviewer 执行边界。
+- `ports/workspace.ts`：候选捕获、归档、提交、历史证据和仓库身份。
+- `ports/state-store.ts`：RunState 和运行产物。
+- `ports/run-lock.ts`：项目级单实例锁。
+- `ports/event-logger.ts`、`clock.ts`、`time-formatter.ts`：观察与时间边界。
 
-隔离验证、候选归档和提交都是 `Workspace` 的显式能力，不通过应用层魔法命令实现。
+端口中不存在路径边界或外部命令执行器。
 
 ### 2.4 基础设施层
 
-- `infrastructure/tasks/yaml-manifest-repository.ts`：编译 Manifest 与 TASK 目录。
-- `infrastructure/git/git-workspace.ts`：候选指纹、验证 worktree、候选归档和提交。
-- `infrastructure/git/verification-worktree-lease.ts`：隔离 worktree 的幂等释放、Windows 重试兜底与诊断。
-- `infrastructure/process/node-gate-runner.ts`：结构化运行门禁进程。
-- `infrastructure/claude/*`：Claude Agent SDK 适配与工具边界。
-- `infrastructure/persistence/*`：状态、事件、产物和运行锁。
-- `infrastructure/time/beijing-time-formatter.ts`：统一的北京时间文本与运行 ID 格式。
+- `infrastructure/claude/claude-agent-sdk-executor.ts`：Claude Agent SDK 消息流、结构化输出、中止和资源熔断。
+- `infrastructure/git/git-workspace.ts`：候选指纹、隔离归档、原子提交和完成历史。
+- `infrastructure/tasks/yaml-manifest-repository.ts`：Manifest 与 TASK Markdown 编译。
+- `infrastructure/persistence/*`：原子文件状态库与独占锁。
+- `infrastructure/logging/*`：控制台和 JSONL 事件。
 
-### 2.5 组合根与 CLI
+`cli/composition-root.ts` 是具体实现的唯一装配位置。
 
-- `cli/composition-root.ts` 是唯一依赖装配位置。
-- `cli/index.ts` 只解析命令、处理中断、打印结果并映射退出码。
-- `cli/sample-project-writer.ts` 生成可被生产仓储直接加载的版本 2 骨架。
+## 3. Manifest v3
 
-## 3. 单一任务事实源
+Manifest 只保存项目级策略：
 
-Manifest 只声明：
+```yaml
+version: 3
+project:
+  root: .
+  spec: SPEC.md
+  plan: PLAN.md
+  contextFiles:
+    - AGENTS.md
+defaults:
+  model: sonnet
+  effort: high
+review:
+  enabled: true
+  model: sonnet
+  effort: high
+git:
+  commitMessagePrefix: task
+taskCatalog:
+  directory: tasks
+```
 
-- 项目根和上下文文件；
-- Worker 模型、推理强度和可选资源上限；
-- Reviewer 策略；
-- Git 提交前缀；
-- TASK 目录；
-- 隔离验证共享路径。
+资源熔断字段全部可选：
 
-TASK 目录中的每个 `.md` 都必须包含严格 YAML 前置元数据：
+- `defaults.maxAttempts`
+- `defaults.taskTimeoutMinutes`
+- `defaults.maxTurns`
+- `defaults.maxBudgetUsd`
+- `review.maxAttempts`
+- `review.maxTurns`
+- `review.maxBudgetUsd`
 
-- `id`
-- `title`
-- `dependsOn`
-- `scope`
-- `gates`
-- 可选的任务级资源上限
-- `manualAcceptance`
+省略时不注入隐藏默认限制，Agent 持续工作到结构化终态或外部中断。
 
-仓储按文件名稳定排序后加载全部 Markdown，并执行：
+## 4. TASK 文档契约
 
-1. 未知字段检查；
-2. 文件名必须为 `<id>.md`；
-3. 首个 H1 必须为 `# <id> — <title>`；
-4. 路径不得逃逸项目根；
-5. ID 和依赖合法性检查；
-6. DAG 环检测；
-7. Manifest、上下文与所有 TASK 的整体内容哈希。
-8. 每个 TASK 独立的完成契约指纹。
+TASK 文件名必须为 `<id>.md`，首个一级标题必须为 `# <id> — <title>`。
 
-静态 TASK 不允许包含 `status`。运行状态只写入状态库。
+```yaml
+---
+id: TASK-002
+title: 实现用户列表状态层
+dependsOn:
+  - TASK-001
+maxAttempts: 5
+timeoutMinutes: 60
+manualAcceptance:
+  - 在浏览器中验收全部页面状态
+---
+```
 
-整体内容哈希用于同一 Run 的精确恢复；TASK 完成契约用于新 Run 的安全复用。完成契约包含规范化任务定义、正文、上下文、审核开关和验证共享路径，不包含模型、预算、超时及重试次数等执行资源策略。
+`maxAttempts` 和 `timeoutMinutes` 可以省略。`status`、`scope`、`gates` 以及其他未知字段会被严格 Schema 拒绝。
 
-## 4. TASK 状态流
+TASK 目录是唯一任务事实源。仓储加载所有 Markdown 文件后再执行 DAG 校验，不存在 Manifest 列表与目录内容漂移的问题。
+
+## 5. Run 启动与队列推进
+
+`run` 调用 `QueueOrchestrator.start()`：
+
+1. 创建北京时间 Run ID；
+2. 取得项目级独占锁；
+3. 要求 Git 工作区干净；
+4. 读取仓库根、分支和 HEAD；
+5. 对 TASK 做稳定拓扑排序；
+6. 核验当前 HEAD 中的完成证据；
+7. 创建 RunState v3；
+8. 写入启动 checkpoint；
+9. 进入 `drive()` 循环。
+
+`drive()` 每轮只推进一个显式事实：
+
+1. 响应外部中断；
+2. 归档下一个 blocked/failed 候选；
+3. 传播下一个依赖阻塞；
+4. 优先恢复正在执行、审核或提交的 TASK；
+5. 否则选择第一个依赖全部完成的 pending/retry_pending TASK；
+6. 调用 `TaskExecutionService.step()`；
+7. 原子保存状态并写事件；
+8. 重新根据最新状态选择。
+
+队列不维护会漂移的可变游标。选择结果完全由稳定拓扑序和持久化 RunState 推导。
+
+## 6. TASK 状态机
+
+正常路径：
 
 ```text
 pending
   → executing
-  → gating
-  → reviewing（可关闭）
+  → reviewing（审核开启）
   → committing
-  → completed（executed）
+  → completed
+```
 
-新 Run 核验 Git 完成证据
-  → completed（reused）
+审核关闭时：
 
-executing/gating/reviewing
+```text
+executing → committing
+```
+
+修复路径：
+
+```text
+executing/reviewing
   → retry_pending
   → executing
-
-任意活动阶段
-  → blocked | failed
-
-pending
-  → dependency_blocked
 ```
 
 终态：
 
-- `completed`：门禁、审核和提交完成；
-- `blocked`：需要人工决策或触发不可自动接受的安全边界；
-- `failed`：不可重试错误，或用户显式配置的尝试上限耗尽；
-- `dependency_blocked`：至少一个依赖未完成，因此不会被释放。
+- `completed`：候选已提交并写入完成证据；
+- `blocked`：需要外部信息或人工决策；
+- `failed`：不可重试或达到显式上限；
+- `dependency_blocked`：直接或传递依赖未完成。
 
-终态 TASK 不再转换状态。候选归档等附加事实通过受限字段替换函数写入，不伪造状态转换。
+## 7. 自主 Worker
 
-## 5. DAG 调度
+写入 Worker 使用 Claude Code 完整工具预设，并设置：
 
-队列始终单并发，但不再把单个 TASK 的失败提升为立即停止整个 Run。
+- `permissionMode: bypassPermissions`
+- `allowDangerouslySkipPermissions: true`
+- `skills: all`
+- `settingSources: user, project, local`
+- 项目和本机 MCP 可用
+- 子 Agent 可用
 
-新 `run` 创建状态前先按拓扑顺序核验完成历史：
+执行器不传递文件工具 Hook。TASK 提示词也不包含允许/禁止路径和外部验收命令清单。
 
-1. `--fresh` 直接把全部 TASK 初始化为 pending；
-2. 默认一次读取当前 HEAD 祖先链中的结构化完成 trailers；
-3. 任务契约和直接依赖完成指纹均匹配时初始化为 completed/reused；
-4. 上游未复用时，下游确定性失效为 pending；
-5. 模型、预算和重试策略变化不影响任务完成契约。
+提示词仍要求 Worker 只完成当前 TASK，不主动执行 Git 历史操作、部署、浏览器、UI 自动化、开发服务器或 watch 进程。这些是任务职责说明，不是路径能力裁剪。
 
-每轮按以下顺序处理：
+Worker 必须返回：
 
-1. 若收到中断，保存最近 checkpoint 并返回 `running`；
-2. 若存在尚未归档候选的 blocked/failed TASK，先归档并清理主工作区；
-3. 将依赖 blocked/failed/dependency_blocked 的 pending TASK 标记为 `dependency_blocked`；
-4. 优先恢复已处于 executing/gating/reviewing/committing 的 TASK；
-5. 否则选择拓扑顺序中第一个依赖全部 completed 的 pending/retry_pending TASK；
-6. 没有可运行节点时结束 Run。
+```json
+{
+  "status": "completed | blocked | failed",
+  "summary": "...",
+  "blockingQuestions": [],
+  "notes": []
+}
+```
 
-Run 终态：
+结构由 JSON Schema 和 Zod 同时约束，应用层不从自由文本猜测状态。
 
-- 全部 TASK completed：`completed`；
-- 至少一个 TASK failed：`failed`；
-- 否则存在 blocked/dependency_blocked：`blocked`。
+## 8. 候选冻结与独立审核
 
-独立分支会尽可能完成，只有依赖子图被阻止。
+Worker 返回 `completed` 后，应用层立即调用 `Workspace.captureCandidate()`：
 
-## 6. 隔离门禁
+- 收集项目根内全部 tracked/untracked 变化；
+- 对路径、文件类型、模式和内容哈希做稳定排序；
+- 计算候选 fingerprint；
+- 生成 Reviewer 使用的 Git diff；
+- 将 fingerprint 写入 TASK 状态。
 
-### 6.1 候选快照
+审核开启时，使用全新只读 Claude 会话。Reviewer 接收项目上下文、当前 TASK 正文、实际变更文件和完整 diff，只能使用读取工具，不得修改文件或创建子 Agent。
 
-候选由项目内所有 tracked 变化和非忽略 untracked 文件组成。每个文件记录：
+审核结果：
 
-- 项目相对路径；
-- `file/symlink/deleted` 类型；
-- 文件 mode；
-- 内容 SHA-256。
+- `approved` 且没有 critical/high/medium finding：进入提交；
+- `rejected` 或存在实质 finding：携带审核反馈进入 repair；
+- `blocked`：TASK 转为人工阻塞；
+- 基础设施错误：按显式审核上限重试或失败。
 
-总体 fingerprint 由稳定排序的结构化记录生成，不依赖暂存区状态或 diff 文本。
+审核前和提交前都重新捕获候选并比对 fingerprint。任何中途变化都会阻止继续，保证 Reviewer 与 Git 提交绑定同一文件树。
 
-### 6.2 验证 worktree
+## 9. Git 提交与完成证据
 
-门禁前创建 detached Git worktree：
+每个完成 TASK 产生独立提交。提交前验证：
 
-1. 从当前 HEAD 检出基础树；
-2. 把主工作区候选覆盖到验证项目根；
-3. 链接 Manifest 显式声明的 `verification.sharedPaths`；
-4. 确认隔离候选 fingerprint 与主候选一致；
-5. 在隔离项目根运行全部门禁；
-6. 捕获结果、scope 审计和门禁后候选；
-7. 在 `finally` 中移除 worktree。
+- 当前 HEAD 等于 RunState 的 `expectedHead`；
+- 父仓库中的项目外目录没有变化；
+- 当前候选 fingerprint 等于冻结值。
 
-门禁无法直接改变主候选。
-
-释放由独立 `VerificationWorktreeLease` 管理。lease 只拥有 worktree 内的共享链接，不拥有链接指向的主项目目录，因此必须先精确解绑全部 `verification.sharedPaths`，再执行 `git worktree remove --force`；Git 删除失败后使用带重试的文件系统删除，并通过 `git worktree prune --expire now` 清理注册。任一共享链接解绑失败时禁止递归删除 worktree，返回 `deferred` 并保留现场，避免 Windows Git 沿目录 junction 删除主项目依赖。释放结果不能覆盖已经得到的门禁结论或阻止队列继续。
-
-### 6.3 门禁结果
-
-每次 GateRun 持久化：
-
-- 序号和开始/结束时间；
-- 前后 fingerprint；
-- 每条命令的完整结构化结果；
-- 变化文件；
-- `passed/failed/mutated/boundary_violation`。
-
-处理规则：
-
-- `passed`：候选不变且全部命令成功，进入 Reviewer/commit；
-- `failed`：候选不变但命令失败，进入 repair；
-- `mutated`：变化全部在 scope 内，显式提升为新候选，进入 repair 并重新执行完整门禁；
-- `boundary_violation`：不提升变化，TASK blocked。
-
-提升不等于验收。任何提升后的候选都必须重新通过全部门禁和 Reviewer。
-
-## 7. 阻塞候选归档
-
-blocked/failed TASK 不能把脏工作区留给独立任务。
-
-`GitWorkspace.quarantineCandidate` 使用临时 Git index：
-
-1. 以 HEAD 初始化临时 index；
-2. 将项目候选写入临时 tree；
-3. 创建带父提交的归档 commit；
-4. 写入 `refs/claude-task-orchestrator/quarantine/<hash>`；
-5. 精确恢复项目 tracked 文件并删除候选 untracked 文件；
-6. 断言整个仓库干净。
-
-状态保存归档 ref、文件列表和时间。候选不会丢失，也不会污染后续独立 TASK。
-
-## 8. Worker 与 Reviewer
-
-写入 Worker 使用 Claude Code 完整工具预设和 `bypassPermissions`，加载 user/project/local 设置、全部可发现技能及已配置 MCP，可以自主使用终端和子 Agent。系统提示只保留工作流边界：聚焦当前 TASK，不启动浏览器，不 push 或部署。
-
-文件工具调用仍经过 projectRoot、allow、deny、protectedPaths hook；终端产生的所有文件变化还会在进入门禁前由 `Workspace.auditChanges` 统一审计。越界候选不会进入门禁或提交，而是转为 blocked 并归档。这样“开发能力”与“候选准入”分层，不用削减 Agent 工具来实现 Git 安全。
-
-Reviewer 是全新只读会话，只开放读取工具。它接收：
-
-- SPEC、PLAN、项目策略与 TASK 正文；
-- 最后一次通过门禁的结构化结果；
-- 实际变化文件；
-- 与 fingerprint 对应的 Git diff。
-
-critical/high/medium finding 会触发 repair。
-
-实现失败、门禁失败和审核发现默认无限循环到收敛。`maxAttempts`、`taskTimeoutMinutes/timeoutMinutes`、`maxTurns`、`maxBudgetUsd` 以及审核对应字段都是显式熔断选项；省略时 SDK 不接收这些限制，本地也不创建会话计时器。外部 `AbortSignal` 始终有效，确保用户仍可中断并恢复。
-
-## 9. Git 提交与恢复
-
-提交前必须同时满足：
-
-- 当前 HEAD 等于状态中的 `expectedHead`；
-- 项目外没有变化；
-- scope 审计通过；
-- 当前 fingerprint 等于门禁通过 fingerprint。
-
-成功提交包含精确 trailer：
+提交 trailer：
 
 - `Orchestrator-Run`
+- `Orchestrator-Project`
 - `Orchestrator-Task`
 - `Orchestrator-Candidate`
-- `Orchestrator-Project`
 - `Orchestrator-Task-Contract`
 - `Orchestrator-Task-Dependencies`
 
-每个 TASK 提交后更新 `expectedHead`。恢复时仅允许当前 HEAD 等于 expectedHead，或精确匹配“提交完成但状态尚未落盘”的唯一崩溃窗口。
+无文件差异时仍创建空提交，完成事实不依赖 diff 是否非空。
 
-完成提交同时承担项目级进度账本职责。`Orchestrator-Project` 使用仓库内项目路径哈希隔离同一父仓库中的多个子项目；任务契约指纹决定自身是否有效；依赖指纹绑定直接依赖的具体提交。每个 TASK 只核验当前祖先链中的最新完成证据，不越过较新的异契约提交回退匹配旧指纹。无代码差异但完整门禁和审核通过时使用空提交保存证据，因此复用逻辑不依赖文件 diff 是否非空。
+## 10. 跨 Run 进度复用
 
-## 10. 持久化与中断
+新 Run 默认读取当前 HEAD 祖先链上的完成提交。TASK 只有同时满足以下条件才复用：
+
+1. 最新完成证据存在；
+2. TASK 契约指纹相同；
+3. 所有直接依赖均已复用；
+4. 依赖完成提交指纹相同。
+
+任务正文、人工验收、项目上下文或审核开关变化会使完成证据失效。模型、effort、预算、超时和重试次数只影响执行资源，不改变完成定义。
+
+`--fresh` 只禁止本次 Run 复用，不删除历史。
+
+## 11. Checkpoint 与恢复
+
+每个状态转换都会写入 `state.json` 和 `events.jsonl`。Claude session 初始化后立即保存 session ID，因此进程中断时可以判断：
+
+- 会话尚未初始化：创建全新会话；
+- 会话已经初始化：使用 SDK `resume` 精确恢复；
+- 正在审核：启动全新只读审核；
+- 正在提交：通过精确 trailer 查找可能已经成功的提交。
+
+恢复要求 Manifest 内容哈希、项目根、仓库根、分支和预期 HEAD 与快照一致，不允许把旧 checkpoint 混入变化后的执行契约。
+
+## 12. 阻塞候选隔离
+
+blocked/failed TASK 的未提交候选会写入确定性的 `refs/claude-task-orchestrator/quarantine/*`，随后清理主工作区。这样独立 DAG 分支可以继续执行，失败现场仍能审计和恢复。
+
+依赖该 TASK 的 pending 节点按拓扑顺序转为 `dependency_blocked`，无依赖的其他分支继续运行到全局收敛。
+
+## 13. 状态存储与时间
 
 状态目录位于 Git common directory：
 
@@ -284,53 +291,31 @@ critical/high/medium finding 会触发 repair。
     manual-acceptance.md
 ```
 
-以下时刻保存 checkpoint：
+状态和事件保存 UTC。CLI、控制台日志、运行摘要和 Run ID 使用固定北京时间投影。
 
-- Run 创建和恢复；
-- TASK 每次状态推进；
-- SDK session init；
-- GateRun 完成；
-- 候选归档；
-- 依赖阻塞传播；
-- Run 终态。
+## 14. 关键不变量
 
-一次 `Ctrl+C`/`SIGTERM` 中止当前 Agent 或门禁进程树并保留 `running` 状态；下次使用 `resume`。第二次中断立即退出。
+1. 同一项目同一时刻只有一个编排器实例；
+2. 同一时刻只推进一个 TASK；
+3. TASK 只有在直接依赖全部 completed 后才能运行；
+4. Worker 拥有完整项目修改能力，不存在 TASK 路径白名单；
+5. 编排器不运行预声明外部命令；
+6. Reviewer 始终只读且使用全新会话；
+7. Reviewer 与提交必须绑定同一候选 fingerprint；
+8. 原子提交不能夹带父仓库兄弟目录变化；
+9. 任务完成证据必须绑定契约和直接依赖提交；
+10. 旧 Manifest 和旧 RunState 不进入兼容路径。
 
-状态、锁和 `events.jsonl` 保存标准 UTC 时间事实，供恢复、排序和机器审计使用。控制台事件、`status` 命令与 `summary.md` 统一显示北京时间，格式为 `YYYY-MM-DDTHH:mm:ss.SSS+08:00`；新运行 ID 使用文件名安全的 `YYYY-MM-DDTHH-mm-ss-SSS+08-00-<随机后缀>`。展示转换不回写状态文件。
+## 15. 自动化验证
 
-## 11. 安全不变量
+测试覆盖：
 
-1. 新运行前整个 Git 仓库必须干净。
-2. Manifest、上下文和全部 TASK 都是受保护文件。
-3. 候选进入门禁和提交前必须满足 allow，且不能命中 deny/protected。
-4. 门禁不在主候选上执行。
-5. 门禁产生的新候选必须完整重验。
-6. Reviewer 只能读取。
-7. 提交只包含当前项目候选。
-8. 阻塞候选先归档再释放其他 DAG 分支。
-9. Worker 工作流明确禁止 push、merge、rebase、reset 分支历史、部署或启动浏览器。
-10. 编排器门禁进程参数保持结构化，不通过 shell 拼接。
+- Manifest v3 严格解析并拒绝旧字段；
+- 稳定 DAG、依赖传播和单并发；
+- Worker 完整工具能力且不注入路径 Hook；
+- 实现、审核、repair、阻塞和恢复状态流；
+- 候选 fingerprint、原子提交、空提交和 quarantine；
+- 完成证据复用与下游失效传播；
+- 状态原子写入、锁和北京时间展示。
 
-## 12. 测试证据
-
-测试分为：
-
-- 任务目录与 Manifest 严格解析；
-- DAG 合法性和稳定顺序；
-- TASK/Run 状态转换；
-- 隔离 worktree、副作用提升和释放；
-- worktree 释放延后时保留门禁结论并继续后续 TASK；
-- 默认超过三轮仍持续 repair，以及显式资源上限透传；
-- 终态候选 Git ref 归档与主工作区清理；
-- blocked 分支隔离、依赖阻塞和独立分支继续；
-- 门禁进程、SDK 工具边界、持久化和锁；
-- 原子提交 trailer 和崩溃恢复。
-
-标准验证命令：
-
-```powershell
-pnpm typecheck
-pnpm lint
-pnpm test
-pnpm build
-```
+测试使用 Fake Agent 或临时 Git 仓库，不调用真实 Claude，也不启动浏览器。

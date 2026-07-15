@@ -36,11 +36,10 @@ function presentTaskState(
         ? {}
         : { finishedAt: timeFormatter.formatTimestamp(attempt.finishedAt) }),
     })),
-    gateRuns: task.gateRuns.map((gateRun) => ({
-      ...gateRun,
-      startedAt: timeFormatter.formatTimestamp(gateRun.startedAt),
-      finishedAt: timeFormatter.formatTimestamp(gateRun.finishedAt),
-    })),
+    /*
+     * TASK 状态第三版只投影会话与候选归档时间；外部门禁时间轴已从领域模型删除。
+     * 显式字段映射继续保证展示层不会递归猜测任意字符串的时间语义。
+     */
     ...(task.candidateArchive === undefined
       ? {}
       : {

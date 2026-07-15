@@ -17,13 +17,10 @@ import type {
 } from "../../src/ports/agent-executor.js";
 import type { Clock } from "../../src/ports/clock.js";
 import type { EventLogger, RunEvent } from "../../src/ports/event-logger.js";
-import type { GateRunner } from "../../src/ports/gate-runner.js";
 import type { RunLock, RunLockHandle } from "../../src/ports/run-lock.js";
 import type { StateStore } from "../../src/ports/state-store.js";
 import type {
   CandidateSnapshot,
-  ChangeAuditResult,
-  VerificationWorkspace,
   TaskCompletionEvidence,
   Workspace,
 } from "../../src/ports/workspace.js";
@@ -93,35 +90,9 @@ export class RecordingLogger implements EventLogger {
   }
 }
 
-export class PassingGateRunner implements GateRunner {
-  public active = 0;
-  public maxActive = 0;
-  public readonly taskOrder: string[] = [];
-  public readonly workingDirectories: string[] = [];
-
-  public async run(cwd: string, gates: Parameters<GateRunner["run"]>[1]) {
-    this.active += 1;
-    this.maxActive = Math.max(this.maxActive, this.active);
-    this.workingDirectories.push(cwd);
-    await Promise.resolve();
-    this.active -= 1;
-    return gates.map((gate) => ({
-      name: gate.name,
-      command: gate.command,
-      args: gate.args,
-      exitCode: 0,
-      timedOut: false,
-      stdout: "ok",
-      stderr: "",
-      durationMs: 1,
-    }));
-  }
-}
-
 export class RecordingWorkspace implements Workspace {
   public readonly commits: string[] = [];
   public cleanChecks = 0;
-  public verificationDisposals = 0;
   public quarantines = 0;
   private currentHead = "base-sha";
   private readonly completionHistory: TaskCompletionEvidence[] = [];
@@ -142,37 +113,8 @@ export class RecordingWorkspace implements Workspace {
     this.cleanChecks += 1;
   }
 
-  public async auditChanges(task: TaskDefinition): Promise<ChangeAuditResult> {
-    return {
-      changedFiles: [`src/${task.id}.ts`],
-      violations: [],
-    };
-  }
-
   public async captureCandidate(): Promise<CandidateSnapshot> {
     return createCandidate("stable-candidate");
-  }
-
-  /*
-   * 默认验证副本与源候选完全一致，具体用例可覆写工厂模拟门禁副作用。
-   * Fake 仍保留独立生命周期计数，确保应用服务不会泄漏验证工作区。
-   */
-  public async openVerificationWorkspace(input: {
-    expectedCandidate: CandidateSnapshot;
-  }): Promise<VerificationWorkspace> {
-    return {
-      projectRoot: "/verification",
-      auditChanges: (task) => this.auditChanges(task),
-      captureCandidate: () => Promise.resolve(input.expectedCandidate),
-      promoteCandidate: () => Promise.resolve(),
-      dispose: () => {
-        this.verificationDisposals += 1;
-        return Promise.resolve({
-          status: "released" as const,
-          diagnostics: [],
-        });
-      },
-    };
   }
 
   public async quarantineCandidate() {
@@ -265,7 +207,7 @@ export function createLoadedManifest(
   }[],
 ): LoadedTaskManifest {
   const manifest = taskManifestSchema.parse({
-    version: 2,
+    version: 3,
     project: {
       root: ".",
       contextFiles: [],
@@ -280,24 +222,12 @@ export function createLoadedManifest(
     taskCatalog: {
       directory: "tasks",
     },
-    verification: {
-      sharedPaths: [],
-    },
   });
   const tasks = taskInputs.map((input) => taskDefinitionSchema.parse({
       id: input.id,
       title: input.id,
       file: `tasks/${input.id}.md`,
       dependsOn: input.dependsOn ?? [],
-      scope: {
-        allow: ["src/**"],
-        deny: [],
-      },
-      gates: [{
-        name: "test",
-        command: "pnpm",
-        args: ["test"],
-      }],
       manualAcceptance: [],
     }));
   const taskDocuments = new Map(
@@ -338,15 +268,11 @@ export function createLoadedManifest(
     taskDocuments,
     taskContractHashes,
     contextDocuments: [],
-    protectedPaths: [
-      "orchestrator.yaml",
-      ...tasks.map((task) => task.file),
-    ],
   };
 }
 
 /*
- * 候选快照包含结构化文件记录，使门禁变化测试不依赖 diff 文本或暂存区表现。
+ * 候选快照包含结构化文件记录，使审核与提交测试不依赖 diff 文本或暂存区表现。
  * fingerprint 参数由用例控制，文件哈希同步变化以维持快照内部语义一致。
  */
 export function createCandidate(fingerprint: string): CandidateSnapshot {

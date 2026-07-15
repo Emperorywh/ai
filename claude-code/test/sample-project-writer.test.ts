@@ -38,7 +38,7 @@ describe("writeSampleProject", () => {
     await expect(access(join(root, "orchestrator.yaml"))).resolves.toBeUndefined();
     await expect(access(join(root, "tasks", "TASK-001.md"))).resolves.toBeUndefined();
     /*
-     * 初始化成功不仅代表文件存在，生成的版本 2 任务目录还必须能被生产仓储完整加载。
+     * 初始化成功不仅代表文件存在，生成的版本 3 任务目录还必须能被生产仓储完整加载。
      * 该断言防止模板与严格 Schema 在后续演进中形成两套不兼容契约。
      */
     const loaded = await new YamlManifestRepository().load(

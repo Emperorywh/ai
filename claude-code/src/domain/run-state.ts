@@ -8,7 +8,6 @@ import { z } from "zod";
 export const taskStatuses = [
   "pending",
   "executing",
-  "gating",
   "reviewing",
   "committing",
   "retry_pending",
@@ -43,28 +42,6 @@ export interface RetryContext {
   readonly resumeSessionId?: string | undefined;
 }
 
-export interface GateExecutionState {
-  readonly name: string;
-  readonly command: string;
-  readonly args: readonly string[];
-  readonly exitCode: number | null;
-  readonly timedOut: boolean;
-  readonly stdout: string;
-  readonly stderr: string;
-  readonly durationMs: number;
-}
-
-export interface GateRunState {
-  readonly number: number;
-  readonly candidateBefore: string;
-  readonly candidateAfter: string;
-  readonly results: readonly GateExecutionState[];
-  readonly mutatedFiles: readonly string[];
-  readonly outcome: "passed" | "failed" | "mutated" | "boundary_violation";
-  readonly startedAt: string;
-  readonly finishedAt: string;
-}
-
 export interface CandidateArchiveState {
   readonly reference?: string | undefined;
   readonly changedFiles: readonly string[];
@@ -87,7 +64,6 @@ export interface TaskRunState {
   readonly status: TaskStatus;
   readonly attempts: readonly TaskAttemptState[];
   readonly retry?: RetryContext | undefined;
-  readonly gateRuns: readonly GateRunState[];
   readonly reviewAttempts: number;
   readonly candidateFingerprint?: string | undefined;
   readonly reviewSessionId?: string | undefined;
@@ -106,7 +82,7 @@ export interface RunWorkspaceState {
 }
 
 export interface RunState {
-  readonly version: 2;
+  readonly version: 3;
   readonly runId: string;
   readonly status: RunStatus;
   readonly manifestPath: string;
@@ -139,28 +115,6 @@ const retryContextSchema = z.object({
   resumeSessionId: z.uuid().optional(),
 }).strict();
 
-const gateExecutionStateSchema = z.object({
-  name: z.string(),
-  command: z.string(),
-  args: z.array(z.string()),
-  exitCode: z.number().int().nullable(),
-  timedOut: z.boolean(),
-  stdout: z.string(),
-  stderr: z.string(),
-  durationMs: z.number().nonnegative(),
-}).strict();
-
-const gateRunStateSchema = z.object({
-  number: z.number().int().positive(),
-  candidateBefore: z.string(),
-  candidateAfter: z.string(),
-  results: z.array(gateExecutionStateSchema),
-  mutatedFiles: z.array(z.string()),
-  outcome: z.enum(["passed", "failed", "mutated", "boundary_violation"]),
-  startedAt: z.string(),
-  finishedAt: z.string(),
-}).strict();
-
 const candidateArchiveStateSchema = z.object({
   reference: z.string().optional(),
   changedFiles: z.array(z.string()),
@@ -179,7 +133,6 @@ const taskRunStateSchema = z.object({
   status: z.enum(taskStatuses),
   attempts: z.array(taskAttemptStateSchema),
   retry: retryContextSchema.optional(),
-  gateRuns: z.array(gateRunStateSchema),
   reviewAttempts: z.number().int().nonnegative(),
   candidateFingerprint: z.string().optional(),
   reviewSessionId: z.uuid().optional(),
@@ -192,7 +145,11 @@ const taskRunStateSchema = z.object({
 }).strict();
 
 export const runStateSchema: z.ZodType<RunState> = z.object({
-  version: z.literal(2),
+  /*
+   * 第三版状态只记录自主实现、独立审核与提交，不接受旧 gating/gateRuns 快照。
+   * 恢复路径因此始终面对单一状态图，不需要兼容分支或字段补全。
+   */
+  version: z.literal(3),
   runId: z.string(),
   status: z.enum(["running", "completed", "blocked", "failed"]),
   manifestPath: z.string(),
@@ -211,8 +168,7 @@ export const runStateSchema: z.ZodType<RunState> = z.object({
 
 const allowedTransitions: Readonly<Record<TaskStatus, readonly TaskStatus[]>> = {
   pending: ["executing", "blocked", "failed", "dependency_blocked"],
-  executing: ["gating", "retry_pending", "blocked", "failed"],
-  gating: ["reviewing", "committing", "retry_pending", "blocked", "failed"],
+  executing: ["reviewing", "committing", "retry_pending", "blocked", "failed"],
   reviewing: ["reviewing", "committing", "retry_pending", "blocked", "failed"],
   committing: ["completed", "blocked", "failed"],
   retry_pending: ["executing", "blocked", "failed"],
@@ -240,7 +196,6 @@ export function createInitialRunState(input: {
     const shared = {
       taskId: task.taskId,
       attempts: [],
-      gateRuns: [],
       reviewAttempts: 0,
       updatedAt: input.now,
     };
@@ -260,7 +215,7 @@ export function createInitialRunState(input: {
   }
 
   return {
-    version: 2,
+    version: 3,
     runId: input.runId,
     status: "running",
     manifestPath: input.manifestPath,

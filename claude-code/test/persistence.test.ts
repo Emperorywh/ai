@@ -86,13 +86,13 @@ describe("FileStateStore", () => {
     ).rejects.toThrow("非法产物名称");
   });
 
-  it("拒绝没有版本 2 标记的旧状态快照", async () => {
+  it("拒绝没有版本 3 标记的旧状态快照", async () => {
     const directory = await createTemporaryDirectory();
     const store = new FileStateStore(directory);
     const runDirectory = join(directory, "runs", "run-old-state");
     await mkdir(runDirectory, { recursive: true });
     /*
-     * 旧状态不能被隐式补默认值，否则 gateRuns、候选归档和依赖阻塞语义会变得不可推导。
+     * 旧状态不能被隐式补默认值，否则候选归档、依赖阻塞和审核语义会变得不可推导。
      * 明确拒绝后，操作者只能创建符合当前契约的新运行。
      */
     await writeFile(

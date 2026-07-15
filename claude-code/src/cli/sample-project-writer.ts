@@ -7,11 +7,11 @@ import { dirname, resolve } from "node:path";
 import { ConfigurationError } from "../domain/errors.js";
 
 /*
- * TASK 文档前置元数据承载调度与安全边界，正文承载用户意图和验收标准。
+ * TASK 文档前置元数据只承载调度、资源熔断与人工验收，正文承载完整用户意图。
  * 新任务只新增一个文档，不再同步维护 Manifest 数组，从结构上消除任务遗漏。
  */
 const SAMPLE_FILES: Readonly<Record<string, string>> = {
-  "orchestrator.yaml": `version: 2
+  "orchestrator.yaml": `version: 3
 project:
   root: .
   spec: SPEC.md
@@ -33,11 +33,6 @@ git:
 
 taskCatalog:
   directory: tasks
-
-# 隔离验证工作区只共享显式声明的依赖目录；候选源码始终复制到独立 Git worktree。
-verification:
-  sharedPaths:
-    - node_modules
 `,
   "SPEC.md": `# 规格说明
 
@@ -55,25 +50,6 @@ verification:
 id: TASK-001
 title: 实现第一个独立任务
 dependsOn: []
-scope:
-  allow:
-    - src/**
-    - test/**
-    - package.json
-    - pnpm-lock.yaml
-  deny:
-    - .env*
-gates:
-  - name: typecheck
-    command: pnpm
-    args:
-      - typecheck
-    timeoutMinutes: 10
-  - name: test
-    command: pnpm
-    args:
-      - test
-    timeoutMinutes: 15
 manualAcceptance:
   - 在本地浏览器中完成功能与视觉验收
 ---

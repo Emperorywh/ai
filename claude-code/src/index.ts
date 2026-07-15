@@ -16,7 +16,6 @@ export * from "./domain/task-completion.js";
 export * from "./ports/agent-executor.js";
 export * from "./ports/clock.js";
 export * from "./ports/event-logger.js";
-export * from "./ports/gate-runner.js";
 export * from "./ports/manifest-repository.js";
 export * from "./ports/run-lock.js";
 export * from "./ports/state-store.js";

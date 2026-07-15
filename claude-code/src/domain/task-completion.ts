@@ -1,6 +1,6 @@
 /*
  * 任务完成契约只包含会改变“任务是否仍然有效”的事实，不包含模型、预算、重试次数等执行策略。
- * 这样调整运行资源不会让已通过门禁和审核的任务失效，而需求、边界、门禁或上下文变化会确定性失效。
+ * 自主 Worker 的能力不再由路径或命令清单塑形，需求、上下文与审核策略是完成定义的全部输入。
  */
 import { createHash } from "node:crypto";
 import type {
@@ -27,19 +27,20 @@ export interface DependencyCompletion {
  */
 export function createTaskContractHash(input: TaskContractHashInput): string {
   const contract = {
-    version: 1,
+    /*
+     * 第二版完成契约与 Manifest v3 同步删除 scope、gates 和 verificationSharedPaths。
+     * 显式换代确保旧提交证据不会在新执行模型下被错误复用。
+     */
+    version: 2,
     task: {
       id: input.task.id,
       title: input.task.title,
       file: input.task.file,
       dependsOn: input.task.dependsOn,
-      scope: input.task.scope,
-      gates: input.task.gates,
       manualAcceptance: input.task.manualAcceptance,
       body: extractTaskBody(input.taskDocument.content),
     },
     reviewRequired: input.manifest.review.enabled,
-    verificationSharedPaths: [...input.manifest.verification.sharedPaths].sort(),
     contextDocuments: [...input.contextDocuments]
       .sort((left, right) => compareText(left.path, right.path))
       .map((document) => ({

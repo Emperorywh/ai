@@ -23,7 +23,6 @@ import type {
   ClaudeMessageContext,
   ClaudeMessageObserver,
 } from "./claude-message-observer.js";
-import { createToolBoundaryHooks } from "./sdk-tool-boundary.js";
 
 const READ_TOOLS = ["Read", "Glob", "Grep"] as const;
 const FORCE_CLOSE_GRACE_MS = 2_000;
@@ -238,8 +237,8 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
 
     /*
      * 写入 Worker 使用 Claude Code 的完整工具面与本机/项目扩展，并明确绕过交互式授权，
-     * 让它可以自行运行命令、调用技能和组织子 Agent。文件工具仍经过项目与 TASK 路径 hook，
-     * 会话结束后还会由 Workspace 做候选审计；Reviewer 则继续保持最小只读能力。
+     * 让它可以自行运行命令、调用技能和组织子 Agent。系统不再注入路径 Hook 或命令门禁；
+     * Reviewer 继续保持最小只读能力，以独立判断候选而不削减 Worker 的实现空间。
      */
     const accessOptions: Pick<
       Options,
@@ -275,7 +274,6 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
       cwd: request.cwd,
       ...accessOptions,
       stderr: onStderr,
-      hooks: createToolBoundaryHooks(request.pathBoundary),
       persistSession: true,
       ...(request.maxTurns === undefined
         ? {}

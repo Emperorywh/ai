@@ -55,7 +55,7 @@ describe("北京时间人类可读输出", () => {
     expect(event.timestamp).toBe("2026-07-14T19:28:40.710Z");
   });
 
-  it("status 投影显式转换运行、任务、attempt、门禁和归档时间", () => {
+  it("status 投影显式转换运行、任务、attempt 和归档时间", () => {
     const display = presentRunState(createRunState(), formatter);
     const task = display.tasks["TASK-012"];
 
@@ -68,12 +68,6 @@ describe("北京时间人类可读输出", () => {
     expect(task?.attempts[0]?.finishedAt).toBe(
       "2026-07-15T03:28:42.710+08:00",
     );
-    expect(task?.gateRuns[0]?.startedAt).toBe(
-      "2026-07-15T03:28:43.710+08:00",
-    );
-    expect(task?.gateRuns[0]?.finishedAt).toBe(
-      "2026-07-15T03:28:44.710+08:00",
-    );
     expect(task?.candidateArchive?.archivedAt).toBe(
       "2026-07-15T03:28:45.710+08:00",
     );
@@ -82,7 +76,7 @@ describe("北京时间人类可读输出", () => {
 
 function createRunState(): RunState {
   return {
-    version: 2,
+    version: 3,
     runId: "run-1",
     status: "failed",
     manifestPath: "/project/orchestrator.yaml",
@@ -107,16 +101,6 @@ function createRunState(): RunState {
           startedAt: "2026-07-14T19:28:41.710Z",
           finishedAt: "2026-07-14T19:28:42.710Z",
           outcome: "failed",
-        }],
-        gateRuns: [{
-          number: 1,
-          candidateBefore: "before",
-          candidateAfter: "after",
-          results: [],
-          mutatedFiles: [],
-          outcome: "failed",
-          startedAt: "2026-07-14T19:28:43.710Z",
-          finishedAt: "2026-07-14T19:28:44.710Z",
         }],
         reviewAttempts: 0,
         candidateArchive: {

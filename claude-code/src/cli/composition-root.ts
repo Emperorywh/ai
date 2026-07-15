@@ -17,7 +17,6 @@ import {
 } from "../infrastructure/logging/event-loggers.js";
 import { FileRunLock } from "../infrastructure/persistence/file-run-lock.js";
 import { FileStateStore } from "../infrastructure/persistence/file-state-store.js";
-import { NodeGateRunner } from "../infrastructure/process/node-gate-runner.js";
 import { SystemClock } from "../infrastructure/system-clock.js";
 import { YamlManifestRepository } from "../infrastructure/tasks/yaml-manifest-repository.js";
 import { BeijingTimeFormatter } from "../infrastructure/time/beijing-time-formatter.js";
@@ -53,7 +52,6 @@ export async function createOrchestratorRuntime(
     new ClaudeAgentSdkExecutor({
       messageObserver: new ConsoleClaudeMessageObserver(),
     }),
-    new NodeGateRunner(),
     workspace,
     new PromptBuilder(),
     clock,

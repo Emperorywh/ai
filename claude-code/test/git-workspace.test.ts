@@ -1,10 +1,10 @@
 /*
- * GitWorkspace 测试使用独立仓库验证候选指纹、隔离 worktree、归档引用和原子提交。
+ * GitWorkspace 测试使用独立仓库验证候选指纹、归档引用和原子提交。
  * 所有 Git 身份与提交配置都限制在临时目录，不读取或修改用户的真实仓库配置。
  */
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -62,8 +62,8 @@ async function createGitFixture(): Promise<GitFixture> {
 }
 
 /**
- * 任务夹具补齐 Manifest 解析后的字段，只开放临时仓库中的 TypeScript 文件。
- * 提交测试不依赖任务解析器，能够聚焦 GitWorkspace 的边界与 trailer 语义。
+ * 任务夹具补齐 Manifest 解析后的字段，不附加任何路径或命令能力限制。
+ * 提交测试不依赖任务解析器，能够聚焦 GitWorkspace 的项目原子性与 trailer 语义。
  */
 function createTask(id: string): TaskDefinition {
   return {
@@ -71,18 +71,6 @@ function createTask(id: string): TaskDefinition {
     title: "实现候选提交",
     file: `tasks/${id}.md`,
     dependsOn: [],
-    scope: {
-      allow: ["*.ts"],
-      deny: [],
-    },
-    gates: [
-      {
-        name: "类型检查",
-        command: "pnpm",
-        args: ["run", "typecheck"],
-        timeoutMinutes: 15,
-      },
-    ],
     manualAcceptance: [],
   };
 }
@@ -117,9 +105,9 @@ describe("GitWorkspace", () => {
 
   /*
    * Git 的 tracked diff 默认输出仓库根相对路径，而 ls-files 在子目录中输出项目相对路径。
-   * 该用例锁定统一的项目根坐标系，防止 allow 中的 package.json 再次被误判为越界文件。
+   * 该用例锁定统一的项目根坐标系，确保审核文件列表与 diff 使用同一组路径。
    */
-  it("父仓库子项目按项目根相对路径审计 tracked 与新增文件", async () => {
+  it("父仓库子项目按项目根相对路径捕获 tracked 与新增文件", async () => {
     const fixture = await createGitFixture();
     const projectRoot = join(fixture.root, "apps", "nested-project");
     await mkdir(join(projectRoot, "src"), { recursive: true });
@@ -135,20 +123,12 @@ describe("GitWorkspace", () => {
     );
 
     const workspace = new GitWorkspace(projectRoot);
-    const task: TaskDefinition = {
-      ...createTask("TASK-NESTED"),
-      scope: {
-        allow: ["package.json", "src/**"],
-        deny: [],
-      },
-    };
-    const audit = await workspace.auditChanges(task, []);
     const candidate = await workspace.captureCandidate();
 
-    expect(audit).toEqual({
-      changedFiles: ["package.json", "src/feature.ts"],
-      violations: [],
-    });
+    expect(candidate.files.map((file) => file.path)).toEqual([
+      "package.json",
+      "src/feature.ts",
+    ]);
     expect(candidate.diff).toContain("a/package.json");
     expect(candidate.diff).not.toContain("a/apps/nested-project/package.json");
   });
@@ -178,85 +158,10 @@ describe("GitWorkspace", () => {
         taskContractHash: "1".repeat(64),
         dependencyFingerprint: "2".repeat(64),
       }),
-    ).rejects.toThrow("候选内容已变化，拒绝提交未经当前门禁和审核的版本");
+    ).rejects.toThrow("候选内容已变化，拒绝提交未经当前审核确认的版本");
     expect((await runGit(fixture.root, ["rev-parse", "HEAD"])).trim()).toBe(
       fixture.initialHead,
     );
-  });
-
-  it("门禁候选在独立 worktree 中变化且只通过显式提升回写", async () => {
-    const fixture = await createGitFixture();
-    await writeFile(join(fixture.root, ".gitignore"), "dependencies/\n", "utf8");
-    await runGit(fixture.root, ["add", "--all", "--", "."]);
-    await runGit(fixture.root, ["commit", "--quiet", "--no-verify", "-m", "声明共享依赖"]);
-    await mkdir(join(fixture.root, "dependencies"));
-    await writeFile(
-      join(fixture.root, "dependencies", "runtime.txt"),
-      "shared dependency\n",
-      "utf8",
-    );
-    await writeFile(
-      join(fixture.root, "feature.ts"),
-      "export const version = 1;\n",
-      "utf8",
-    );
-    const candidate = await fixture.workspace.captureCandidate();
-    const verification = await fixture.workspace.openVerificationWorkspace({
-      runId: "run-isolated-gate",
-      taskId: "TASK-ISOLATED",
-      sharedPaths: ["dependencies"],
-      expectedCandidate: candidate,
-    });
-
-    /*
-     * 隔离目录中的写入在 promoteCandidate 前不得影响源工作区。
-     * 提升后源候选必须与隔离候选指纹完全相同，随后 worktree 可独立释放。
-     */
-    try {
-      await writeFile(
-        join(verification.projectRoot, "feature.ts"),
-        "export const version = 2;\n",
-        "utf8",
-      );
-      await writeFile(
-        join(verification.projectRoot, "generated.ts"),
-        "export const generated = true;\n",
-        "utf8",
-      );
-      const isolatedCandidate = await verification.captureCandidate();
-
-      await expect(readFile(
-        join(verification.projectRoot, "dependencies", "runtime.txt"),
-        "utf8",
-      )).resolves.toBe("shared dependency\n");
-      await expect(readFile(join(fixture.root, "feature.ts"), "utf8")).resolves.toBe(
-        "export const version = 1;\n",
-      );
-      await expect(access(join(fixture.root, "generated.ts"))).rejects.toMatchObject({
-        code: "ENOENT",
-      });
-
-      await verification.promoteCandidate(["feature.ts", "generated.ts"]);
-      const promoted = await fixture.workspace.captureCandidate();
-      expect(promoted.fingerprint).toBe(isolatedCandidate.fingerprint);
-    } finally {
-      const release = await verification.dispose();
-      const repeatedRelease = await verification.dispose();
-      expect(release).toEqual({ status: "released", diagnostics: [] });
-      expect(repeatedRelease).toEqual(release);
-    }
-
-    /*
-     * Windows Git 会跟随 worktree 内的目录 junction。释放器必须先解绑自身创建的共享链接，
-     * 否则 `git worktree remove --force` 会把源工作区依赖内容一并删除，即使门禁已经通过。
-     */
-    await expect(readFile(
-      join(fixture.root, "dependencies", "runtime.txt"),
-      "utf8",
-    )).resolves.toBe("shared dependency\n");
-
-    const worktreeList = await runGit(fixture.root, ["worktree", "list", "--porcelain"]);
-    expect(worktreeList.match(/^worktree /gmu)).toHaveLength(1);
   });
 
   it("终态候选归档到持久 Git 引用后清理主工作区", async () => {

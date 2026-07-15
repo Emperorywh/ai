@@ -1,39 +1,29 @@
 /*
- * GitWorkspace 使用规范化仓库身份、显式 pathspec 和候选内容指纹把门禁、审核与提交绑定到同一版本。
+ * GitWorkspace 使用规范化仓库身份、显式 pathspec 和候选内容指纹把实现、审核与提交绑定到同一版本。
  * 提交只接受预期 HEAD 与预期候选，精确 trailer 用于恢复提交后、状态落盘前的唯一崩溃窗口。
  */
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import {
-  chmod,
-  copyFile,
   lstat,
-  mkdir,
   mkdtemp,
   readFile,
   readlink,
   realpath,
   rm,
-  stat,
-  symlink,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
-import { minimatch } from "minimatch";
 import { ConfigurationError, InfrastructureError } from "../../domain/errors.js";
 import type { TaskDefinition } from "../../domain/manifest.js";
 import type {
   CandidateSnapshot,
   CandidateArchive,
-  ChangeAuditResult,
-  VerificationWorkspace,
-  VerificationWorkspaceRelease,
   TaskCompletionEvidence,
   Workspace,
   WorkspaceIdentity,
 } from "../../ports/workspace.js";
-import { VerificationWorktreeLease } from "./verification-worktree-lease.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_GIT_OUTPUT_BYTES = 20 * 1024 * 1024;
@@ -90,25 +80,6 @@ export class GitWorkspace implements Workspace {
     }
   }
 
-  public async auditChanges(
-    task: TaskDefinition,
-    protectedPaths: readonly string[],
-  ): Promise<ChangeAuditResult> {
-    const changedFiles = await this.getChangedProjectFiles();
-    const protectedSet = new Set(protectedPaths.map(normalize));
-    const violations = changedFiles.filter((file) => {
-      const normalized = normalize(file);
-      const isProtected = protectedSet.has(normalized);
-      const isDenied = task.scope.deny.some((pattern) =>
-        minimatch(normalized, normalize(pattern), { dot: true }));
-      const isAllowed = task.scope.allow.some((pattern) =>
-        minimatch(normalized, normalize(pattern), { dot: true }));
-      return isProtected || isDenied || !isAllowed;
-    });
-
-    return { changedFiles, violations };
-  }
-
   public async captureCandidate(): Promise<CandidateSnapshot> {
     const changedFiles = await this.getChangedProjectFiles();
     const hash = createHash("sha256");
@@ -155,7 +126,7 @@ export class GitWorkspace implements Workspace {
 
     /*
      * 指纹由规范化文件记录组成，不依赖暂存区状态或 Git diff 的文本表现。
-     * 同一候选在主工作区与隔离 worktree 中会得到完全相同的可比较结果。
+     * 实现、审核与提交重复捕获同一候选时会得到完全相同的可比较结果。
      */
     for (const file of files) {
       hash.update(file.path);
@@ -173,83 +144,6 @@ export class GitWorkspace implements Workspace {
       diff: await this.createReviewDiff(),
       files,
     };
-  }
-
-  /*
-   * 门禁在独立 detached worktree 中运行，主候选不会被验证命令直接改写。
-   * 只复制 Git 候选文件，并通过显式 sharedPaths 复用 node_modules 等依赖目录。
-   */
-  public async openVerificationWorkspace(input: {
-    runId: string;
-    taskId: string;
-    sharedPaths: readonly string[];
-    expectedCandidate: CandidateSnapshot;
-  }): Promise<VerificationWorkspace> {
-    const repositoryRoot = (await this.git(["rev-parse", "--show-toplevel"])).trim();
-    const projectPrefix = normalize(
-      (await this.git(["rev-parse", "--show-prefix"])).trim(),
-    );
-    for (const sharedPath of input.sharedPaths) {
-      resolveProjectPath(this.projectRoot, sharedPath);
-    }
-    const temporaryRoot = await mkdtemp(join(tmpdir(), "claude-task-verification-"));
-    const worktreeRoot = join(temporaryRoot, "worktree");
-    const verificationProjectRoot = projectPrefix.length === 0
-      ? worktreeRoot
-      : resolve(worktreeRoot, projectPrefix);
-    const lease = new VerificationWorktreeLease({
-      repositoryRoot,
-      worktreeRoot,
-      temporaryRoot,
-      sharedPathLinks: input.sharedPaths.map((sharedPath) =>
-        resolveProjectPath(verificationProjectRoot, sharedPath)
-      ),
-    });
-
-    try {
-      await this.gitAt(repositoryRoot, [
-        "worktree",
-        "add",
-        "--detach",
-        worktreeRoot,
-        "HEAD",
-      ]);
-      for (const file of input.expectedCandidate.files) {
-        await copyCandidatePath(
-          this.projectRoot,
-          verificationProjectRoot,
-          file.path,
-        );
-      }
-      for (const sharedPath of input.sharedPaths) {
-        await linkSharedPath(
-          this.projectRoot,
-          verificationProjectRoot,
-          sharedPath,
-        );
-      }
-
-      const isolatedWorkspace = new GitWorkspace(verificationProjectRoot);
-      const isolatedCandidate = await isolatedWorkspace.captureCandidate();
-      if (isolatedCandidate.fingerprint !== input.expectedCandidate.fingerprint) {
-        throw new InfrastructureError(
-          `隔离验证候选与源候选不一致：${input.taskId}`,
-        );
-      }
-      return new GitVerificationWorkspace({
-        sourceProjectRoot: this.projectRoot,
-        projectRoot: verificationProjectRoot,
-        workspace: isolatedWorkspace,
-        lease,
-      });
-    } catch (error) {
-      /*
-       * 初始化失败必须保留原始异常语义；释放诊断只描述临时资源，不能覆盖候选复制或
-       * 指纹校验的真正根因。lease 内部会完成 Git 删除、文件系统兜底和注册修剪。
-       */
-      await lease.release().catch(() => undefined);
-      throw error;
-    }
   }
 
   /*
@@ -374,7 +268,7 @@ export class GitWorkspace implements Workspace {
       `Orchestrator-Task-Dependencies: ${input.dependencyFingerprint}`,
     ].join("\n");
     /*
-     * --fresh 或人工预先实现可能得到“代码无变化但门禁与审核通过”的合法结果。
+     * --fresh 或人工预先实现可能得到“代码无变化但任务契约已经满足”的合法结果。
      * 空提交只记录完成证据；非空候选仍使用项目 pathspec，绝不夹带父仓库其他目录的改动。
      */
     const commitArguments = [
@@ -482,7 +376,7 @@ export class GitWorkspace implements Workspace {
     const candidate = await this.captureCandidate();
     if (candidate.fingerprint !== expectedFingerprint) {
       throw new InfrastructureError(
-        "候选内容已变化，拒绝提交未经当前门禁和审核的版本",
+        "候选内容已变化，拒绝提交未经当前审核确认的版本",
       );
     }
   }
@@ -504,7 +398,7 @@ export class GitWorkspace implements Workspace {
 
   private async createReviewDiff(): Promise<string> {
     /*
-     * --relative 让 diff header 与 TASK scope 共用项目根坐标系。
+     * --relative 让 diff header 始终使用项目根坐标系。
      * 父仓库子项目因此不会把仓库目录前缀泄漏到 Reviewer 提示词。
      */
     const trackedDiff = await this.git([
@@ -536,7 +430,7 @@ export class GitWorkspace implements Workspace {
   private async getChangedProjectFiles(): Promise<readonly string[]> {
     /*
      * tracked 和 untracked 列表必须都以 projectRoot 为基准，否则同一文件会因 Git 子命令不同
-     * 得到两种路径表示，并在 allow/deny/protected 审计时产生错误结论。
+     * 得到两种路径表示，导致候选指纹、审核文件列表与提交 pathspec 不能稳定对齐。
      */
     const [tracked, untracked] = await Promise.all([
       this.gitNullList([
@@ -636,120 +530,6 @@ export class GitWorkspace implements Workspace {
 
 }
 
-interface GitVerificationWorkspaceInput {
-  readonly sourceProjectRoot: string;
-  readonly projectRoot: string;
-  readonly workspace: GitWorkspace;
-  readonly lease: VerificationWorktreeLease;
-}
-
-/*
- * 该适配器只暴露验证阶段需要的最小能力，不允许门禁在隔离目录中提交或操作运行状态。
- * promoteCandidate 是唯一回写入口，调用者必须先完成 scope/protected 审计。
- */
-class GitVerificationWorkspace implements VerificationWorkspace {
-  public readonly projectRoot: string;
-
-  public constructor(private readonly input: GitVerificationWorkspaceInput) {
-    this.projectRoot = input.projectRoot;
-  }
-
-  public auditChanges(
-    task: TaskDefinition,
-    protectedPaths: readonly string[],
-  ): Promise<ChangeAuditResult> {
-    return this.input.workspace.auditChanges(task, protectedPaths);
-  }
-
-  public captureCandidate(): Promise<CandidateSnapshot> {
-    return this.input.workspace.captureCandidate();
-  }
-
-  public async promoteCandidate(paths: readonly string[]): Promise<void> {
-    for (const path of paths) {
-      await copyCandidatePath(
-        this.input.projectRoot,
-        this.input.sourceProjectRoot,
-        path,
-      );
-    }
-  }
-
-  public dispose(): Promise<VerificationWorkspaceRelease> {
-    return this.input.lease.release();
-  }
-}
-
-/*
- * 候选复制严格按 Git 返回的项目相对路径执行，并拒绝目录型候选。
- * 源路径不存在表示删除语义，目标文件会被精确移除而不会递归清理未知目录。
- */
-async function copyCandidatePath(
-  sourceRoot: string,
-  targetRoot: string,
-  relativePath: string,
-): Promise<void> {
-  const sourcePath = resolveProjectPath(sourceRoot, relativePath);
-  const targetPath = resolveProjectPath(targetRoot, relativePath);
-  try {
-    const metadata = await lstat(sourcePath);
-    await mkdir(dirname(targetPath), { recursive: true });
-    await rm(targetPath, { force: true });
-    if (metadata.isSymbolicLink()) {
-      const target = await readlink(sourcePath);
-      const followed = await stat(sourcePath);
-      await symlink(
-        target,
-        targetPath,
-        followed.isDirectory()
-          ? process.platform === "win32" ? "junction" : "dir"
-          : "file",
-      );
-      return;
-    }
-    if (!metadata.isFile()) {
-      throw new InfrastructureError(`候选路径不是普通文件：${relativePath}`);
-    }
-    await copyFile(sourcePath, targetPath);
-    await chmod(targetPath, metadata.mode);
-  } catch (error) {
-    if (isMissingPath(error)) {
-      await rm(targetPath, { force: true });
-      return;
-    }
-    throw error;
-  }
-}
-
-async function linkSharedPath(
-  sourceRoot: string,
-  targetRoot: string,
-  relativePath: string,
-): Promise<void> {
-  const sourcePath = resolveProjectPath(sourceRoot, relativePath);
-  const targetPath = resolveProjectPath(targetRoot, relativePath);
-  let metadata;
-  try {
-    metadata = await stat(sourcePath);
-  } catch (error) {
-    if (isMissingPath(error)) {
-      throw new InfrastructureError(`验证共享路径不存在：${relativePath}`);
-    }
-    throw error;
-  }
-  if (await pathExists(targetPath)) {
-    throw new InfrastructureError(`验证共享路径覆盖了 Git 文件：${relativePath}`);
-  }
-  await mkdir(dirname(targetPath), { recursive: true });
-  await symlink(
-    sourcePath,
-    targetPath,
-    metadata.isDirectory()
-      ? process.platform === "win32" ? "junction" : "dir"
-      : "file",
-  );
-}
-
 async function removeProjectFile(
   projectRoot: string,
   relativePath: string,
@@ -781,18 +561,6 @@ function resolveProjectPath(projectRoot: string, relativePath: string): string {
     throw new InfrastructureError(`候选路径越界：${relativePath}`);
   }
   return absolutePath;
-}
-
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await lstat(path);
-    return true;
-  } catch (error) {
-    if (isMissingPath(error)) {
-      return false;
-    }
-    throw error;
-  }
 }
 
 function normalize(path: string): string {

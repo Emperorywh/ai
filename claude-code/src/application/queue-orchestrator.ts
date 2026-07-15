@@ -327,7 +327,6 @@ export class QueueOrchestrator {
     return orderedTasks.find((task) => {
       const status = state.tasks[task.id]?.status;
       return status === "executing"
-        || status === "gating"
         || status === "reviewing"
         || status === "committing";
     }) ?? orderedTasks.find((task) => {

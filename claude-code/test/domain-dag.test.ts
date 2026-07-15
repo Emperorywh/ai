@@ -19,18 +19,6 @@ function createTask(
     title: `任务 ${id}`,
     file: `tasks/${id}.md`,
     dependsOn: [...dependsOn],
-    scope: {
-      allow: ["src/**"],
-      deny: [],
-    },
-    gates: [
-      {
-        name: "类型检查",
-        command: "pnpm",
-        args: ["run", "typecheck"],
-        timeoutMinutes: 15,
-      },
-    ],
     manualAcceptance: [],
   };
 }

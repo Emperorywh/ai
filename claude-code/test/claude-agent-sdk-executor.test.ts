@@ -242,6 +242,7 @@ describe("ClaudeAgentSdkExecutor", () => {
       "project",
       "local",
     ]);
+    expect(capturedOptions?.hooks).toBeUndefined();
   });
 
   /*
@@ -307,14 +308,6 @@ function createRequest(
     maxTurns: 10,
     timeoutMs: 10_000,
     sessionId: SESSION_ID,
-    pathBoundary: {
-      projectRoot: process.cwd(),
-      write: {
-        allow: ["src/**"],
-        deny: [],
-        protectedPaths: [],
-      },
-    },
     resultSchema,
     ...overrides,
   };

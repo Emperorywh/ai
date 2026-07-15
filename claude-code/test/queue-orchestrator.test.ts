@@ -12,19 +12,14 @@ import { BeijingTimeFormatter } from "../src/infrastructure/time/beijing-time-fo
 import {
   FakeClock,
   MemoryStateStore,
-  PassingGateRunner,
   RecordingAgent,
   RecordingLogger,
   RecordingRunLock,
   RecordingWorkspace,
   completedBehavior,
-  createCandidate,
   createLoadedManifest,
 } from "./support/orchestrator-fixture.js";
-import type {
-  CandidateSnapshot,
-  VerificationWorkspace,
-} from "../src/ports/workspace.js";
+import type { CandidateSnapshot } from "../src/ports/workspace.js";
 
 describe("QueueOrchestrator", () => {
   it("按稳定依赖顺序执行，且任意时刻最多只有一个 Agent", async () => {
@@ -39,12 +34,6 @@ describe("QueueOrchestrator", () => {
 
     expect(result.state.status).toBe("completed");
     expect(fixture.agent.maxActive).toBe(1);
-    expect(fixture.gates.maxActive).toBe(1);
-    expect(fixture.gates.workingDirectories).toEqual([
-      "/verification",
-      "/verification",
-      "/verification",
-    ]);
     expect(fixture.lock.maxActive).toBe(1);
     expect(fixture.workspace.commits).toEqual(["TASK-A", "TASK-B", "TASK-C"]);
     expect(fixture.agent.requests.map((request) => request.taskId)).toEqual([
@@ -55,6 +44,12 @@ describe("QueueOrchestrator", () => {
     expect(fixture.agent.requests[0]?.prompt).toContain(
       "可以自主调用子 Agent、终端、技能和 MCP",
     );
+    /*
+     * v3 提示词只表达任务目标与职责，不再把旧路径清单或命令清单注入 Worker 上下文。
+     * 两个负断言守护能力面与文案同时删除，避免未来只移除 SDK Hook 却恢复提示词约束。
+     */
+    expect(fixture.agent.requests[0]?.prompt).not.toContain("# 路径边界");
+    expect(fixture.agent.requests[0]?.prompt).not.toContain("# 外部验收门禁");
     expect(result.artifacts).toHaveLength(2);
     expect(fixture.stateStore.snapshots.length).toBeGreaterThan(10);
     expect(result.state.runId).toMatch(
@@ -132,7 +127,7 @@ describe("QueueOrchestrator", () => {
     expect(fresh.state.tasks["TASK-B"]?.completion?.origin).toBe("executed");
   });
 
-  it("现有代码无变化时仍执行门禁并形成完成证据", async () => {
+  it("现有代码无变化时仍冻结候选并形成完成证据", async () => {
     const workspace = new NoChangeWorkspace();
     const fixture = createFixture(workspace);
     const loaded = createLoadedManifest([{ id: "TASK-A" }]);
@@ -140,7 +135,6 @@ describe("QueueOrchestrator", () => {
     const result = await fixture.orchestrator.start(loaded, { fresh: true });
 
     expect(result.state.status).toBe("completed");
-    expect(fixture.gates.workingDirectories).toEqual(["/verification"]);
     expect(fixture.agent.requests).toHaveLength(1);
     expect(workspace.commits).toEqual(["TASK-A"]);
     expect(result.state.tasks["TASK-A"]?.completion?.origin).toBe("executed");
@@ -328,37 +322,6 @@ describe("QueueOrchestrator", () => {
     );
   });
 
-  it("门禁副作用在隔离工作区提升后自动修复并完整重验", async () => {
-    const workspace = new MutatingCandidateWorkspace();
-    const fixture = createFixture(workspace);
-    const loaded = createLoadedManifest([{ id: "TASK-A" }]);
-
-    const result = await fixture.orchestrator.start(loaded);
-
-    expect(result.state.status).toBe("completed");
-    expect(workspace.commits).toEqual(["TASK-A"]);
-    expect(workspace.verificationDisposals).toBe(2);
-    expect(fixture.agent.requests.map((request) => request.attemptKind)).toEqual([
-      "implementation",
-      "repair",
-    ]);
-    expect(result.state.tasks["TASK-A"]?.gateRuns.map((run) => ({
-      outcome: run.outcome,
-      mutatedFiles: run.mutatedFiles,
-    }))).toEqual([
-      { outcome: "mutated", mutatedFiles: ["src/candidate.ts"] },
-      { outcome: "passed", mutatedFiles: [] },
-    ]);
-    const mutationEvent = fixture.logger.events.find(
-      (event) => event.details?.["outcome"] === "mutated",
-    );
-    expect(mutationEvent?.type).toBe("task_progress");
-    expect(mutationEvent?.details).toMatchObject({
-      outcome: "mutated",
-      mutatedFiles: ["src/candidate.ts"],
-    });
-  });
-
   it("任务阻塞后隔离候选、阻止依赖子图并继续独立任务", async () => {
     const agent = new RecordingAgent((request) =>
       request.taskId === "TASK-A"
@@ -399,47 +362,7 @@ describe("QueueOrchestrator", () => {
     expect(result.artifacts).toHaveLength(2);
   });
 
-  it("隔离门禁越界变化只记录诊断且绝不提升到主候选", async () => {
-    const workspace = new BoundaryViolatingWorkspace();
-    const fixture = createFixture(workspace);
-    const loaded = createLoadedManifest([{ id: "TASK-A" }]);
-
-    const result = await fixture.orchestrator.start(loaded);
-
-    expect(result.state.status).toBe("blocked");
-    expect(result.state.tasks["TASK-A"]?.gateRuns).toMatchObject([{
-      outcome: "boundary_violation",
-      mutatedFiles: [".env"],
-    }]);
-    expect(workspace.promoted).toBe(false);
-    expect(workspace.commits).toEqual([]);
-    expect(workspace.verificationDisposals).toBe(1);
-  });
-
-  it("隔离 worktree 延迟清理不会覆盖门禁结果或中断队列", async () => {
-    const workspace = new DeferredReleaseWorkspace();
-    const fixture = createFixture(workspace);
-    const loaded = createLoadedManifest([
-      { id: "TASK-A" },
-      { id: "TASK-B", dependsOn: ["TASK-A"] },
-    ]);
-
-    const result = await fixture.orchestrator.start(loaded);
-
-    expect(result.state.status).toBe("completed");
-    expect(workspace.commits).toEqual(["TASK-A", "TASK-B"]);
-    const releaseEvents = fixture.logger.events.filter((event) =>
-      event.message.includes("清理已延后"));
-    expect(releaseEvents).toHaveLength(2);
-    expect(releaseEvents[0]?.details).toMatchObject({
-      verificationWorkspaceRelease: {
-        status: "deferred",
-        diagnostics: ["Windows 文件仍被占用"],
-      },
-    });
-  });
-
-  it("用全新只读会话审核门禁候选后再提交", async () => {
+  it("用全新只读会话审核实现候选后再提交", async () => {
     const agent = new RecordingAgent((request) =>
       request.attemptKind === "review"
         ? {
@@ -477,125 +400,16 @@ describe("QueueOrchestrator", () => {
     ]);
     expect(agent.requests[1]?.access).toBe("read");
     expect(agent.requests[1]?.sessionId).not.toBe(agent.requests[0]?.sessionId);
+    expect(agent.requests[1]?.prompt).toContain("# 实际变更文件");
+    expect(agent.requests[1]?.prompt).not.toContain("# 外部门禁结果");
   });
 });
-
-class MutatingCandidateWorkspace extends RecordingWorkspace {
-  private sourceCandidate = createCandidate("candidate-before");
-  private verificationRuns = 0;
-
-  public override async captureCandidate(): Promise<CandidateSnapshot> {
-    return this.sourceCandidate;
-  }
-
-  /*
-   * 第一次验证模拟 pnpm 补全锁文件，提升后第二次验证保持稳定。
-   * Fake 不直接改主候选，只有 promoteCandidate 被应用层调用时才更新源快照。
-   */
-  public override async openVerificationWorkspace(input: {
-    expectedCandidate: CandidateSnapshot;
-  }): Promise<VerificationWorkspace> {
-    this.verificationRuns += 1;
-    const isolatedCandidate = this.verificationRuns === 1
-      ? createCandidate("candidate-generated")
-      : input.expectedCandidate;
-    return {
-      projectRoot: "/verification",
-      auditChanges: (task) => this.auditChanges(task),
-      captureCandidate: () => Promise.resolve(isolatedCandidate),
-      promoteCandidate: () => {
-        this.sourceCandidate = isolatedCandidate;
-        return Promise.resolve();
-      },
-      dispose: () => {
-        this.verificationDisposals += 1;
-        return Promise.resolve({
-          status: "released" as const,
-          diagnostics: [],
-        });
-      },
-    };
-  }
-}
-
-class BoundaryViolatingWorkspace extends RecordingWorkspace {
-  public promoted = false;
-
-  /*
-   * 验证副本新增受 deny 保护的 .env，应用层必须先记录 GateRun 再阻塞任务。
-   * promoteCandidate 若被错误调用会改变 promoted，从而让测试直接暴露安全回归。
-   */
-  public override async openVerificationWorkspace(input: {
-    expectedCandidate: CandidateSnapshot;
-  }): Promise<VerificationWorkspace> {
-    const isolatedCandidate: CandidateSnapshot = {
-      fingerprint: "boundary-candidate",
-      diff: "diff",
-      files: [
-        ...input.expectedCandidate.files,
-        {
-          path: ".env",
-          kind: "file",
-          mode: 0o100644,
-          contentHash: "secret",
-        },
-      ],
-    };
-    return {
-      projectRoot: "/verification",
-      auditChanges: () => Promise.resolve({
-        changedFiles: ["src/candidate.ts", ".env"],
-        violations: [".env"],
-      }),
-      captureCandidate: () => Promise.resolve(isolatedCandidate),
-      promoteCandidate: () => {
-        this.promoted = true;
-        return Promise.resolve();
-      },
-      dispose: () => {
-        this.verificationDisposals += 1;
-        return Promise.resolve({
-          status: "released" as const,
-          diagnostics: [],
-        });
-      },
-    };
-  }
-}
-
-class DeferredReleaseWorkspace extends RecordingWorkspace {
-  /*
-   * Fake 只模拟“业务验证已完成但临时目录仍被系统占用”的释放结果。
-   * 候选、门禁和提交保持稳定，用于证明清理诊断不会改变队列状态流。
-   */
-  public override async openVerificationWorkspace(input: {
-    expectedCandidate: CandidateSnapshot;
-  }): Promise<VerificationWorkspace> {
-    return {
-      projectRoot: "/verification",
-      auditChanges: (task) => this.auditChanges(task),
-      captureCandidate: () => Promise.resolve(input.expectedCandidate),
-      promoteCandidate: () => Promise.resolve(),
-      dispose: () => Promise.resolve({
-        status: "deferred",
-        diagnostics: ["Windows 文件仍被占用"],
-      }),
-    };
-  }
-}
 
 class NoChangeWorkspace extends RecordingWorkspace {
   /*
    * Fake 表示代码在 Run 开始前已经满足任务契约，Agent 核验后不需要产生文件差异。
-   * 门禁和提交仍必须完整执行，避免把“无 diff”误判成需要无限 repair 的失败状态。
+   * 候选冻结和提交仍必须完整执行，避免把“无 diff”误判成需要 repair 的失败状态。
    */
-  public override async auditChanges(): Promise<{
-    changedFiles: readonly string[];
-    violations: readonly string[];
-  }> {
-    return { changedFiles: [], violations: [] };
-  }
-
   public override async captureCandidate(): Promise<CandidateSnapshot> {
     return {
       fingerprint: "empty-candidate",
@@ -610,14 +424,12 @@ function createFixture(
   agent = new RecordingAgent(),
 ) {
   const clock = new FakeClock();
-  const gates = new PassingGateRunner();
   const stateStore = new MemoryStateStore();
   const lock = new RecordingRunLock();
   const logger = new RecordingLogger();
   const timeFormatter = new BeijingTimeFormatter();
   const taskExecution = new TaskExecutionService(
     agent,
-    gates,
     workspace,
     new PromptBuilder(),
     clock,
@@ -635,7 +447,6 @@ function createFixture(
   return {
     orchestrator,
     agent,
-    gates,
     workspace,
     stateStore,
     lock,

@@ -1,5 +1,5 @@
 /*
- * 任务目录测试在独立临时项目中验证版本 2 Manifest、TASK 前置元数据和内容指纹。
+ * 任务目录测试在独立临时项目中验证版本 3 Manifest、TASK 前置元数据和内容指纹。
  * 用例证明目录是唯一事实源：新增文档会自动进入 DAG，错误元数据不会被静默忽略。
  */
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -13,7 +13,6 @@ const temporaryRoots: string[] = [];
 
 interface FixtureOptions {
   readonly catalogDirectory?: string;
-  readonly allowPattern?: string;
 }
 
 interface ProjectFixture {
@@ -34,7 +33,7 @@ async function createProjectFixture(
 
   const manifestPath = join(root, "orchestrator.yaml");
   const manifest = {
-    version: 2,
+    version: 3,
     project: {
       root: ".",
       spec: "SPEC.md",
@@ -44,9 +43,6 @@ async function createProjectFixture(
     defaults: {},
     taskCatalog: {
       directory: options.catalogDirectory ?? "tasks",
-    },
-    verification: {
-      sharedPaths: ["node_modules"],
     },
   };
 
@@ -65,7 +61,6 @@ async function createProjectFixture(
         id: "TASK-001",
         title: "实现任务目录",
         dependsOn: [],
-        allowPattern: options.allowPattern ?? "src/**",
       }),
       "utf8",
     ),
@@ -82,22 +77,12 @@ function createTaskDocument(input: {
   readonly id: string;
   readonly title: string;
   readonly dependsOn: readonly string[];
-  readonly allowPattern?: string;
   readonly extraMetadata?: Readonly<Record<string, unknown>>;
 }): string {
   const metadata = stringify({
     id: input.id,
     title: input.title,
     dependsOn: input.dependsOn,
-    scope: {
-      allow: [input.allowPattern ?? "src/**"],
-      deny: [],
-    },
-    gates: [{
-      name: "类型检查",
-      command: "pnpm",
-      args: ["typecheck"],
-    }],
     manualAcceptance: [],
     ...input.extraMetadata,
   }).trimEnd();
@@ -112,18 +97,15 @@ afterEach(async () => {
 });
 
 describe("YamlManifestRepository", () => {
-  it("加载项目策略和完整 TASK 目录并收集受保护路径", async () => {
+  it("加载项目策略和完整 TASK 目录", async () => {
     const fixture = await createProjectFixture();
     const loaded = await new YamlManifestRepository().load(fixture.manifestPath);
 
     expect(loaded.projectRoot).toBe(resolve(fixture.root));
-    expect(loaded.manifest.version).toBe(2);
+    expect(loaded.manifest.version).toBe(3);
     expect(loaded.manifest.defaults).toEqual({
       model: "sonnet",
       effort: "high",
-    });
-    expect(loaded.manifest.verification).toEqual({
-      sharedPaths: ["node_modules"],
     });
     expect(loaded.tasks).toHaveLength(1);
     expect(loaded.tasks[0]).toMatchObject({
@@ -131,15 +113,7 @@ describe("YamlManifestRepository", () => {
       title: "实现任务目录",
       file: "tasks/TASK-001.md",
       dependsOn: [],
-      scope: { allow: ["src/**"], deny: [] },
     });
-    expect(loaded.protectedPaths).toEqual([
-      "orchestrator.yaml",
-      "SPEC.md",
-      "PLAN.md",
-      "context/ARCHITECTURE.md",
-      "tasks/TASK-001.md",
-    ]);
     expect(loaded.manifestHash).toMatch(/^[a-f0-9]{64}$/u);
     expect(loaded.taskContractHashes.get("TASK-001")).toMatch(
       /^[a-f0-9]{64}$/u,
@@ -164,12 +138,9 @@ describe("YamlManifestRepository", () => {
     expect(loaded.taskDocuments.size).toBe(2);
   });
 
-  it("拒绝目录越界、scope 越界和文件名与 ID 漂移", async () => {
+  it("拒绝目录越界和文件名与 ID 漂移", async () => {
     const directoryFixture = await createProjectFixture({
       catalogDirectory: "../outside-tasks",
-    });
-    const scopeFixture = await createProjectFixture({
-      allowPattern: "../outside/**",
     });
     const identityFixture = await createProjectFixture();
     const original = await readFile(
@@ -184,9 +155,6 @@ describe("YamlManifestRepository", () => {
     const repository = new YamlManifestRepository();
 
     await expect(repository.load(directoryFixture.manifestPath)).rejects.toThrow(
-      "必须位于项目根内",
-    );
-    await expect(repository.load(scopeFixture.manifestPath)).rejects.toThrow(
       "必须位于项目根内",
     );
     await expect(repository.load(identityFixture.manifestPath)).rejects.toThrow(
@@ -267,5 +235,31 @@ describe("YamlManifestRepository", () => {
     await expect(
       new YamlManifestRepository().load(fixture.manifestPath),
     ).rejects.toThrow("Unrecognized key");
+  });
+
+  it("拒绝旧 scope 和 gates 字段，不保留隐式兼容路径", async () => {
+    const fixture = await createProjectFixture();
+    const taskPath = join(fixture.root, "tasks", "TASK-001.md");
+    /*
+     * Manifest v3 将自主能力模型固化为唯一契约，旧边界字段必须显式报错。
+     * 测试同时写入两类旧字段，避免未来只恢复其中一半形成不可推导的灰度行为。
+     */
+    await writeFile(
+      taskPath,
+      createTaskDocument({
+        id: "TASK-001",
+        title: "实现任务目录",
+        dependsOn: [],
+        extraMetadata: {
+          scope: { allow: ["src/**"], deny: [] },
+          gates: [{ name: "test", command: "pnpm", args: ["test"] }],
+        },
+      }),
+      "utf8",
+    );
+
+    await expect(
+      new YamlManifestRepository().load(fixture.manifestPath),
+    ).rejects.toThrow("Unrecognized keys");
   });
 });
