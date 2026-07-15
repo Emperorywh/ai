@@ -93,7 +93,7 @@ verification:
     - node_modules
 ```
 
-`verification.sharedPaths` 用于把已安装依赖显式链接到隔离 worktree。路径必须位于项目内，并且不能覆盖 Git 文件。
+`verification.sharedPaths` 用于把已安装依赖显式链接到隔离 worktree。路径必须位于项目内，并且不能覆盖 Git 文件；释放 worktree 时编排器会先解绑这些外部共享链接，避免 Windows Git 沿 junction 删除主项目内容。
 
 默认配置让 Agent 持续执行到任务收敛。只有确实需要人为熔断时，才在 `defaults` 中显式配置 `maxAttempts`、`taskTimeoutMinutes`、`maxTurns`、`maxBudgetUsd`，或在 `review` 中配置对应审核上限；TASK 也可用 `maxAttempts`、`timeoutMinutes` 覆盖项目值。所有上限只要求为正数，不再附加编排器硬编码的最大值。
 

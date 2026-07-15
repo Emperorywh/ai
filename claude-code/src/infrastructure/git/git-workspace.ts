@@ -188,12 +188,21 @@ export class GitWorkspace implements Workspace {
     const projectPrefix = normalize(
       (await this.git(["rev-parse", "--show-prefix"])).trim(),
     );
+    for (const sharedPath of input.sharedPaths) {
+      resolveProjectPath(this.projectRoot, sharedPath);
+    }
     const temporaryRoot = await mkdtemp(join(tmpdir(), "claude-task-verification-"));
     const worktreeRoot = join(temporaryRoot, "worktree");
+    const verificationProjectRoot = projectPrefix.length === 0
+      ? worktreeRoot
+      : resolve(worktreeRoot, projectPrefix);
     const lease = new VerificationWorktreeLease({
       repositoryRoot,
       worktreeRoot,
       temporaryRoot,
+      sharedPathLinks: input.sharedPaths.map((sharedPath) =>
+        resolveProjectPath(verificationProjectRoot, sharedPath)
+      ),
     });
 
     try {
@@ -204,9 +213,6 @@ export class GitWorkspace implements Workspace {
         worktreeRoot,
         "HEAD",
       ]);
-      const verificationProjectRoot = projectPrefix.length === 0
-        ? worktreeRoot
-        : resolve(worktreeRoot, projectPrefix);
       for (const file of input.expectedCandidate.files) {
         await copyCandidatePath(
           this.projectRoot,

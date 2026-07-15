@@ -4,7 +4,7 @@
  * 可观测的 deferred 结果，避免资源回收异常覆盖已经形成的门禁业务结论。
  */
 import { execFile } from "node:child_process";
-import { lstat, rm } from "node:fs/promises";
+import { lstat, rm, unlink } from "node:fs/promises";
 import { promisify } from "node:util";
 import type { VerificationWorkspaceRelease } from "../../ports/workspace.js";
 
@@ -18,6 +18,7 @@ export interface VerificationWorktreeLocation {
   readonly repositoryRoot: string;
   readonly worktreeRoot: string;
   readonly temporaryRoot: string;
+  readonly sharedPathLinks: readonly string[];
 }
 
 export class VerificationWorktreeLease {
@@ -34,8 +35,13 @@ export class VerificationWorktreeLease {
     const worktreeInitiallyExists = await pathExists(this.location.worktreeRoot);
     let requiresPrune = !worktreeInitiallyExists;
     let registrationReleased = true;
+    const sharedPathLinksDetached = !worktreeInitiallyExists
+      || await detachSharedPathLinks(
+        this.location.sharedPathLinks,
+        diagnostics,
+      );
 
-    if (worktreeInitiallyExists) {
+    if (worktreeInitiallyExists && sharedPathLinksDetached) {
       try {
         await this.git([
           "worktree",
@@ -49,28 +55,30 @@ export class VerificationWorktreeLease {
       }
     }
 
-    /*
-     * worktree 中可能包含指向 node_modules 的 Windows junction，Git 自身删除会偶发失败。
-     * Node 的重试式递归删除负责物理目录，随后 prune 只处理 Git 元数据，职责互不混杂。
-     */
-    await removeDirectory(
-      this.location.worktreeRoot,
-      "隔离 worktree",
-      diagnostics,
-    );
-    if (requiresPrune) {
-      try {
-        await this.git(["worktree", "prune", "--expire", "now"]);
-      } catch (error) {
-        registrationReleased = false;
-        diagnostics.push(`Git worktree prune 未完成：${describeError(error)}`);
+    if (sharedPathLinksDetached) {
+      /*
+       * 外部共享链接已先从 worktree 命名空间解绑，后续递归删除只会接触临时目录拥有的内容。
+       * Node 的重试式删除负责 Git 未清完的物理目录，prune 则只处理残留的 worktree 注册。
+       */
+      await removeDirectory(
+        this.location.worktreeRoot,
+        "隔离 worktree",
+        diagnostics,
+      );
+      if (requiresPrune) {
+        try {
+          await this.git(["worktree", "prune", "--expire", "now"]);
+        } catch (error) {
+          registrationReleased = false;
+          diagnostics.push(`Git worktree prune 未完成：${describeError(error)}`);
+        }
       }
+      await removeDirectory(
+        this.location.temporaryRoot,
+        "临时目录",
+        diagnostics,
+      );
     }
-    await removeDirectory(
-      this.location.temporaryRoot,
-      "临时目录",
-      diagnostics,
-    );
 
     const [worktreeExists, temporaryRootExists] = await Promise.all([
       pathExists(this.location.worktreeRoot),
@@ -102,6 +110,37 @@ export class VerificationWorktreeLease {
   }
 }
 
+/*
+ * sharedPathLinks 指向主项目拥有的 node_modules 等目录，lease 只拥有 worktree 内的链接本身。
+ * Windows Git 会沿 junction 递归删除目标，因此任何链接解绑失败时都必须保留整个 worktree，
+ * 不能继续调用 Git 或文件系统递归删除；deferred 结果会把清理责任显式留给后续恢复流程。
+ */
+async function detachSharedPathLinks(
+  paths: readonly string[],
+  diagnostics: string[],
+): Promise<boolean> {
+  let allDetached = true;
+  const deepestFirst = [...paths].sort((left, right) => right.length - left.length);
+
+  for (const path of deepestFirst) {
+    try {
+      const metadata = await lstat(path);
+      if (!metadata.isSymbolicLink()) {
+        continue;
+      }
+      await unlink(path);
+    } catch (error) {
+      if (isMissingPath(error)) {
+        continue;
+      }
+      allDetached = false;
+      diagnostics.push(`验证共享链接解绑失败：${path}（${describeError(error)}）`);
+    }
+  }
+
+  return allDetached;
+}
+
 async function removeDirectory(
   path: string,
   label: string,
@@ -124,11 +163,15 @@ async function pathExists(path: string): Promise<boolean> {
     await lstat(path);
     return true;
   } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+    if (isMissingPath(error)) {
       return false;
     }
     throw error;
   }
+}
+
+function isMissingPath(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
 function describeError(error: unknown): string {

@@ -242,6 +242,15 @@ describe("GitWorkspace", () => {
       expect(repeatedRelease).toEqual(release);
     }
 
+    /*
+     * Windows Git 会跟随 worktree 内的目录 junction。释放器必须先解绑自身创建的共享链接，
+     * 否则 `git worktree remove --force` 会把源工作区依赖内容一并删除，即使门禁已经通过。
+     */
+    await expect(readFile(
+      join(fixture.root, "dependencies", "runtime.txt"),
+      "utf8",
+    )).resolves.toBe("shared dependency\n");
+
     const worktreeList = await runGit(fixture.root, ["worktree", "list", "--porcelain"]);
     expect(worktreeList.match(/^worktree /gmu)).toHaveLength(1);
   });

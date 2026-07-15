@@ -175,7 +175,7 @@ Run 终态：
 
 门禁无法直接改变主候选。
 
-释放由独立 `VerificationWorktreeLease` 管理：优先执行 `git worktree remove --force`；失败后使用带重试的文件系统删除，再执行 `git worktree prune --expire now`。释放结果为 `released/deferred`，`deferred` 只作为事件诊断持久化，不能覆盖已经得到的门禁结论或阻止队列继续。
+释放由独立 `VerificationWorktreeLease` 管理。lease 只拥有 worktree 内的共享链接，不拥有链接指向的主项目目录，因此必须先精确解绑全部 `verification.sharedPaths`，再执行 `git worktree remove --force`；Git 删除失败后使用带重试的文件系统删除，并通过 `git worktree prune --expire now` 清理注册。任一共享链接解绑失败时禁止递归删除 worktree，返回 `deferred` 并保留现场，避免 Windows Git 沿目录 junction 删除主项目依赖。释放结果不能覆盖已经得到的门禁结论或阻止队列继续。
 
 ### 6.3 门禁结果
 
