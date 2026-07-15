@@ -5,48 +5,26 @@
 import { lstat, mkdir, unlink, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { ConfigurationError } from "../domain/errors.js";
+import { PROJECT_STRUCTURE } from "../domain/project.js";
 
 /*
- * TASK 文档前置元数据只承载调度、资源熔断与人工验收，正文承载完整用户意图。
- * 新任务只新增一个文档，不再同步维护 Manifest 数组，从结构上消除任务遗漏。
+ * 初始化器只生成固定项目结构所需的上下文和任务模板，不创建任何配置文件。
+ * 新任务只新增一个 Markdown 文档，运行时会自动扫描目录，从结构上消除登记遗漏。
  */
 const SAMPLE_FILES: Readonly<Record<string, string>> = {
-  "orchestrator.yaml": `version: 3
-project:
-  root: .
-  spec: SPEC.md
-  plan: PLAN.md
-  contextFiles:
-    - AGENTS.md
-
-defaults:
-  model: sonnet
-  effort: high
-
-review:
-  enabled: true
-  model: sonnet
-  effort: high
-
-git:
-  commitMessagePrefix: task
-
-taskCatalog:
-  directory: tasks
-`,
-  "SPEC.md": `# 规格说明
+  [PROJECT_STRUCTURE.specification]: `# 规格说明
 
 请将已经审核通过的完整规格说明放在这里。
 `,
-  "PLAN.md": `# 开发计划
+  [PROJECT_STRUCTURE.plan]: `# 开发计划
 
 请记录任务依赖、模块边界、数据流和状态流。
 `,
-  "AGENTS.md": `# 项目约束
+  [PROJECT_STRUCTURE.agentInstructions]: `# 项目约束
 
 请记录所有 Worker 都必须遵守的架构、编码和测试约束。
 `,
-  "tasks/TASK-001.md": `---
+  [`${PROJECT_STRUCTURE.taskDirectory}/TASK-001.md`]: `---
 id: TASK-001
 title: 实现第一个独立任务
 dependsOn: []

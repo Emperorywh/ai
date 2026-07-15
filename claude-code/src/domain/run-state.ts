@@ -82,11 +82,10 @@ export interface RunWorkspaceState {
 }
 
 export interface RunState {
-  readonly version: 3;
+  readonly version: 4;
   readonly runId: string;
   readonly status: RunStatus;
-  readonly manifestPath: string;
-  readonly manifestHash: string;
+  readonly projectHash: string;
   readonly projectRoot: string;
   readonly workspace: RunWorkspaceState;
   readonly createdAt: string;
@@ -146,14 +145,13 @@ const taskRunStateSchema = z.object({
 
 export const runStateSchema: z.ZodType<RunState> = z.object({
   /*
-   * 第三版状态只记录自主实现、独立审核与提交，不接受旧 gating/gateRuns 快照。
-   * 恢复路径因此始终面对单一状态图，不需要兼容分支或字段补全。
+   * 第四版状态移除外部配置身份，项目内容哈希成为唯一的运行契约快照。
+   * 旧状态不补字段也不迁移，恢复路径始终面对当前单一状态图。
    */
-  version: z.literal(3),
+  version: z.literal(4),
   runId: z.string(),
   status: z.enum(["running", "completed", "blocked", "failed"]),
-  manifestPath: z.string(),
-  manifestHash: z.string(),
+  projectHash: z.string(),
   projectRoot: z.string(),
   workspace: z.object({
     repositoryRoot: z.string(),
@@ -180,8 +178,7 @@ const allowedTransitions: Readonly<Record<TaskStatus, readonly TaskStatus[]>> = 
 
 export function createInitialRunState(input: {
   runId: string;
-  manifestPath: string;
-  manifestHash: string;
+  projectHash: string;
   projectRoot: string;
   workspace: RunWorkspaceState;
   tasks: readonly InitialTaskRunState[];
@@ -215,11 +212,10 @@ export function createInitialRunState(input: {
   }
 
   return {
-    version: 3,
+    version: 4,
     runId: input.runId,
     status: "running",
-    manifestPath: input.manifestPath,
-    manifestHash: input.manifestHash,
+    projectHash: input.projectHash,
     projectRoot: input.projectRoot,
     workspace: input.workspace,
     createdAt: input.now,

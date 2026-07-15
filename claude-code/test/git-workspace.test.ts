@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
-import type { TaskDefinition } from "../src/domain/manifest.js";
+import type { TaskDefinition } from "../src/domain/project.js";
 import { GitWorkspace } from "../src/infrastructure/git/git-workspace.js";
 
 const execFileAsync = promisify(execFile);
@@ -62,7 +62,7 @@ async function createGitFixture(): Promise<GitFixture> {
 }
 
 /**
- * 任务夹具补齐 Manifest 解析后的字段，不附加任何路径或命令能力限制。
+ * 任务夹具补齐项目仓储解析后的字段，不附加任何路径或命令能力限制。
  * 提交测试不依赖任务解析器，能够聚焦 GitWorkspace 的项目原子性与 trailer 语义。
  */
 function createTask(id: string): TaskDefinition {

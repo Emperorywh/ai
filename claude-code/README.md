@@ -5,7 +5,7 @@
 ## 执行模型
 
 ```text
-Manifest 项目策略
+固定项目结构
   + TASK 目录（唯一任务事实源）
   → 严格元数据校验与稳定 DAG
   → 核验当前 HEAD 中的任务完成证据
@@ -38,7 +38,7 @@ Manifest 项目策略
 $env:ANTHROPIC_API_KEY = "你的 API Key"
 ```
 
-不要把密钥写入 Manifest、TASK、`.env` 或仓库。
+不要把密钥写入 TASK、`.env` 或仓库。
 
 ## 初始化
 
@@ -50,7 +50,6 @@ pnpm start init .
 
 初始化器增量创建：
 
-- `orchestrator.yaml`
 - `SPEC.md`
 - `PLAN.md`
 - `AGENTS.md`
@@ -58,37 +57,22 @@ pnpm start init .
 
 已有普通文件不会被覆盖；路径类型冲突会回滚本次新建文件。
 
-## Manifest 版本 3
+## 固定项目约定
 
-Manifest 只保存项目级策略，不再包含 `tasks:` 数组：
+编排器不读取项目级配置文件，也不支持通过 CLI、环境变量或 TASK 覆盖系统策略。所有命令以当前工作目录为项目根，并固定加载：
 
-```yaml
-version: 3
-
-project:
-  root: .
-  spec: SPEC.md
-  plan: PLAN.md
-  contextFiles:
-    - AGENTS.md
-
-defaults:
-  model: sonnet
-  effort: high
-
-review:
-  enabled: true
-  model: sonnet
-  effort: high
-
-git:
-  commitMessagePrefix: task
-
-taskCatalog:
-  directory: tasks
+```text
+<project-root>/
+  SPEC.md
+  PLAN.md
+  AGENTS.md
+  tasks/
+    <task-id>.md
 ```
 
-默认配置让 Agent 持续执行到任务收敛。只有确实需要人为熔断时，才在 `defaults` 中显式配置 `maxAttempts`、`taskTimeoutMinutes`、`maxTurns`、`maxBudgetUsd`，或在 `review` 中配置对应审核上限；TASK 也可用 `maxAttempts`、`timeoutMinutes` 覆盖项目值。所有上限只要求为正数，不再附加编排器硬编码的最大值。
+系统固定使用 `sonnet/high` Worker、`sonnet/high` 只读 Reviewer 和 `task` Git 提交前缀。实现失败与审核意见默认持续进入 repair，直到通过、真正阻塞或收到外部中断。
+
+TASK 可通过 `maxAttempts` 和 `timeoutMinutes` 声明单任务熔断。这两个字段只保护当前任务执行，不改变系统级模型、审核和 Git 策略。
 
 ## TASK 文档
 
@@ -120,31 +104,31 @@ manualAcceptance:
 - `dependsOn` 必须显式声明，根任务使用 `[]`；缺失依赖、重复依赖、自依赖和环都会被拒绝。
 - 资源上限全部可选；省略时实现与审核会持续循环，直到通过、真正阻塞或收到外部中断。
 - `status` 不允许写在 TASK 中。运行状态只存在于状态库，避免静态文档和真实执行状态漂移。
-- `scope`、`gates` 和 `verification` 属于已删除字段，版本 3 会直接拒绝，不提供兼容或 fallback。
+- `scope`、`gates` 和 `verification` 不属于当前契约，会直接拒绝且不提供兼容或 fallback。
 - 所有 Markdown TASK 都会加载；未知字段、文件名/ID/标题不一致会在运行前失败。
 
 ## 命令
 
 ```powershell
-# 只校验配置、完整任务目录、文档和 DAG
-pnpm start validate --manifest orchestrator.yaml
+# 只校验固定模板、完整任务目录、文档和 DAG
+pnpm start validate
 
 # 新建运行；核验并复用当前 HEAD 中仍然有效的 TASK 完成证据
-pnpm start run --manifest orchestrator.yaml
+pnpm start run
 
 # 新建运行并明确放弃历史完成证据，全量重跑
-pnpm start run --fresh --manifest orchestrator.yaml
+pnpm start run --fresh
 
 # 恢复最近或指定的 running 运行
-pnpm start resume --manifest orchestrator.yaml
-pnpm start resume <run-id> --manifest orchestrator.yaml
+pnpm start resume
+pnpm start resume <run-id>
 
 # supervisor 幂等入口：无状态时新建，running 时恢复，终态时返回
-pnpm start continue --manifest orchestrator.yaml
+pnpm start continue
 
 # 查看状态
-pnpm start status --manifest orchestrator.yaml
-pnpm start status <run-id> --manifest orchestrator.yaml
+pnpm start status
+pnpm start status <run-id>
 ```
 
 退出码：`0` 全部完成，`1` 存在失败或基础设施错误，`2` 存在人工阻塞，`130` 收到中断并保留可恢复状态。
@@ -177,7 +161,7 @@ Worker 返回 `completed` 后，编排器捕获完整项目候选并保存稳定
 - `Orchestrator-Task-Contract`
 - `Orchestrator-Task-Dependencies`
 
-默认 `run` 会按 DAG 顺序读取当前 HEAD 的完成提交：任务契约指纹相同、直接依赖绑定的完成提交相同，且证据提交仍在当前分支祖先链中时，该 TASK 在新 Run 中直接记为 `completed/reused`。任务正文、人工验收、上下文或审核开关变化会使对应任务失效；上游重新执行会通过依赖指纹使下游失效。模型、effort、预算、超时和重试次数只影响执行过程，不会让已经验收通过的任务失效。每个 TASK 只核验当前祖先链中的最新完成证据，不会越过较新的异契约提交回退复用旧结果。
+默认 `run` 会按 DAG 顺序读取当前 HEAD 的完成提交：任务契约指纹相同、直接依赖绑定的完成提交相同，且证据提交仍在当前分支祖先链中时，该 TASK 在新 Run 中直接记为 `completed/reused`。任务正文、人工验收或项目上下文变化会使对应任务失效；上游重新执行会通过依赖指纹使下游失效。`maxAttempts` 和 `timeoutMinutes` 只影响执行过程，不会让已经验收通过的任务失效。每个 TASK 只核验当前祖先链中的最新完成证据，不会越过较新的异契约提交回退复用旧结果。
 
 若现有代码已经满足 TASK，Worker 可以不产生 diff；编排器仍会执行独立审核，并以空提交保存新的完成证据。`--fresh` 不删除历史，只明确禁止本次 Run 复用它们。
 

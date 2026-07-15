@@ -1,8 +1,8 @@
 /*
  * DAG 模块只负责依赖合法性与稳定拓扑顺序，不读取文件，也不判断任务是否执行成功。
- * 相同 Manifest 在任何机器上都会得到相同顺序，便于恢复、审计和测试推导。
+ * 相同 TASK 目录在任何机器上都会得到相同顺序，便于恢复、审计和测试推导。
  */
-import type { TaskDefinition } from "./manifest.js";
+import type { TaskDefinition } from "./project.js";
 import { ConfigurationError } from "./errors.js";
 
 export function createStableTaskOrder(

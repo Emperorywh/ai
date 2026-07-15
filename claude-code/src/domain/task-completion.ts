@@ -5,12 +5,10 @@
 import { createHash } from "node:crypto";
 import type {
   TaskDefinition,
-  TaskManifest,
   TextDocument,
-} from "./manifest.js";
+} from "./project.js";
 
 export interface TaskContractHashInput {
-  readonly manifest: TaskManifest;
   readonly task: TaskDefinition;
   readonly taskDocument: TextDocument;
   readonly contextDocuments: readonly TextDocument[];
@@ -23,15 +21,16 @@ export interface DependencyCompletion {
 
 /*
  * TASK 前置元数据已经由严格 Schema 解析，因此契约使用规范化字段，并只从原文保留任务正文。
- * maxAttempts、timeoutMinutes 及 Manifest 的模型/预算字段被有意排除，它们只控制执行过程，不改变完成定义。
+ * maxAttempts 和 timeoutMinutes 被有意排除，它们只控制单任务执行过程，不改变完成定义。
+ * 独立审核是系统固定流程，契约版本显式绑定该语义，不存在项目级开关。
  */
 export function createTaskContractHash(input: TaskContractHashInput): string {
   const contract = {
     /*
-     * 第二版完成契约与 Manifest v3 同步删除 scope、gates 和 verificationSharedPaths。
-     * 显式换代确保旧提交证据不会在新执行模型下被错误复用。
+     * 第三版完成契约移除外部配置输入，并固定使用独立审核流程。
+     * 显式换代确保旧配置体系产生的提交证据不会在新执行模型下被错误复用。
      */
-    version: 2,
+    version: 3,
     task: {
       id: input.task.id,
       title: input.task.title,
@@ -40,7 +39,7 @@ export function createTaskContractHash(input: TaskContractHashInput): string {
       manualAcceptance: input.task.manualAcceptance,
       body: extractTaskBody(input.taskDocument.content),
     },
-    reviewRequired: input.manifest.review.enabled,
+    reviewRequired: true,
     contextDocuments: [...input.contextDocuments]
       .sort((left, right) => compareText(left.path, right.path))
       .map((document) => ({

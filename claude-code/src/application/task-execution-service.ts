@@ -13,9 +13,9 @@ import {
 import {
   getTaskAttemptLimit,
   getTaskTimeoutMinutes,
-  type LoadedTaskManifest,
+  type LoadedProject,
   type TaskDefinition,
-} from "../domain/manifest.js";
+} from "../domain/project.js";
 import {
   replaceCurrentAttempt,
   replaceExpectedHead,
@@ -26,7 +26,6 @@ import {
   type TaskAttemptState,
   type TaskCompletionState,
   type TaskRunState,
-  type TaskStatus,
 } from "../domain/run-state.js";
 import { createDependencyCompletionFingerprint } from "../domain/task-completion.js";
 import type { AgentExecutor } from "../ports/agent-executor.js";
@@ -36,6 +35,7 @@ import {
   AgentSessionCheckpoint,
   type TaskCheckpointWriter,
 } from "./agent-session-checkpoint.js";
+import { ORCHESTRATOR_POLICY } from "./orchestrator-policy.js";
 import type { PromptBuilder } from "./prompt-builder.js";
 
 export interface TaskStepResult {
@@ -45,7 +45,7 @@ export interface TaskStepResult {
 }
 
 export interface TaskStepInput {
-  readonly loaded: LoadedTaskManifest;
+  readonly loaded: LoadedProject;
   readonly state: RunState;
   readonly task: TaskDefinition;
   readonly resumeExistingExecution: boolean;
@@ -54,8 +54,6 @@ export interface TaskStepInput {
 }
 
 interface AgentResourceLimits {
-  readonly maxTurns?: number;
-  readonly maxBudgetUsd?: number;
   readonly timeoutMs?: number;
 }
 
@@ -233,20 +231,15 @@ export class TaskExecutionService {
      * 不存在外部命令门禁或路径审计，候选的正确性只由任务契约和独立审核判断。
      */
     const candidate = await this.workspace.captureCandidate();
-    const nextStatus: TaskStatus = input.loaded.manifest.review.enabled
-      ? "reviewing"
-      : "committing";
     return {
       state: transitionTask(
         finishedState,
         input.task.id,
-        nextStatus,
+        "reviewing",
         this.now(),
         { candidateFingerprint: candidate.fingerprint },
       ),
-      message: input.loaded.manifest.review.enabled
-        ? "实现会话完成，进入独立审核"
-        : "实现会话完成，进入提交阶段",
+      message: "实现会话完成，进入独立审核",
     };
   }
 
@@ -264,13 +257,9 @@ export class TaskExecutionService {
       title: input.task.title,
       prompt,
       cwd: input.loaded.projectRoot,
-      model: input.loaded.manifest.defaults.model,
-      effort: input.loaded.manifest.defaults.effort,
-      ...this.buildAgentResourceLimits(
-        input,
-        input.loaded.manifest.defaults.maxTurns,
-        input.loaded.manifest.defaults.maxBudgetUsd,
-      ),
+      model: ORCHESTRATOR_POLICY.worker.model,
+      effort: ORCHESTRATOR_POLICY.worker.effort,
+      ...this.buildTaskResourceLimits(input.task),
       ...(input.signal === undefined ? {} : { signal: input.signal }),
       ...(shouldResume
         ? { resumeSessionId: attempt.sessionId }
@@ -284,23 +273,6 @@ export class TaskExecutionService {
     input: TaskStepInput,
     taskState: TaskRunState,
   ): Promise<TaskStepResult> {
-    const reviewAttemptLimit = input.loaded.manifest.review.maxAttempts;
-    if (
-      reviewAttemptLimit !== undefined
-      && taskState.reviewAttempts >= reviewAttemptLimit
-    ) {
-      return {
-        state: transitionTask(
-          input.state,
-          input.task.id,
-          "failed",
-          this.now(),
-          { failureReason: "独立审核已达到最大会话次数" },
-        ),
-        message: "独立审核已达到最大会话次数",
-      };
-    }
-
     if (taskState.candidateFingerprint === undefined) {
       return this.blockTask(input, "审核阶段缺少实现候选指纹");
     }
@@ -324,13 +296,7 @@ export class TaskExecutionService {
 
     const reviewAttempts = taskState.reviewAttempts + 1;
     if (!outcome.ok) {
-      if (
-        outcome.retryable
-        && (
-          reviewAttemptLimit === undefined
-          || reviewAttempts < reviewAttemptLimit
-        )
-      ) {
+      if (outcome.retryable) {
         return {
           state: transitionTask(
             input.state,
@@ -397,21 +363,6 @@ export class TaskExecutionService {
         },
         this.now(),
       );
-      if (
-        reviewAttemptLimit !== undefined
-        && reviewAttempts >= reviewAttemptLimit
-      ) {
-        return {
-          state: transitionTask(
-            stateWithReview,
-            input.task.id,
-            "failed",
-            this.now(),
-            { failureReason: "独立审核未通过且已达到最大会话次数" },
-          ),
-          message: "独立审核未通过且已达到最大会话次数",
-        };
-      }
       return this.retryOrFail(input, stateWithReview, {
         kind: "repair",
         reason: "独立审核未通过",
@@ -452,13 +403,9 @@ export class TaskExecutionService {
         diff,
       ),
       cwd: input.loaded.projectRoot,
-      model: input.loaded.manifest.review.model,
-      effort: input.loaded.manifest.review.effort,
-      ...this.buildAgentResourceLimits(
-        input,
-        input.loaded.manifest.review.maxTurns,
-        input.loaded.manifest.review.maxBudgetUsd,
-      ),
+      model: ORCHESTRATOR_POLICY.reviewer.model,
+      effort: ORCHESTRATOR_POLICY.reviewer.effort,
+      ...this.buildTaskResourceLimits(input.task),
       ...(input.signal === undefined ? {} : { signal: input.signal }),
       sessionId: randomUUID(),
       resultSchema: reviewResultSchema,
@@ -510,7 +457,7 @@ export class TaskExecutionService {
     const commitSha = await this.workspace.commitTask({
       runId: input.state.runId,
       task: input.task,
-      messagePrefix: input.loaded.manifest.git.commitMessagePrefix,
+      messagePrefix: ORCHESTRATOR_POLICY.git.commitMessagePrefix,
       expectedHead: input.state.workspace.expectedHead,
       expectedFingerprint: taskState.candidateFingerprint,
       taskContractHash: completion.contractHash,
@@ -582,21 +529,14 @@ export class TaskExecutionService {
   }
 
   /*
-   * 实现与审核共享同一套“显式限制才生效”规则，避免两个调用点分别换算时间并逐渐漂移。
-   * 空对象表示完全交给 Agent 自主收敛，仅外部中断仍能终止当前阶段并保存 checkpoint。
+   * 实现与审核共享 TASK 显式超时，换算逻辑集中在一处避免两个调用点逐渐漂移。
+   * 未声明超时时不注入隐藏限制，外部中断仍可安全终止当前阶段并保存 checkpoint。
    */
-  private buildAgentResourceLimits(
-    input: TaskStepInput,
-    maxTurns: number | undefined,
-    maxBudgetUsd: number | undefined,
+  private buildTaskResourceLimits(
+    task: TaskDefinition,
   ): AgentResourceLimits {
-    const timeoutMinutes = getTaskTimeoutMinutes(
-      input.loaded.manifest,
-      input.task,
-    );
+    const timeoutMinutes = getTaskTimeoutMinutes(task);
     return {
-      ...(maxTurns === undefined ? {} : { maxTurns }),
-      ...(maxBudgetUsd === undefined ? {} : { maxBudgetUsd }),
       ...(timeoutMinutes === undefined
         ? {}
         : { timeoutMs: timeoutMinutes * 60_000 }),
@@ -612,7 +552,7 @@ export class TaskExecutionService {
     if (taskState === undefined) {
       throw new Error(`运行状态中不存在任务 ${input.task.id}`);
     }
-    const attemptLimit = getTaskAttemptLimit(input.loaded.manifest, input.task);
+    const attemptLimit = getTaskAttemptLimit(input.task);
     if (
       attemptLimit !== undefined
       && taskState.attempts.length >= attemptLimit

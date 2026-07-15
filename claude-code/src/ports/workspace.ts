@@ -2,7 +2,7 @@
  * Workspace 端口集中封装 Git 候选、提交和恢复事实，避免应用层散落危险命令。
  * Worker 可修改整个项目；提交仍以项目根为原子边界，不能夹带父仓库兄弟目录。
  */
-import type { TaskDefinition } from "../domain/manifest.js";
+import type { TaskDefinition } from "../domain/project.js";
 
 export interface WorkspaceIdentity {
   readonly repositoryRoot: string;

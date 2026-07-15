@@ -18,8 +18,8 @@ export interface AgentRunRequest<T> {
   readonly model: string;
   readonly effort: "low" | "medium" | "high" | "xhigh" | "max";
   /*
-   * 三个可选字段只传递用户显式配置的熔断策略；省略时适配器不得自行补默认限制。
-   * 外部 signal 独立存在，保证无限制会话仍然可以安全中断并从 checkpoint 恢复。
+   * 可选字段只透传应用层已经决定的资源熔断；适配器不得自行补默认限制。
+   * 当前固定策略仅使用 TASK 超时，其他字段保留为端口能力供独立装配者明确调用。
    */
   readonly maxTurns?: number;
   readonly maxBudgetUsd?: number;

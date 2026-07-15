@@ -3,33 +3,33 @@
  * CLI 入口只解析用户意图、管理中断信号并映射稳定退出码，业务决策全部委托给应用服务。
  * run 与 resume 共用同一驱动器，因此无人值守执行、崩溃恢复和交互执行不会形成两套逻辑。
  */
-import { resolve } from "node:path";
 import { Command } from "commander";
 import type { OrchestratorResult } from "../application/queue-orchestrator.js";
 import { presentRunState } from "../application/run-state-presentation.js";
 import type { RunState } from "../domain/run-state.js";
 import {
   createOrchestratorRuntime,
-  loadManifest,
+  loadProject,
 } from "./composition-root.js";
 import {
   writeSampleProject,
   type SampleProjectWriteResult,
 } from "./sample-project-writer.js";
 
-const DEFAULT_MANIFEST = "orchestrator.yaml";
 const EXIT_SUCCESS = 0;
 const EXIT_FAILURE = 1;
 const EXIT_BLOCKED = 2;
 const EXIT_INTERRUPTED = 130;
 
-interface ManifestOptions {
-  readonly manifest: string;
-}
-
-interface RunOptions extends ManifestOptions {
+interface RunOptions {
   readonly fresh: boolean;
 }
+
+/*
+ * 所有运行命令只面向当前工作目录，不接受路径或文件配置来改变项目结构。
+ * 操作者通过切换工作目录选择项目，初始化与运行因此共享同一个明确根目录。
+ */
+const PROJECT_ROOT = process.cwd();
 
 const program = new Command()
   .name("claude-task-orchestrator")
@@ -37,7 +37,7 @@ const program = new Command()
 
 program
   .command("init")
-  .description("增量生成最小配置骨架，保留并跳过已有普通文件")
+  .description("增量生成固定项目模板，保留并跳过已有普通文件")
   .argument("[directory]", "目标项目目录", ".")
   .action(async (directory: string) => {
     const result = await writeSampleProject(directory);
@@ -46,16 +46,15 @@ program
 
 program
   .command("validate")
-  .description("校验 Manifest、完整 TASK 目录、路径和任务 DAG")
-  .option("-m, --manifest <path>", "Manifest 文件", DEFAULT_MANIFEST)
-  .action(async (options: ManifestOptions) => {
-    const loaded = await loadManifest(resolve(options.manifest));
+  .description("校验固定项目模板、完整 TASK 目录和任务 DAG")
+  .action(async () => {
+    const loaded = await loadProject(PROJECT_ROOT);
     process.stdout.write([
-      "配置校验通过",
+      "项目校验通过",
       `项目：${loaded.projectRoot}`,
       `任务数：${loaded.tasks.length}`,
       `任务队列：${loaded.tasks.map((task) => task.id).join(" → ")}`,
-      `内容哈希：${loaded.manifestHash}`,
+      `内容哈希：${loaded.projectHash}`,
       "",
     ].join("\n"));
   });
@@ -63,10 +62,9 @@ program
 program
   .command("run")
   .description("创建新运行，核验并复用有效 TASK 进度")
-  .option("-m, --manifest <path>", "Manifest 文件", DEFAULT_MANIFEST)
   .option("--fresh", "明确放弃历史完成证据并全量重跑", false)
   .action(async (options: RunOptions) => {
-    const runtime = await createOrchestratorRuntime(resolve(options.manifest));
+    const runtime = await createOrchestratorRuntime(PROJECT_ROOT);
     /*
      * run 始终创建新的 Run 记录，但默认先做项目级进度核验；只有显式 --fresh 才跳过复用。
      * resume 继续保持同一 Run checkpoint 语义，两条路径不会共享隐式状态。
@@ -84,9 +82,8 @@ program
   .command("resume")
   .description("从持久化 checkpoint 恢复最近或指定运行")
   .argument("[runId]", "要恢复的运行 ID；省略时使用最近运行")
-  .option("-m, --manifest <path>", "Manifest 文件", DEFAULT_MANIFEST)
-  .action(async (runId: string | undefined, options: ManifestOptions) => {
-    const runtime = await createOrchestratorRuntime(resolve(options.manifest));
+  .action(async (runId: string | undefined) => {
+    const runtime = await createOrchestratorRuntime(PROJECT_ROOT);
     const state = await runtime.orchestrator.getState(runId);
     if (state === undefined) {
       throw new Error("找不到可恢复的运行状态");
@@ -100,9 +97,8 @@ program
 program
   .command("continue")
   .description("无状态时新建、运行中时恢复、终态时安全返回")
-  .option("-m, --manifest <path>", "Manifest 文件", DEFAULT_MANIFEST)
-  .action(async (options: ManifestOptions) => {
-    const runtime = await createOrchestratorRuntime(resolve(options.manifest));
+  .action(async () => {
+    const runtime = await createOrchestratorRuntime(PROJECT_ROOT);
     const state = await runtime.orchestrator.getState();
     if (state !== undefined && state.status !== "running") {
       await executeRuntime(
@@ -127,9 +123,8 @@ program
   .command("status")
   .description("读取最近或指定运行的持久化状态")
   .argument("[runId]", "运行 ID；省略时使用最近运行")
-  .option("-m, --manifest <path>", "Manifest 文件", DEFAULT_MANIFEST)
-  .action(async (runId: string | undefined, options: ManifestOptions) => {
-    const runtime = await createOrchestratorRuntime(resolve(options.manifest));
+  .action(async (runId: string | undefined) => {
+    const runtime = await createOrchestratorRuntime(PROJECT_ROOT);
     const state = await runtime.orchestrator.getState(runId);
     if (state === undefined) {
       throw new Error("尚无运行状态");
@@ -152,7 +147,7 @@ type Runtime = Awaited<ReturnType<typeof createOrchestratorRuntime>>;
 
 /*
  * 初始化输出区分本次创建与已有文件，重复执行不会把“无新文件”误报为失败。
- * 跳过列表显式提醒用户现有内容没有被校验或覆盖，需要自行确认其配置是否仍然适用。
+ * 跳过列表显式提醒用户现有内容没有被覆盖，后续 validate 会按固定契约统一校验。
  */
 function printInitializationResult(result: SampleProjectWriteResult): void {
   const lines = [

@@ -1,53 +1,47 @@
 /*
- * YAML 仓储把项目级 Manifest 与 TASK 目录编译成完整、稳定的运行契约。
- * 每个 Markdown 文件既是任务正文也是机器元数据来源，目录中的任务无法被配置静默遗漏。
+ * 文件项目仓储把固定项目模板与 TASK 目录编译成完整、稳定的运行契约。
+ * 每个 Markdown 文件既是任务正文也是机器元数据来源，目录中的任务不会被静默遗漏。
  */
 import { createHash } from "node:crypto";
 import { readFile, readdir, stat } from "node:fs/promises";
-import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, relative, resolve } from "node:path";
 import { parse } from "yaml";
 import { createStableTaskOrder } from "../../domain/dag.js";
 import { ConfigurationError } from "../../domain/errors.js";
 import {
+  PROJECT_CONTEXT_FILES,
+  PROJECT_STRUCTURE,
   taskDefinitionSchema,
   taskDocumentMetadataSchema,
-  taskManifestSchema,
-  type LoadedTaskManifest,
+  type LoadedProject,
   type TaskDefinition,
-  type TaskManifest,
   type TextDocument,
-} from "../../domain/manifest.js";
-import type { ManifestRepository } from "../../ports/manifest-repository.js";
+} from "../../domain/project.js";
 import { createTaskContractHash } from "../../domain/task-completion.js";
+import type { ProjectRepository } from "../../ports/project-repository.js";
 
 interface LoadedTaskDocument {
   readonly task: TaskDefinition;
   readonly document: TextDocument;
 }
 
-export class YamlManifestRepository implements ManifestRepository {
-  public async load(manifestPath: string): Promise<LoadedTaskManifest> {
-    const absoluteManifestPath = resolve(manifestPath);
-    const rawManifest = await this.readRequiredFile(absoluteManifestPath, "Manifest");
-    const manifest = this.parseManifest(rawManifest);
-    const projectRoot = resolve(dirname(absoluteManifestPath), manifest.project.root);
-
-    await this.assertDirectory(projectRoot);
-    this.toProjectRelative(projectRoot, absoluteManifestPath, "Manifest");
-    this.validateProjectPaths(manifest);
+export class FileProjectRepository implements ProjectRepository {
+  public async load(projectRoot: string): Promise<LoadedProject> {
+    const absoluteProjectRoot = resolve(projectRoot);
+    await this.assertDirectory(absoluteProjectRoot);
 
     const contextDocuments = await Promise.all(
-      this.collectContextPaths(manifest).map((path) =>
-        this.loadDocument(projectRoot, path)),
+      PROJECT_CONTEXT_FILES.map((path) =>
+        this.loadDocument(absoluteProjectRoot, path)),
     );
-    const taskCatalog = await this.loadTaskCatalog(projectRoot, manifest);
-    const tasks = createStableTaskOrder(taskCatalog.map((entry) => entry.task));
+    const taskEntries = await this.loadTaskDocuments(absoluteProjectRoot);
+    const tasks = createStableTaskOrder(taskEntries.map((entry) => entry.task));
     const taskDocuments = new Map(
-      taskCatalog.map((entry) => [entry.task.id, entry.document] as const),
+      taskEntries.map((entry) => [entry.task.id, entry.document] as const),
     );
     /*
-     * 整体 manifestHash 服务于同一 Run 的精确恢复；逐 TASK 契约指纹服务于新 Run 的安全复用。
-     * 两者职责不同，不能用会被模型和重试策略影响的整体哈希替代任务完成契约。
+     * 整体 projectHash 服务于同一 Run 的精确恢复；逐 TASK 契约指纹服务于新 Run 的安全复用。
+     * 执行策略由程序版本固定，项目哈希只绑定用户可编辑的项目上下文与任务事实。
      */
     const taskContractHashes = new Map(tasks.map((task) => {
       const taskDocument = taskDocuments.get(task.id);
@@ -57,7 +51,6 @@ export class YamlManifestRepository implements ManifestRepository {
       return [
         task.id,
         createTaskContractHash({
-          manifest,
           task,
           taskDocument,
           contextDocuments,
@@ -66,14 +59,11 @@ export class YamlManifestRepository implements ManifestRepository {
     }));
 
     return {
-      manifest,
       tasks,
-      manifestPath: absoluteManifestPath,
-      projectRoot,
-      manifestHash: this.createContentHash(
-        rawManifest,
+      projectRoot: absoluteProjectRoot,
+      projectHash: this.createContentHash(
         contextDocuments,
-        taskCatalog.map((entry) => entry.document),
+        taskEntries.map((entry) => entry.document),
       ),
       taskDocuments,
       taskContractHashes,
@@ -81,38 +71,12 @@ export class YamlManifestRepository implements ManifestRepository {
     };
   }
 
-  /*
-   * Manifest 与 TASK 元数据分别严格解析，任何未知字段都会在 Agent 启动前失败。
-   * 版本 3 不兼容旧 scope、gates 与 verification 字段，能力模型只有一个事实来源。
-   */
-  private parseManifest(rawManifest: string): TaskManifest {
-    let parsedYaml: unknown;
-    try {
-      parsedYaml = parse(rawManifest);
-    } catch (error) {
-      throw new ConfigurationError(
-        `Manifest YAML 无法解析：${this.describeError(error)}`,
-      );
-    }
-
-    const parsed = taskManifestSchema.safeParse(parsedYaml);
-    if (!parsed.success) {
-      throw new ConfigurationError(
-        `Manifest 不符合契约：${this.describeIssues(parsed.error.issues)}`,
-      );
-    }
-    return parsed.data;
-  }
-
-  private async loadTaskCatalog(
+  private async loadTaskDocuments(
     projectRoot: string,
-    manifest: TaskManifest,
   ): Promise<readonly LoadedTaskDocument[]> {
-    const absoluteDirectory = resolve(projectRoot, manifest.taskCatalog.directory);
-    this.toProjectRelative(
+    const absoluteDirectory = resolve(
       projectRoot,
-      absoluteDirectory,
-      "TASK 目录",
+      PROJECT_STRUCTURE.taskDirectory,
     );
     await this.assertDirectory(absoluteDirectory);
 
@@ -121,17 +85,13 @@ export class YamlManifestRepository implements ManifestRepository {
       .sort((left, right) => compareText(left.name, right.name));
     if (entries.length === 0) {
       throw new ConfigurationError(
-        `TASK 目录没有 Markdown 任务文档：${manifest.taskCatalog.directory}`,
+        `TASK 目录没有 Markdown 任务文档：${PROJECT_STRUCTURE.taskDirectory}`,
       );
     }
 
     return Promise.all(entries.map(async (entry) => {
       const absolutePath = resolve(absoluteDirectory, entry.name);
-      const relativePath = this.toProjectRelative(
-        projectRoot,
-        absolutePath,
-        `TASK 文档 ${entry.name}`,
-      );
+      const relativePath = normalize(relative(projectRoot, absolutePath));
       const content = await this.readRequiredFile(absolutePath, relativePath);
       const metadata = this.parseTaskMetadata(relativePath, content);
       if (basename(relativePath) !== `${metadata.id}.md`) {
@@ -189,69 +149,13 @@ export class YamlManifestRepository implements ManifestRepository {
     }
   }
 
-  private collectContextPaths(manifest: TaskManifest): readonly string[] {
-    const paths = [
-      ...(manifest.project.spec === undefined ? [] : [manifest.project.spec]),
-      ...(manifest.project.plan === undefined ? [] : [manifest.project.plan]),
-      ...manifest.project.contextFiles,
-    ];
-    return [...new Set(paths)];
-  }
-
-  private validateProjectPaths(manifest: TaskManifest): void {
-    for (const path of [
-      ...this.collectContextPaths(manifest),
-      manifest.taskCatalog.directory,
-    ]) {
-      this.assertSafeRelativePath(path, "项目路径");
-    }
-    if (normalize(manifest.taskCatalog.directory) === ".") {
-      throw new ConfigurationError("TASK 目录不能直接使用项目根目录");
-    }
-  }
-
-  private assertSafeRelativePath(value: string, label: string): void {
-    const normalized = normalize(value);
-    if (
-      isAbsolute(value)
-      || normalized.includes("\0")
-      || normalized === ".."
-      || normalized.startsWith("../")
-      || normalized.includes("/../")
-    ) {
-      throw new ConfigurationError(`${label} 必须位于项目根内：${value}`);
-    }
-  }
-
   private async loadDocument(
     projectRoot: string,
     declaredPath: string,
   ): Promise<TextDocument> {
     const absolutePath = resolve(projectRoot, declaredPath);
-    const relativePath = this.toProjectRelative(
-      projectRoot,
-      absolutePath,
-      declaredPath,
-    );
     const content = await this.readRequiredFile(absolutePath, declaredPath);
-    return { path: relativePath, content };
-  }
-
-  private toProjectRelative(
-    projectRoot: string,
-    absolutePath: string,
-    label: string,
-  ): string {
-    const relativePath = relative(projectRoot, absolutePath);
-    if (
-      relativePath === ""
-      || relativePath === ".."
-      || relativePath.startsWith(`..${sep}`)
-      || isAbsolute(relativePath)
-    ) {
-      throw new ConfigurationError(`${label} 必须是项目根内的路径`);
-    }
-    return normalize(relativePath);
+    return { path: normalize(relative(projectRoot, absolutePath)), content };
   }
 
   private async readRequiredFile(path: string, label: string): Promise<string> {
@@ -288,17 +192,15 @@ export class YamlManifestRepository implements ManifestRepository {
   }
 
   private createContentHash(
-    rawManifest: string,
     contextDocuments: readonly TextDocument[],
     taskDocuments: readonly TextDocument[],
   ): string {
     const hash = createHash("sha256");
-    hash.update(rawManifest);
     for (const document of [...contextDocuments, ...taskDocuments]) {
-      hash.update("\0");
       hash.update(document.path);
       hash.update("\0");
       hash.update(document.content);
+      hash.update("\0");
     }
     return hash.digest("hex");
   }

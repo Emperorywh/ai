@@ -25,8 +25,7 @@ describe("FileStateStore", () => {
     const store = new FileStateStore(directory);
     const state = createInitialRunState({
       runId: "2026-07-15T03-28-40-710+08-00-1234abcd",
-      manifestPath: "/project/orchestrator.yaml",
-      manifestHash: "hash",
+      projectHash: "hash",
       projectRoot: "/project",
       workspace: {
         repositoryRoot: "/project",
@@ -52,8 +51,7 @@ describe("FileStateStore", () => {
     const store = new FileStateStore(directory);
     const initial = createInitialRunState({
       runId: "run-atomic",
-      manifestPath: "/project/orchestrator.yaml",
-      manifestHash: "hash",
+      projectHash: "hash",
       projectRoot: "/project",
       workspace: {
         repositoryRoot: "/project",
@@ -86,7 +84,7 @@ describe("FileStateStore", () => {
     ).rejects.toThrow("非法产物名称");
   });
 
-  it("拒绝没有版本 3 标记的旧状态快照", async () => {
+  it("拒绝没有版本 4 标记的旧状态快照", async () => {
     const directory = await createTemporaryDirectory();
     const store = new FileStateStore(directory);
     const runDirectory = join(directory, "runs", "run-old-state");

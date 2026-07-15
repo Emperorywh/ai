@@ -5,7 +5,7 @@
 import { randomUUID } from "node:crypto";
 import { createStableTaskOrder } from "../domain/dag.js";
 import { ConfigurationError } from "../domain/errors.js";
-import type { LoadedTaskManifest, TaskDefinition } from "../domain/manifest.js";
+import type { LoadedProject, TaskDefinition } from "../domain/project.js";
 import {
   createInitialRunState,
   finishRun,
@@ -49,7 +49,7 @@ export class QueueOrchestrator {
   ) {}
 
   public async start(
-    loaded: LoadedTaskManifest,
+    loaded: LoadedProject,
     options: StartRunOptions = {},
   ): Promise<OrchestratorResult> {
     const runId = this.createRunId();
@@ -67,8 +67,7 @@ export class QueueOrchestrator {
       });
       const state = createInitialRunState({
         runId,
-        manifestPath: loaded.manifestPath,
-        manifestHash: loaded.manifestHash,
+        projectHash: loaded.projectHash,
         projectRoot: loaded.projectRoot,
         workspace: {
           repositoryRoot: workspaceIdentity.repositoryRoot,
@@ -110,7 +109,7 @@ export class QueueOrchestrator {
   }
 
   public async resume(
-    loaded: LoadedTaskManifest,
+    loaded: LoadedProject,
     runId: string,
     signal?: AbortSignal,
   ): Promise<OrchestratorResult> {
@@ -118,7 +117,7 @@ export class QueueOrchestrator {
     if (existing === undefined) {
       throw new ConfigurationError(`找不到运行 ${runId}`);
     }
-    this.assertResumeManifestCompatible(loaded, existing);
+    this.assertResumeProjectCompatible(loaded, existing);
     if (existing.status !== "running") {
       return { state: existing, artifacts: [] };
     }
@@ -148,7 +147,7 @@ export class QueueOrchestrator {
   }
 
   private async drive(
-    loaded: LoadedTaskManifest,
+    loaded: LoadedProject,
     orderedTasks: readonly TaskDefinition[],
     initialState: RunState,
     resumeExecutingOnEntry: boolean,
@@ -343,7 +342,7 @@ export class QueueOrchestrator {
    * failed 优先于 blocked，避免部分成功掩盖任何已经耗尽重试的任务。
    */
   private async finishConvergedRun(
-    loaded: LoadedTaskManifest,
+    loaded: LoadedProject,
     state: RunState,
     orderedTasks: readonly TaskDefinition[],
   ): Promise<OrchestratorResult> {
@@ -374,16 +373,13 @@ export class QueueOrchestrator {
     return { state: completedState, artifacts };
   }
 
-  private assertResumeManifestCompatible(
-    loaded: LoadedTaskManifest,
+  private assertResumeProjectCompatible(
+    loaded: LoadedProject,
     state: RunState,
   ): void {
-    if (state.manifestPath !== loaded.manifestPath) {
-      throw new ConfigurationError("Manifest 路径与运行快照不一致");
-    }
-    if (state.manifestHash !== loaded.manifestHash) {
+    if (state.projectHash !== loaded.projectHash) {
       throw new ConfigurationError(
-        "Manifest、SPEC、PLAN、TASK 或策略文件已变化，不能混用旧运行状态。请创建新运行。",
+        "SPEC、PLAN、AGENTS 或 TASK 已变化，不能混用旧运行状态。请创建新运行。",
       );
     }
     if (state.projectRoot !== loaded.projectRoot) {
@@ -458,7 +454,7 @@ export class QueueOrchestrator {
   }
 
   private async writeRunArtifacts(
-    loaded: LoadedTaskManifest,
+    loaded: LoadedProject,
     state: RunState,
   ): Promise<readonly string[]> {
     const manualAcceptance = [

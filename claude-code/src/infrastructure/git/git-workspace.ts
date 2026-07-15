@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { ConfigurationError, InfrastructureError } from "../../domain/errors.js";
-import type { TaskDefinition } from "../../domain/manifest.js";
+import type { TaskDefinition } from "../../domain/project.js";
 import type {
   CandidateSnapshot,
   CandidateArchive,

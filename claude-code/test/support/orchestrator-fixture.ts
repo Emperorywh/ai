@@ -5,10 +5,9 @@
 import type { AgentRunOutcome } from "../../src/domain/agent-result.js";
 import {
   taskDefinitionSchema,
-  taskManifestSchema,
-  type LoadedTaskManifest,
+  type LoadedProject,
   type TaskDefinition,
-} from "../../src/domain/manifest.js";
+} from "../../src/domain/project.js";
 import type { RunState } from "../../src/domain/run-state.js";
 import { createTaskContractHash } from "../../src/domain/task-completion.js";
 import type {
@@ -185,6 +184,24 @@ export class RecordingAgent implements AgentExecutor {
 export function completedBehavior(
   request: AgentRunRequest<unknown>,
 ): AgentRunOutcome<unknown> {
+  /*
+   * 系统固定执行独立审核，因此默认 Fake 同时覆盖 Worker 完成和 Reviewer 通过两类协议。
+   * 测试若关心拒绝、阻塞或重试，会在用例中显式替换对应行为。
+   */
+  if (request.attemptKind === "review") {
+    return {
+      ok: true,
+      sessionId: request.sessionId ?? "missing-review-session",
+      data: {
+        status: "approved",
+        summary: `${request.taskId} review approved`,
+        findings: [],
+        blockingQuestions: [],
+      },
+      costUsd: 0.01,
+      turns: 1,
+    };
+  }
   return {
     ok: true,
       sessionId: request.sessionId ?? request.resumeSessionId ?? "missing-session",
@@ -199,30 +216,13 @@ export function completedBehavior(
   };
 }
 
-export function createLoadedManifest(
+export function createLoadedProject(
   taskInputs: readonly {
     id: string;
     dependsOn?: readonly string[];
     contractRevision?: string;
   }[],
-): LoadedTaskManifest {
-  const manifest = taskManifestSchema.parse({
-    version: 3,
-    project: {
-      root: ".",
-      contextFiles: [],
-    },
-    defaults: {
-      model: "sonnet",
-      effort: "high",
-    },
-    review: {
-      enabled: false,
-    },
-    taskCatalog: {
-      directory: "tasks",
-    },
-  });
+): LoadedProject {
   const tasks = taskInputs.map((input) => taskDefinitionSchema.parse({
       id: input.id,
       title: input.id,
@@ -251,7 +251,6 @@ export function createLoadedManifest(
     return [
       task.id,
       createTaskContractHash({
-        manifest,
         task,
         taskDocument,
         contextDocuments: [],
@@ -260,11 +259,9 @@ export function createLoadedManifest(
   }));
 
   return {
-    manifest,
     tasks,
-    manifestPath: "/project/orchestrator.yaml",
     projectRoot: "/project",
-    manifestHash: "manifest-hash",
+    projectHash: "project-hash",
     taskDocuments,
     taskContractHashes,
     contextDocuments: [],

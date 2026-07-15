@@ -3,7 +3,7 @@
  * 它不执行任务、不写状态，也不理解 Git 命令；所有历史事实通过 Workspace 端口读取。
  */
 import { ConfigurationError } from "../domain/errors.js";
-import type { LoadedTaskManifest, TaskDefinition } from "../domain/manifest.js";
+import type { LoadedProject, TaskDefinition } from "../domain/project.js";
 import type { InitialTaskRunState } from "../domain/run-state.js";
 import { createDependencyCompletionFingerprint } from "../domain/task-completion.js";
 import type {
@@ -38,7 +38,7 @@ export class TaskProgressReconciler {
    * 任务按拓扑顺序决策，因此上游没有复用时，下游即使存在旧提交也会被标记为依赖失效。
    */
   public async createPlan(input: {
-    loaded: LoadedTaskManifest;
+    loaded: LoadedProject;
     orderedTasks: readonly TaskDefinition[];
     head: string;
     fresh: boolean;

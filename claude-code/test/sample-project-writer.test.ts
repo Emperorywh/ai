@@ -1,6 +1,6 @@
 /*
  * 初始化器测试验证现有项目中的增量创建、重复执行幂等性和路径类型冲突回滚。
- * 测试只检查路径与文件元数据，不读取任何 Markdown 内容，也不会接触真实项目目录。
+ * 生成结果会交给生产项目仓储加载，确保模板内容和运行时契约始终一致。
  */
 import {
   access,
@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { writeSampleProject } from "../src/cli/sample-project-writer.js";
-import { YamlManifestRepository } from "../src/infrastructure/tasks/yaml-manifest-repository.js";
+import { FileProjectRepository } from "../src/infrastructure/tasks/file-project-repository.js";
 
 const temporaryRoots: string[] = [];
 
@@ -33,23 +33,23 @@ describe("writeSampleProject", () => {
 
     const result = await writeSampleProject(root);
 
-    expect(result.createdFiles).toHaveLength(5);
+    expect(result.createdFiles).toHaveLength(4);
     expect(result.skippedFiles).toEqual([]);
-    await expect(access(join(root, "orchestrator.yaml"))).resolves.toBeUndefined();
+    await expect(access(join(root, "orchestrator.yaml"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
     await expect(access(join(root, "tasks", "TASK-001.md"))).resolves.toBeUndefined();
     /*
-     * 初始化成功不仅代表文件存在，生成的版本 3 任务目录还必须能被生产仓储完整加载。
-     * 该断言防止模板与严格 Schema 在后续演进中形成两套不兼容契约。
+     * 初始化成功不仅代表文件存在，固定模板还必须能被生产仓储完整加载。
+     * 该断言防止初始化器与严格项目契约在后续演进中形成两套不兼容结构。
      */
-    const loaded = await new YamlManifestRepository().load(
-      join(root, "orchestrator.yaml"),
-    );
+    const loaded = await new FileProjectRepository().load(root);
     expect(loaded.tasks.map((task) => task.id)).toEqual(["TASK-001"]);
-    expect(loaded.manifest.defaults.maxAttempts).toBeUndefined();
-    expect(loaded.manifest.defaults.taskTimeoutMinutes).toBeUndefined();
-    expect(loaded.manifest.defaults.maxTurns).toBeUndefined();
-    expect(loaded.manifest.review.maxAttempts).toBeUndefined();
-    expect(loaded.manifest.review.maxTurns).toBeUndefined();
+    expect(loaded.contextDocuments.map((document) => document.path)).toEqual([
+      "SPEC.md",
+      "PLAN.md",
+      "AGENTS.md",
+    ]);
   });
 
   it("保留已有普通文件并使重复初始化稳定收敛", async () => {
@@ -63,10 +63,10 @@ describe("writeSampleProject", () => {
     const second = await writeSampleProject(root);
     const afterSecond = await stat(existingPath);
 
-    expect(first.createdFiles).toHaveLength(4);
+    expect(first.createdFiles).toHaveLength(3);
     expect(first.skippedFiles).toEqual([existingPath]);
     expect(second.createdFiles).toEqual([]);
-    expect(second.skippedFiles).toHaveLength(5);
+    expect(second.skippedFiles).toHaveLength(4);
     expect(afterFirst.size).toBe(before.size);
     expect(afterSecond.size).toBe(before.size);
   });
@@ -79,7 +79,7 @@ describe("writeSampleProject", () => {
     await expect(writeSampleProject(root)).rejects.toThrow(
       "目标路径已存在且不是普通文件",
     );
-    await expect(access(join(root, "orchestrator.yaml"))).rejects.toMatchObject({
+    await expect(access(join(root, "PLAN.md"))).rejects.toMatchObject({
       code: "ENOENT",
     });
     const conflictingMetadata = await lstat(conflictingPath);

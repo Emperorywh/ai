@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { createStableTaskOrder } from "../src/domain/dag.js";
-import type { TaskDefinition } from "../src/domain/manifest.js";
+import type { TaskDefinition } from "../src/domain/project.js";
 
 /**
  * 测试任务补齐 TASK 目录解析后的字段，让用例只突出依赖关系。

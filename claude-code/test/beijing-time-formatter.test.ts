@@ -76,11 +76,10 @@ describe("北京时间人类可读输出", () => {
 
 function createRunState(): RunState {
   return {
-    version: 3,
+    version: 4,
     runId: "run-1",
     status: "failed",
-    manifestPath: "/project/orchestrator.yaml",
-    manifestHash: "hash",
+    projectHash: "hash",
     projectRoot: "/project",
     workspace: {
       repositoryRoot: "/project",

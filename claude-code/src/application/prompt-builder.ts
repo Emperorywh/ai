@@ -3,10 +3,10 @@
  * 上下文按“项目策略、规格、任务、失败反馈”分区，便于人和 AI 快速推导信息来源。
  */
 import type {
-  LoadedTaskManifest,
+  LoadedProject,
   TaskDefinition,
   TextDocument,
-} from "../domain/manifest.js";
+} from "../domain/project.js";
 const writeSafetyRules = `
 你只负责当前一个 TASK。严格遵守以下边界：
 - 可以自主调用子 Agent、终端、技能和 MCP 完成当前 TASK；不要询问用户，优先依据现有规格和代码自行作出可逆决策。
@@ -24,7 +24,7 @@ const reviewSafetyRules = `
 
 export class PromptBuilder {
   public buildImplementation(
-    loaded: LoadedTaskManifest,
+    loaded: LoadedProject,
     task: TaskDefinition,
   ): string {
     return [
@@ -38,7 +38,7 @@ export class PromptBuilder {
   }
 
   public buildRepair(
-    loaded: LoadedTaskManifest,
+    loaded: LoadedProject,
     task: TaskDefinition,
     feedback: string,
   ): string {
@@ -55,7 +55,7 @@ export class PromptBuilder {
   }
 
   public buildResume(
-    loaded: LoadedTaskManifest,
+    loaded: LoadedProject,
     task: TaskDefinition,
   ): string {
     return [
@@ -69,7 +69,7 @@ export class PromptBuilder {
   }
 
   public buildReview(
-    loaded: LoadedTaskManifest,
+    loaded: LoadedProject,
     task: TaskDefinition,
     changedFiles: readonly string[],
     diff: string,
@@ -101,7 +101,7 @@ export class PromptBuilder {
   }
 
   private renderTaskContext(
-    loaded: LoadedTaskManifest,
+    loaded: LoadedProject,
     task: TaskDefinition,
   ): string {
     const taskDocument = loaded.taskDocuments.get(task.id);

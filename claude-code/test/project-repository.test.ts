@@ -1,58 +1,31 @@
 /*
- * 任务目录测试在独立临时项目中验证版本 3 Manifest、TASK 前置元数据和内容指纹。
- * 用例证明目录是唯一事实源：新增文档会自动进入 DAG，错误元数据不会被静默忽略。
+ * 项目仓储测试在独立临时目录中验证固定模板、TASK 前置元数据和内容指纹。
+ * 用例同时证明配置文件不会参与加载，项目结构与执行策略只有程序内一套事实源。
  */
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { parse, stringify } from "yaml";
-import { YamlManifestRepository } from "../src/infrastructure/tasks/yaml-manifest-repository.js";
+import { stringify } from "yaml";
+import { FileProjectRepository } from "../src/infrastructure/tasks/file-project-repository.js";
 
 const temporaryRoots: string[] = [];
 
-interface FixtureOptions {
-  readonly catalogDirectory?: string;
-}
-
 interface ProjectFixture {
   readonly root: string;
-  readonly manifestPath: string;
 }
 
-async function createProjectFixture(
-  options: FixtureOptions = {},
-): Promise<ProjectFixture> {
-  const root = await mkdtemp(join(tmpdir(), "claude-task-manifest-"));
+async function createProjectFixture(): Promise<ProjectFixture> {
+  const root = await mkdtemp(join(tmpdir(), "claude-task-project-"));
   temporaryRoots.push(root);
+  await mkdir(join(root, "tasks"), { recursive: true });
 
   await Promise.all([
-    mkdir(join(root, "context"), { recursive: true }),
-    mkdir(join(root, "tasks"), { recursive: true }),
-  ]);
-
-  const manifestPath = join(root, "orchestrator.yaml");
-  const manifest = {
-    version: 3,
-    project: {
-      root: ".",
-      spec: "SPEC.md",
-      plan: "PLAN.md",
-      contextFiles: ["context/ARCHITECTURE.md"],
-    },
-    defaults: {},
-    taskCatalog: {
-      directory: options.catalogDirectory ?? "tasks",
-    },
-  };
-
-  await Promise.all([
-    writeFile(manifestPath, stringify(manifest), "utf8"),
     writeFile(join(root, "SPEC.md"), "# SPEC\n\n完整规格。\n", "utf8"),
     writeFile(join(root, "PLAN.md"), "# PLAN\n\n开发计划。\n", "utf8"),
     writeFile(
-      join(root, "context", "ARCHITECTURE.md"),
-      "# 架构\n\n领域层不依赖基础设施。\n",
+      join(root, "AGENTS.md"),
+      "# 项目约束\n\n领域层不依赖基础设施。\n",
       "utf8",
     ),
     writeFile(
@@ -66,7 +39,7 @@ async function createProjectFixture(
     ),
   ]);
 
-  return { root, manifestPath };
+  return { root };
 }
 
 /*
@@ -96,17 +69,17 @@ afterEach(async () => {
   );
 });
 
-describe("YamlManifestRepository", () => {
-  it("加载项目策略和完整 TASK 目录", async () => {
+describe("FileProjectRepository", () => {
+  it("按固定项目结构加载上下文和完整 TASK 目录", async () => {
     const fixture = await createProjectFixture();
-    const loaded = await new YamlManifestRepository().load(fixture.manifestPath);
+    const loaded = await new FileProjectRepository().load(fixture.root);
 
     expect(loaded.projectRoot).toBe(resolve(fixture.root));
-    expect(loaded.manifest.version).toBe(3);
-    expect(loaded.manifest.defaults).toEqual({
-      model: "sonnet",
-      effort: "high",
-    });
+    expect(loaded.contextDocuments.map((document) => document.path)).toEqual([
+      "SPEC.md",
+      "PLAN.md",
+      "AGENTS.md",
+    ]);
     expect(loaded.tasks).toHaveLength(1);
     expect(loaded.tasks[0]).toMatchObject({
       id: "TASK-001",
@@ -114,13 +87,13 @@ describe("YamlManifestRepository", () => {
       file: "tasks/TASK-001.md",
       dependsOn: [],
     });
-    expect(loaded.manifestHash).toMatch(/^[a-f0-9]{64}$/u);
+    expect(loaded.projectHash).toMatch(/^[a-f0-9]{64}$/u);
     expect(loaded.taskContractHashes.get("TASK-001")).toMatch(
       /^[a-f0-9]{64}$/u,
     );
   });
 
-  it("新增 TASK 文档后自动进入稳定 DAG，无需修改 Manifest", async () => {
+  it("新增 TASK 文档后自动进入稳定 DAG，无需同步维护索引", async () => {
     const fixture = await createProjectFixture();
     await writeFile(
       join(fixture.root, "tasks", "TASK-002.md"),
@@ -132,17 +105,16 @@ describe("YamlManifestRepository", () => {
       "utf8",
     );
 
-    const loaded = await new YamlManifestRepository().load(fixture.manifestPath);
+    const loaded = await new FileProjectRepository().load(fixture.root);
 
     expect(loaded.tasks.map((task) => task.id)).toEqual(["TASK-001", "TASK-002"]);
     expect(loaded.taskDocuments.size).toBe(2);
   });
 
-  it("拒绝目录越界和文件名与 ID 漂移", async () => {
-    const directoryFixture = await createProjectFixture({
-      catalogDirectory: "../outside-tasks",
-    });
+  it("拒绝缺失的固定模板和文件名与 ID 漂移", async () => {
+    const missingTemplateFixture = await createProjectFixture();
     const identityFixture = await createProjectFixture();
+    await rm(join(missingTemplateFixture.root, "AGENTS.md"));
     const original = await readFile(
       join(identityFixture.root, "tasks", "TASK-001.md"),
       "utf8",
@@ -152,21 +124,20 @@ describe("YamlManifestRepository", () => {
       original.replaceAll("TASK-001", "TASK-OTHER"),
       "utf8",
     );
-    const repository = new YamlManifestRepository();
+    const repository = new FileProjectRepository();
 
-    await expect(repository.load(directoryFixture.manifestPath)).rejects.toThrow(
-      "必须位于项目根内",
+    await expect(repository.load(missingTemplateFixture.root)).rejects.toThrow(
+      "AGENTS.md 无法读取",
     );
-    await expect(repository.load(identityFixture.manifestPath)).rejects.toThrow(
+    await expect(repository.load(identityFixture.root)).rejects.toThrow(
       "文件名必须与 id 一致",
     );
   });
 
   it("拒绝静态 status 和其他未知字段，运行状态不能污染任务定义", async () => {
     const fixture = await createProjectFixture();
-    const taskPath = join(fixture.root, "tasks", "TASK-001.md");
     await writeFile(
-      taskPath,
+      join(fixture.root, "tasks", "TASK-001.md"),
       createTaskDocument({
         id: "TASK-001",
         title: "实现任务目录",
@@ -177,75 +148,77 @@ describe("YamlManifestRepository", () => {
     );
 
     await expect(
-      new YamlManifestRepository().load(fixture.manifestPath),
+      new FileProjectRepository().load(fixture.root),
     ).rejects.toThrow("Unrecognized key");
   });
 
-  it("任一 TASK 内容变化都会改变整体内容哈希", async () => {
+  it("任一 TASK 内容变化都会改变项目和任务契约指纹", async () => {
     const fixture = await createProjectFixture();
-    const repository = new YamlManifestRepository();
-    const initial = await repository.load(fixture.manifestPath);
+    const repository = new FileProjectRepository();
+    const initial = await repository.load(fixture.root);
     const taskPath = join(fixture.root, "tasks", "TASK-001.md");
     const current = await readFile(taskPath, "utf8");
     await writeFile(taskPath, `${current}\n补充验收事实。\n`, "utf8");
 
-    const changed = await repository.load(fixture.manifestPath);
+    const changed = await repository.load(fixture.root);
 
-    expect(changed.manifestHash).not.toBe(initial.manifestHash);
+    expect(changed.projectHash).not.toBe(initial.projectHash);
     expect(changed.taskContractHashes.get("TASK-001")).not.toBe(
       initial.taskContractHashes.get("TASK-001"),
     );
   });
 
-  it("执行资源策略变化不让任务完成契约失效", async () => {
+  it("单任务资源熔断变化不让已完成任务契约失效", async () => {
     const fixture = await createProjectFixture();
-    const repository = new YamlManifestRepository();
-    const initial = await repository.load(fixture.manifestPath);
-    const rawManifest = await readFile(fixture.manifestPath, "utf8");
-    const manifest = parse(rawManifest) as Record<string, unknown>;
-    manifest["defaults"] = {
-      maxAttempts: 9,
-      maxTurns: 120,
-      model: "opus",
-      effort: "xhigh",
-    };
-    await writeFile(fixture.manifestPath, stringify(manifest), "utf8");
+    const repository = new FileProjectRepository();
+    const initial = await repository.load(fixture.root);
+    await writeFile(
+      join(fixture.root, "tasks", "TASK-001.md"),
+      createTaskDocument({
+        id: "TASK-001",
+        title: "实现任务目录",
+        dependsOn: [],
+        extraMetadata: { maxAttempts: 9, timeoutMinutes: 120 },
+      }),
+      "utf8",
+    );
 
-    const changed = await repository.load(fixture.manifestPath);
+    const changed = await repository.load(fixture.root);
 
     /*
-     * 整体哈希仍变化以阻止同一 Run 混用策略，但已验收任务的完成契约保持稳定。
-     * 新 Run 因此可以调整模型、预算或重试策略，而不浪费已经通过的 TASK。
+     * 项目哈希仍变化以阻止同一 Run 混用熔断值，但完成定义保持稳定。
+     * 新 Run 因此可以调整单任务资源保护，而不浪费已经审核通过的完成证据。
      */
-    expect(changed.manifestHash).not.toBe(initial.manifestHash);
+    expect(changed.projectHash).not.toBe(initial.projectHash);
     expect(changed.taskContractHashes.get("TASK-001")).toBe(
       initial.taskContractHashes.get("TASK-001"),
     );
   });
 
-  it("拒绝 Manifest 未知字段和旧版本 tasks 数组", async () => {
+  it("忽略任意同名 YAML 文件，不提供文件配置入口", async () => {
     const fixture = await createProjectFixture();
-    const current = await readFile(fixture.manifestPath, "utf8");
+    const repository = new FileProjectRepository();
+    const initial = await repository.load(fixture.root);
     await writeFile(
-      fixture.manifestPath,
-      `${current}\ntasks: []\n`,
+      join(fixture.root, "orchestrator.yaml"),
+      "version: invalid\ntasks: []\nreview: false\n",
       "utf8",
     );
 
-    await expect(
-      new YamlManifestRepository().load(fixture.manifestPath),
-    ).rejects.toThrow("Unrecognized key");
+    const loaded = await repository.load(fixture.root);
+
+    expect(loaded.projectHash).toBe(initial.projectHash);
+    expect(loaded.tasks.map((task) => task.id)).toEqual(["TASK-001"]);
   });
 
   it("拒绝旧 scope 和 gates 字段，不保留隐式兼容路径", async () => {
     const fixture = await createProjectFixture();
-    const taskPath = join(fixture.root, "tasks", "TASK-001.md");
     /*
-     * Manifest v3 将自主能力模型固化为唯一契约，旧边界字段必须显式报错。
+     * 当前 TASK 契约只有一套能力模型，旧边界字段必须显式报错。
      * 测试同时写入两类旧字段，避免未来只恢复其中一半形成不可推导的灰度行为。
      */
     await writeFile(
-      taskPath,
+      join(fixture.root, "tasks", "TASK-001.md"),
       createTaskDocument({
         id: "TASK-001",
         title: "实现任务目录",
@@ -259,7 +232,7 @@ describe("YamlManifestRepository", () => {
     );
 
     await expect(
-      new YamlManifestRepository().load(fixture.manifestPath),
+      new FileProjectRepository().load(fixture.root),
     ).rejects.toThrow("Unrecognized keys");
   });
 });

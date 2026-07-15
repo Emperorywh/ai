@@ -17,14 +17,14 @@ import {
   RecordingRunLock,
   RecordingWorkspace,
   completedBehavior,
-  createLoadedManifest,
+  createLoadedProject,
 } from "./support/orchestrator-fixture.js";
 import type { CandidateSnapshot } from "../src/ports/workspace.js";
 
 describe("QueueOrchestrator", () => {
   it("按稳定依赖顺序执行，且任意时刻最多只有一个 Agent", async () => {
     const fixture = createFixture();
-    const loaded = createLoadedManifest([
+    const loaded = createLoadedProject([
       { id: "TASK-B", dependsOn: ["TASK-A"] },
       { id: "TASK-A" },
       { id: "TASK-C", dependsOn: ["TASK-A"] },
@@ -38,14 +38,17 @@ describe("QueueOrchestrator", () => {
     expect(fixture.workspace.commits).toEqual(["TASK-A", "TASK-B", "TASK-C"]);
     expect(fixture.agent.requests.map((request) => request.taskId)).toEqual([
       "TASK-A",
+      "TASK-A",
       "TASK-B",
+      "TASK-B",
+      "TASK-C",
       "TASK-C",
     ]);
     expect(fixture.agent.requests[0]?.prompt).toContain(
       "可以自主调用子 Agent、终端、技能和 MCP",
     );
     /*
-     * v3 提示词只表达任务目标与职责，不再把旧路径清单或命令清单注入 Worker 上下文。
+     * 当前提示词只表达任务目标与职责，不把路径清单或命令清单注入 Worker 上下文。
      * 两个负断言守护能力面与文案同时删除，避免未来只移除 SDK Hook 却恢复提示词约束。
      */
     expect(fixture.agent.requests[0]?.prompt).not.toContain("# 路径边界");
@@ -61,7 +64,7 @@ describe("QueueOrchestrator", () => {
     expect(summary).toContain("创建时间：2026-07-13T08:00:01.000+08:00");
     expect(summary).not.toContain("创建时间：2026-07-13T00:00:01.000Z");
     /*
-     * 启动事件展示的是 Manifest 经 DAG 校验后的真实队列，而不是目录中碰巧存在的 TASK 文件。
+     * 启动事件展示的是项目仓储经 DAG 校验后的真实队列，而不是未校验的目录枚举结果。
      * 用户因此能在 Agent 启动前确认本次运行是否真的包含全部后续任务。
      */
     expect(fixture.logger.events[0]).toMatchObject({
@@ -75,7 +78,7 @@ describe("QueueOrchestrator", () => {
 
   it("新 run 核验并复用全部有效任务完成证据", async () => {
     const fixture = createFixture();
-    const loaded = createLoadedManifest([
+    const loaded = createLoadedProject([
       { id: "TASK-A" },
       { id: "TASK-B", dependsOn: ["TASK-A"] },
     ]);
@@ -88,6 +91,8 @@ describe("QueueOrchestrator", () => {
     expect(fixture.workspace.commits).toEqual(["TASK-A", "TASK-B"]);
     expect(fixture.agent.requests.map((request) => request.taskId)).toEqual([
       "TASK-A",
+      "TASK-A",
+      "TASK-B",
       "TASK-B",
     ]);
     expect(second.state.tasks["TASK-A"]?.completion?.origin).toBe("reused");
@@ -104,7 +109,7 @@ describe("QueueOrchestrator", () => {
 
   it("run fresh 明确忽略有效完成证据并全量重跑", async () => {
     const fixture = createFixture();
-    const loaded = createLoadedManifest([
+    const loaded = createLoadedProject([
       { id: "TASK-A" },
       { id: "TASK-B", dependsOn: ["TASK-A"] },
     ]);
@@ -122,7 +127,7 @@ describe("QueueOrchestrator", () => {
       "TASK-A",
       "TASK-B",
     ]);
-    expect(fixture.agent.requests).toHaveLength(4);
+    expect(fixture.agent.requests).toHaveLength(8);
     expect(fresh.state.tasks["TASK-A"]?.completion?.origin).toBe("executed");
     expect(fresh.state.tasks["TASK-B"]?.completion?.origin).toBe("executed");
   });
@@ -130,25 +135,25 @@ describe("QueueOrchestrator", () => {
   it("现有代码无变化时仍冻结候选并形成完成证据", async () => {
     const workspace = new NoChangeWorkspace();
     const fixture = createFixture(workspace);
-    const loaded = createLoadedManifest([{ id: "TASK-A" }]);
+    const loaded = createLoadedProject([{ id: "TASK-A" }]);
 
     const result = await fixture.orchestrator.start(loaded, { fresh: true });
 
     expect(result.state.status).toBe("completed");
-    expect(fixture.agent.requests).toHaveLength(1);
+    expect(fixture.agent.requests).toHaveLength(2);
     expect(workspace.commits).toEqual(["TASK-A"]);
     expect(result.state.tasks["TASK-A"]?.completion?.origin).toBe("executed");
   });
 
   it("任务契约变化只重跑该任务及其依赖下游", async () => {
     const fixture = createFixture();
-    const initial = createLoadedManifest([
+    const initial = createLoadedProject([
       { id: "TASK-A", contractRevision: "v1" },
       { id: "TASK-B", dependsOn: ["TASK-A"] },
       { id: "TASK-C" },
     ]);
     await fixture.orchestrator.start(initial);
-    const changed = createLoadedManifest([
+    const changed = createLoadedProject([
       { id: "TASK-A", contractRevision: "v2" },
       { id: "TASK-B", dependsOn: ["TASK-A"] },
       { id: "TASK-C" },
@@ -178,10 +183,10 @@ describe("QueueOrchestrator", () => {
 
   it("契约恢复旧值时不越过较新的异契约完成提交", async () => {
     const fixture = createFixture();
-    const versionOne = createLoadedManifest([
+    const versionOne = createLoadedProject([
       { id: "TASK-A", contractRevision: "v1" },
     ]);
-    const versionTwo = createLoadedManifest([
+    const versionTwo = createLoadedProject([
       { id: "TASK-A", contractRevision: "v2" },
     ]);
 
@@ -199,11 +204,10 @@ describe("QueueOrchestrator", () => {
 
   it("恢复 executing checkpoint 时复用原 TASK 会话而不创建新会话", async () => {
     const fixture = createFixture();
-    const loaded = createLoadedManifest([{ id: "TASK-A" }]);
+    const loaded = createLoadedProject([{ id: "TASK-A" }]);
     const initial = createInitialRunState({
       runId: "run-resume",
-      manifestPath: loaded.manifestPath,
-      manifestHash: loaded.manifestHash,
+      projectHash: loaded.projectHash,
       projectRoot: loaded.projectRoot,
       workspace: {
         repositoryRoot: "/project",
@@ -233,12 +237,39 @@ describe("QueueOrchestrator", () => {
     const result = await fixture.orchestrator.resume(loaded, executing.runId);
 
     expect(result.state.status).toBe("completed");
-    expect(fixture.agent.requests).toHaveLength(1);
+    expect(fixture.agent.requests).toHaveLength(2);
     expect(fixture.agent.requests[0]?.attemptKind).toBe("resume");
     expect(fixture.agent.requests[0]?.resumeSessionId).toBe(
       "11111111-1111-4111-8111-111111111111",
     );
     expect(fixture.agent.requests[0]?.sessionId).toBeUndefined();
+  });
+
+  it("项目内容变化后拒绝恢复旧运行快照", async () => {
+    const fixture = createFixture();
+    const loaded = createLoadedProject([{ id: "TASK-A" }]);
+    const initial = createInitialRunState({
+      runId: "run-project-changed",
+      projectHash: loaded.projectHash,
+      projectRoot: loaded.projectRoot,
+      workspace: {
+        repositoryRoot: "/project",
+        branch: "main",
+        expectedHead: "base-sha",
+      },
+      tasks: [{ taskId: "TASK-A" }],
+      now: "2026-07-13T00:00:00.000Z",
+    });
+    await fixture.stateStore.save(initial);
+
+    /*
+     * 恢复只绑定固定项目模板和 TASK 内容哈希，不再依赖任何外部配置文件身份。
+     * 任一项目事实变化都必须创建新 Run，避免新上下文与旧 checkpoint 混用。
+     */
+    await expect(fixture.orchestrator.resume(
+      { ...loaded, projectHash: "changed-project-hash" },
+      initial.runId,
+    )).rejects.toThrow("不能混用旧运行状态");
   });
 
   it("默认持续修复超过旧三次上限直到任务完成", async () => {
@@ -262,7 +293,7 @@ describe("QueueOrchestrator", () => {
       return completedBehavior(request);
     });
     const fixture = createFixture(new RecordingWorkspace(), agent);
-    const loaded = createLoadedManifest([{ id: "TASK-A" }]);
+    const loaded = createLoadedProject([{ id: "TASK-A" }]);
 
     const result = await fixture.orchestrator.start(loaded);
 
@@ -275,6 +306,7 @@ describe("QueueOrchestrator", () => {
       "repair",
       "repair",
       "repair",
+      "review",
     ]);
     expect(agent.requests.every((request) =>
       request.maxTurns === undefined && request.timeoutMs === undefined)).toBe(true);
@@ -282,11 +314,10 @@ describe("QueueOrchestrator", () => {
 
   it("恢复尚未初始化的 executing checkpoint 时创建全新会话", async () => {
     const fixture = createFixture();
-    const loaded = createLoadedManifest([{ id: "TASK-A" }]);
+    const loaded = createLoadedProject([{ id: "TASK-A" }]);
     const initial = createInitialRunState({
       runId: "run-prepared-only",
-      manifestPath: loaded.manifestPath,
-      manifestHash: loaded.manifestHash,
+      projectHash: loaded.projectHash,
       projectRoot: loaded.projectRoot,
       workspace: {
         repositoryRoot: "/project",
@@ -339,7 +370,7 @@ describe("QueueOrchestrator", () => {
           }
         : completedBehavior(request));
     const fixture = createFixture(new RecordingWorkspace(), agent);
-    const loaded = createLoadedManifest([
+    const loaded = createLoadedProject([
       { id: "TASK-A" },
       { id: "TASK-C", dependsOn: ["TASK-A"] },
       { id: "TASK-B" },
@@ -357,6 +388,7 @@ describe("QueueOrchestrator", () => {
     expect(fixture.workspace.commits).toEqual(["TASK-B"]);
     expect(agent.requests.map((request) => request.taskId)).toEqual([
       "TASK-A",
+      "TASK-B",
       "TASK-B",
     ]);
     expect(result.artifacts).toHaveLength(2);
@@ -379,17 +411,7 @@ describe("QueueOrchestrator", () => {
           }
         : completedBehavior(request));
     const fixture = createFixture(new RecordingWorkspace(), agent);
-    const base = createLoadedManifest([{ id: "TASK-A" }]);
-    const loaded = {
-      ...base,
-      manifest: {
-        ...base.manifest,
-        review: {
-          ...base.manifest.review,
-          enabled: true,
-        },
-      },
-    };
+    const loaded = createLoadedProject([{ id: "TASK-A" }]);
 
     const result = await fixture.orchestrator.start(loaded);
 
@@ -399,6 +421,10 @@ describe("QueueOrchestrator", () => {
       "review",
     ]);
     expect(agent.requests[1]?.access).toBe("read");
+    expect(agent.requests.map((request) => [request.model, request.effort])).toEqual([
+      ["sonnet", "high"],
+      ["sonnet", "high"],
+    ]);
     expect(agent.requests[1]?.sessionId).not.toBe(agent.requests[0]?.sessionId);
     expect(agent.requests[1]?.prompt).toContain("# 实际变更文件");
     expect(agent.requests[1]?.prompt).not.toContain("# 外部门禁结果");
