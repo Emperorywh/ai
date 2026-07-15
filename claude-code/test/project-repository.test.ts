@@ -1,6 +1,6 @@
 /*
- * 项目仓储测试在独立临时目录中验证固定模板、TASK 前置元数据和内容指纹。
- * 用例同时证明配置文件不会参与加载，项目结构与执行策略只有程序内一套事实源。
+ * 项目仓储测试在独立临时目录中验证唯一规格、TASK 前置元数据和内容指纹。
+ * 用例同时证明旧根目录文件与配置文件不会参与加载，项目结构只有程序内一套事实源。
  */
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -18,18 +18,16 @@ interface ProjectFixture {
 async function createProjectFixture(): Promise<ProjectFixture> {
   const root = await mkdtemp(join(tmpdir(), "claude-task-project-"));
   temporaryRoots.push(root);
-  await mkdir(join(root, "tasks"), { recursive: true });
+  await mkdir(join(root, "orchestration", "tasks"), { recursive: true });
 
   await Promise.all([
-    writeFile(join(root, "SPEC.md"), "# SPEC\n\n完整规格。\n", "utf8"),
-    writeFile(join(root, "PLAN.md"), "# PLAN\n\n开发计划。\n", "utf8"),
     writeFile(
-      join(root, "AGENTS.md"),
-      "# 项目约束\n\n领域层不依赖基础设施。\n",
+      join(root, "orchestration", "SPEC.md"),
+      "# SPEC\n\n完整规格与架构约束。\n",
       "utf8",
     ),
     writeFile(
-      join(root, "tasks", "TASK-001.md"),
+      join(root, "orchestration", "tasks", "TASK-001.md"),
       createTaskDocument({
         id: "TASK-001",
         title: "实现任务目录",
@@ -70,21 +68,17 @@ afterEach(async () => {
 });
 
 describe("FileProjectRepository", () => {
-  it("按固定项目结构加载上下文和完整 TASK 目录", async () => {
+  it("按集中式项目结构加载唯一规格和完整 TASK 目录", async () => {
     const fixture = await createProjectFixture();
     const loaded = await new FileProjectRepository().load(fixture.root);
 
     expect(loaded.projectRoot).toBe(resolve(fixture.root));
-    expect(loaded.contextDocuments.map((document) => document.path)).toEqual([
-      "SPEC.md",
-      "PLAN.md",
-      "AGENTS.md",
-    ]);
+    expect(loaded.specificationDocument.path).toBe("orchestration/SPEC.md");
     expect(loaded.tasks).toHaveLength(1);
     expect(loaded.tasks[0]).toMatchObject({
       id: "TASK-001",
       title: "实现任务目录",
-      file: "tasks/TASK-001.md",
+      file: "orchestration/tasks/TASK-001.md",
       dependsOn: [],
     });
     expect(loaded.projectHash).toMatch(/^[a-f0-9]{64}$/u);
@@ -96,7 +90,7 @@ describe("FileProjectRepository", () => {
   it("新增 TASK 文档后自动进入稳定 DAG，无需同步维护索引", async () => {
     const fixture = await createProjectFixture();
     await writeFile(
-      join(fixture.root, "tasks", "TASK-002.md"),
+      join(fixture.root, "orchestration", "tasks", "TASK-002.md"),
       createTaskDocument({
         id: "TASK-002",
         title: "消费任务目录",
@@ -111,23 +105,28 @@ describe("FileProjectRepository", () => {
     expect(loaded.taskDocuments.size).toBe(2);
   });
 
-  it("拒绝缺失的固定模板和文件名与 ID 漂移", async () => {
+  it("拒绝缺失的唯一规格、旧根目录 fallback 和文件名与 ID 漂移", async () => {
     const missingTemplateFixture = await createProjectFixture();
     const identityFixture = await createProjectFixture();
-    await rm(join(missingTemplateFixture.root, "AGENTS.md"));
+    await rm(join(missingTemplateFixture.root, "orchestration", "SPEC.md"));
+    await writeFile(
+      join(missingTemplateFixture.root, "SPEC.md"),
+      "# 旧根目录规格\n",
+      "utf8",
+    );
     const original = await readFile(
-      join(identityFixture.root, "tasks", "TASK-001.md"),
+      join(identityFixture.root, "orchestration", "tasks", "TASK-001.md"),
       "utf8",
     );
     await writeFile(
-      join(identityFixture.root, "tasks", "TASK-001.md"),
+      join(identityFixture.root, "orchestration", "tasks", "TASK-001.md"),
       original.replaceAll("TASK-001", "TASK-OTHER"),
       "utf8",
     );
     const repository = new FileProjectRepository();
 
     await expect(repository.load(missingTemplateFixture.root)).rejects.toThrow(
-      "AGENTS.md 无法读取",
+      "orchestration/SPEC.md 无法读取",
     );
     await expect(repository.load(identityFixture.root)).rejects.toThrow(
       "文件名必须与 id 一致",
@@ -137,7 +136,7 @@ describe("FileProjectRepository", () => {
   it("拒绝静态 status 和其他未知字段，运行状态不能污染任务定义", async () => {
     const fixture = await createProjectFixture();
     await writeFile(
-      join(fixture.root, "tasks", "TASK-001.md"),
+      join(fixture.root, "orchestration", "tasks", "TASK-001.md"),
       createTaskDocument({
         id: "TASK-001",
         title: "实现任务目录",
@@ -156,7 +155,12 @@ describe("FileProjectRepository", () => {
     const fixture = await createProjectFixture();
     const repository = new FileProjectRepository();
     const initial = await repository.load(fixture.root);
-    const taskPath = join(fixture.root, "tasks", "TASK-001.md");
+    const taskPath = join(
+      fixture.root,
+      "orchestration",
+      "tasks",
+      "TASK-001.md",
+    );
     const current = await readFile(taskPath, "utf8");
     await writeFile(taskPath, `${current}\n补充验收事实。\n`, "utf8");
 
@@ -168,12 +172,45 @@ describe("FileProjectRepository", () => {
     );
   });
 
+  it("唯一规格变化会使全部 TASK 完成契约失效", async () => {
+    const fixture = await createProjectFixture();
+    await writeFile(
+      join(fixture.root, "orchestration", "tasks", "TASK-002.md"),
+      createTaskDocument({
+        id: "TASK-002",
+        title: "实现第二个独立任务",
+        dependsOn: [],
+      }),
+      "utf8",
+    );
+    const repository = new FileProjectRepository();
+    const initial = await repository.load(fixture.root);
+
+    /*
+     * SPEC 是所有 TASK 共享的完成定义输入，规格变化必须确定性地使全部历史证据失效。
+     * 测试使用两个独立任务，避免只验证单任务时遗漏契约哈希的批量传播语义。
+     */
+    await writeFile(
+      join(fixture.root, "orchestration", "SPEC.md"),
+      "# SPEC\n\n变更后的完整规格与架构约束。\n",
+      "utf8",
+    );
+    const changed = await repository.load(fixture.root);
+
+    expect(changed.projectHash).not.toBe(initial.projectHash);
+    for (const taskId of ["TASK-001", "TASK-002"]) {
+      expect(changed.taskContractHashes.get(taskId)).not.toBe(
+        initial.taskContractHashes.get(taskId),
+      );
+    }
+  });
+
   it("单任务资源熔断变化不让已完成任务契约失效", async () => {
     const fixture = await createProjectFixture();
     const repository = new FileProjectRepository();
     const initial = await repository.load(fixture.root);
     await writeFile(
-      join(fixture.root, "tasks", "TASK-001.md"),
+      join(fixture.root, "orchestration", "tasks", "TASK-001.md"),
       createTaskDocument({
         id: "TASK-001",
         title: "实现任务目录",
@@ -218,7 +255,7 @@ describe("FileProjectRepository", () => {
      * 测试同时写入两类旧字段，避免未来只恢复其中一半形成不可推导的灰度行为。
      */
     await writeFile(
-      join(fixture.root, "tasks", "TASK-001.md"),
+      join(fixture.root, "orchestration", "tasks", "TASK-001.md"),
       createTaskDocument({
         id: "TASK-001",
         title: "实现任务目录",

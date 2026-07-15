@@ -33,28 +33,33 @@ describe("writeSampleProject", () => {
 
     const result = await writeSampleProject(root);
 
-    expect(result.createdFiles).toHaveLength(4);
+    expect(result.createdFiles).toHaveLength(2);
     expect(result.skippedFiles).toEqual([]);
     await expect(access(join(root, "orchestrator.yaml"))).rejects.toMatchObject({
       code: "ENOENT",
     });
-    await expect(access(join(root, "tasks", "TASK-001.md"))).resolves.toBeUndefined();
+    await expect(
+      access(join(root, "orchestration", "tasks", "TASK-001.md")),
+    ).resolves.toBeUndefined();
     /*
-     * 初始化成功不仅代表文件存在，固定模板还必须能被生产仓储完整加载。
+     * 初始化成功不仅代表文件存在，集中式目录还必须能被生产仓储完整加载。
      * 该断言防止初始化器与严格项目契约在后续演进中形成两套不兼容结构。
      */
     const loaded = await new FileProjectRepository().load(root);
     expect(loaded.tasks.map((task) => task.id)).toEqual(["TASK-001"]);
-    expect(loaded.contextDocuments.map((document) => document.path)).toEqual([
-      "SPEC.md",
-      "PLAN.md",
-      "AGENTS.md",
-    ]);
+    expect(loaded.specificationDocument.path).toBe("orchestration/SPEC.md");
+    await expect(access(join(root, "PLAN.md"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await expect(access(join(root, "AGENTS.md"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
   });
 
   it("保留已有普通文件并使重复初始化稳定收敛", async () => {
     const root = await createTemporaryRoot();
-    const existingPath = join(root, "SPEC.md");
+    await mkdir(join(root, "orchestration"), { recursive: true });
+    const existingPath = join(root, "orchestration", "SPEC.md");
     await writeFile(existingPath, "existing specification\n", "utf8");
     const before = await stat(existingPath);
 
@@ -63,23 +68,30 @@ describe("writeSampleProject", () => {
     const second = await writeSampleProject(root);
     const afterSecond = await stat(existingPath);
 
-    expect(first.createdFiles).toHaveLength(3);
+    expect(first.createdFiles).toHaveLength(1);
     expect(first.skippedFiles).toEqual([existingPath]);
     expect(second.createdFiles).toEqual([]);
-    expect(second.skippedFiles).toHaveLength(4);
+    expect(second.skippedFiles).toHaveLength(2);
     expect(afterFirst.size).toBe(before.size);
     expect(afterSecond.size).toBe(before.size);
   });
 
   it("同名路径不是普通文件时回滚本次创建内容", async () => {
     const root = await createTemporaryRoot();
-    const conflictingPath = join(root, "SPEC.md");
-    await mkdir(conflictingPath);
+    const conflictingPath = join(
+      root,
+      "orchestration",
+      "tasks",
+      "TASK-001.md",
+    );
+    await mkdir(conflictingPath, { recursive: true });
 
     await expect(writeSampleProject(root)).rejects.toThrow(
       "目标路径已存在且不是普通文件",
     );
-    await expect(access(join(root, "PLAN.md"))).rejects.toMatchObject({
+    await expect(
+      access(join(root, "orchestration", "SPEC.md")),
+    ).rejects.toMatchObject({
       code: "ENOENT",
     });
     const conflictingMetadata = await lstat(conflictingPath);

@@ -11,7 +11,7 @@ import type {
 export interface TaskContractHashInput {
   readonly task: TaskDefinition;
   readonly taskDocument: TextDocument;
-  readonly contextDocuments: readonly TextDocument[];
+  readonly specificationDocument: TextDocument;
 }
 
 export interface DependencyCompletion {
@@ -27,10 +27,10 @@ export interface DependencyCompletion {
 export function createTaskContractHash(input: TaskContractHashInput): string {
   const contract = {
     /*
-     * 第三版完成契约移除外部配置输入，并固定使用独立审核流程。
-     * 显式换代确保旧配置体系产生的提交证据不会在新执行模型下被错误复用。
+     * 第四版完成契约把唯一规格与 TASK 集中到 orchestration 目录，并移除多上下文文件模型。
+     * 显式换代确保旧目录结构产生的提交证据不会在新执行模型下被错误复用。
      */
-    version: 3,
+    version: 4,
     task: {
       id: input.task.id,
       title: input.task.title,
@@ -40,12 +40,10 @@ export function createTaskContractHash(input: TaskContractHashInput): string {
       body: extractTaskBody(input.taskDocument.content),
     },
     reviewRequired: true,
-    contextDocuments: [...input.contextDocuments]
-      .sort((left, right) => compareText(left.path, right.path))
-      .map((document) => ({
-        path: document.path,
-        content: document.content,
-      })),
+    specification: {
+      path: input.specificationDocument.path,
+      content: input.specificationDocument.content,
+    },
   };
   return createHash("sha256")
     .update(JSON.stringify(contract))
@@ -72,8 +70,4 @@ export function createDependencyCompletionFingerprint(
 function extractTaskBody(content: string): string {
   const metadata = /^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/u.exec(content);
   return metadata === null ? content : content.slice(metadata[0].length);
-}
-
-function compareText(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
 }

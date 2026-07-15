@@ -5,7 +5,7 @@
 ## 执行模型
 
 ```text
-固定项目结构
+集中式编排目录
   + TASK 目录（唯一任务事实源）
   → 严格元数据校验与稳定 DAG
   → 核验当前 HEAD 中的任务完成证据
@@ -48,26 +48,23 @@ pnpm build
 pnpm start init .
 ```
 
-初始化器增量创建：
+初始化器只增量创建静态编排输入：
 
-- `SPEC.md`
-- `PLAN.md`
-- `AGENTS.md`
-- `tasks/TASK-001.md`
+- `orchestration/SPEC.md`
+- `orchestration/tasks/TASK-001.md`
 
-已有普通文件不会被覆盖；路径类型冲突会回滚本次新建文件。
+`SPEC.md` 是唯一项目级上下文，规格、架构和执行约束都在其中维护。初始化器不创建 `PLAN.md`、`AGENTS.md` 或 `PROGRESS.md`；已有普通文件不会被覆盖，路径类型冲突会回滚本次新建文件。
 
 ## 固定项目约定
 
-编排器不读取项目级配置文件，也不支持通过 CLI、环境变量或 TASK 覆盖系统策略。所有命令以当前工作目录为项目根，并固定加载：
+编排器不读取项目级配置文件，也不支持通过 CLI、环境变量或 TASK 覆盖系统策略。所有命令以当前工作目录为项目根，并固定加载唯一编排目录：
 
 ```text
 <project-root>/
-  SPEC.md
-  PLAN.md
-  AGENTS.md
-  tasks/
-    <task-id>.md
+  orchestration/
+    SPEC.md
+    tasks/
+      <task-id>.md
 ```
 
 系统固定使用 `sonnet/high` Worker、`sonnet/high` 只读 Reviewer 和 `task` Git 提交前缀。实现失败与审核意见默认持续进入 repair，直到通过、真正阻塞或收到外部中断。
@@ -76,7 +73,7 @@ TASK 可通过 `maxAttempts` 和 `timeoutMinutes` 声明单任务熔断。这两
 
 ## TASK 文档
 
-文件名必须严格等于 `<id>.md`，首个一级标题必须为 `# <id> — <title>`：
+`orchestration/tasks` 中的文件名必须严格等于 `<id>.md`，首个一级标题必须为 `# <id> — <title>`：
 
 ```markdown
 ---
@@ -110,7 +107,7 @@ manualAcceptance:
 ## 命令
 
 ```powershell
-# 只校验固定模板、完整任务目录、文档和 DAG
+# 只校验唯一规格、完整任务目录、文档和 DAG
 pnpm start validate
 
 # 新建运行；核验并复用当前 HEAD 中仍然有效的 TASK 完成证据

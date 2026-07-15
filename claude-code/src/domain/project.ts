@@ -1,21 +1,20 @@
 /*
- * 项目结构是编排器唯一支持的目录契约，不从文件、环境变量或命令行读取可变配置。
+ * 编排输入集中在唯一的 orchestration 目录中，不从文件、环境变量或命令行读取可变路径。
  * 初始化器与项目仓储共享同一组路径，保证生成模板和运行时加载不会形成两套约定。
  */
 import { z } from "zod";
 
-export const PROJECT_STRUCTURE = Object.freeze({
-  specification: "SPEC.md",
-  plan: "PLAN.md",
-  agentInstructions: "AGENTS.md",
-  taskDirectory: "tasks",
-});
+const ORCHESTRATION_DIRECTORY = "orchestration";
 
-export const PROJECT_CONTEXT_FILES = Object.freeze([
-  PROJECT_STRUCTURE.specification,
-  PROJECT_STRUCTURE.plan,
-  PROJECT_STRUCTURE.agentInstructions,
-]);
+/*
+ * SPEC 是唯一项目级上下文，TASK 是可独立调度的执行单元。
+ * 路径在领域层集中声明，基础设施只能消费该契约，不能自行拼接另一套目录结构。
+ */
+export const PROJECT_STRUCTURE = Object.freeze({
+  orchestrationDirectory: ORCHESTRATION_DIRECTORY,
+  specification: `${ORCHESTRATION_DIRECTORY}/SPEC.md`,
+  taskDirectory: `${ORCHESTRATION_DIRECTORY}/tasks`,
+});
 
 const nonEmptyString = z.string().trim().min(1);
 
@@ -46,7 +45,7 @@ export interface TextDocument {
 
 /*
  * LoadedProject 是文件系统项目经过严格校验后的不可变运行输入。
- * 应用层只消费该结构，不感知模板文件读取、Markdown 元数据解析或哈希实现细节。
+ * 单数 specificationDocument 明确表达唯一上下文事实源，避免重新引入可选策略文件集合。
  */
 export interface LoadedProject {
   readonly tasks: readonly TaskDefinition[];
@@ -54,7 +53,7 @@ export interface LoadedProject {
   readonly projectHash: string;
   readonly taskDocuments: ReadonlyMap<string, TextDocument>;
   readonly taskContractHashes: ReadonlyMap<string, string>;
-  readonly contextDocuments: readonly TextDocument[];
+  readonly specificationDocument: TextDocument;
 }
 
 export function getTaskAttemptLimit(

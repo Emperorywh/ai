@@ -263,7 +263,7 @@ describe("QueueOrchestrator", () => {
     await fixture.stateStore.save(initial);
 
     /*
-     * 恢复只绑定固定项目模板和 TASK 内容哈希，不再依赖任何外部配置文件身份。
+     * 恢复只绑定唯一规格和 TASK 内容哈希，不再依赖任何外部配置文件身份。
      * 任一项目事实变化都必须创建新 Run，避免新上下文与旧 checkpoint 混用。
      */
     await expect(fixture.orchestrator.resume(

@@ -69,7 +69,7 @@ function createTask(id: string): TaskDefinition {
   return {
     id,
     title: "实现候选提交",
-    file: `tasks/${id}.md`,
+    file: `orchestration/tasks/${id}.md`,
     dependsOn: [],
     manualAcceptance: [],
   };

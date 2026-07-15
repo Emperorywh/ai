@@ -1,5 +1,5 @@
 /*
- * 初始化器在现有项目中增量生成最小契约骨架：同名普通文件保持原样，只补齐缺失文件。
+ * 初始化器在现有项目中增量生成集中式编排骨架：同名普通文件保持原样，只补齐缺失文件。
  * 路径类型冲突或写入异常会回滚本次新建内容，用户已有文件始终不进入回滚集合。
  */
 import { lstat, mkdir, unlink, writeFile } from "node:fs/promises";
@@ -8,21 +8,17 @@ import { ConfigurationError } from "../domain/errors.js";
 import { PROJECT_STRUCTURE } from "../domain/project.js";
 
 /*
- * 初始化器只生成固定项目结构所需的上下文和任务模板，不创建任何配置文件。
+ * 初始化器只生成 orchestration/SPEC.md 和首个 TASK，不创建配置、计划或进度文件。
  * 新任务只新增一个 Markdown 文档，运行时会自动扫描目录，从结构上消除登记遗漏。
  */
 const SAMPLE_FILES: Readonly<Record<string, string>> = {
   [PROJECT_STRUCTURE.specification]: `# 规格说明
 
 请将已经审核通过的完整规格说明放在这里。
-`,
-  [PROJECT_STRUCTURE.plan]: `# 开发计划
 
-请记录任务依赖、模块边界、数据流和状态流。
-`,
-  [PROJECT_STRUCTURE.agentInstructions]: `# 项目约束
+## 架构与执行约束
 
-请记录所有 Worker 都必须遵守的架构、编码和测试约束。
+请记录模块边界、数据流、状态流，以及所有 Worker 必须遵守的编码和测试约束。
 `,
   [`${PROJECT_STRUCTURE.taskDirectory}/TASK-001.md`]: `---
 id: TASK-001

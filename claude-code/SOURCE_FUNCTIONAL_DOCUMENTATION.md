@@ -21,7 +21,7 @@
 
 ### 2.1 领域层
 
-- `domain/project.ts`：固定项目结构、TASK 元数据与加载后契约。
+- `domain/project.ts`：集中式编排目录、TASK 元数据与加载后契约。
 - `domain/dag.ts`：依赖合法性和稳定拓扑排序。
 - `domain/run-state.ts`：Run/TASK 状态、合法转换与状态 Schema。
 - `domain/task-completion.ts`：任务契约指纹和依赖完成指纹。
@@ -46,7 +46,7 @@
 - `ports/agent-executor.ts`：自主 Worker/只读 Reviewer 执行边界。
 - `ports/workspace.ts`：候选捕获、归档、提交、历史证据和仓库身份。
 - `ports/state-store.ts`：RunState 和运行产物。
-- `ports/project-repository.ts`：按固定根目录加载项目上下文与 TASK 的边界。
+- `ports/project-repository.ts`：加载唯一规格与完整 TASK 集合的边界。
 - `ports/run-lock.ts`：项目级单实例锁。
 - `ports/event-logger.ts`、`clock.ts`、`time-formatter.ts`：观察与时间边界。
 
@@ -56,7 +56,7 @@
 
 - `infrastructure/claude/claude-agent-sdk-executor.ts`：Claude Agent SDK 消息流、结构化输出、中止和资源熔断。
 - `infrastructure/git/git-workspace.ts`：候选指纹、隔离归档、原子提交和完成历史。
-- `infrastructure/tasks/file-project-repository.ts`：固定项目模板与 TASK Markdown 编译。
+- `infrastructure/tasks/file-project-repository.ts`：唯一规格与 TASK Markdown 编译。
 - `infrastructure/persistence/*`：原子文件状态库与独占锁。
 - `infrastructure/logging/*`：控制台和 JSONL 事件。
 
@@ -64,20 +64,19 @@
 
 ## 3. 固定项目与执行契约
 
-所有命令以当前工作目录为项目根，只加载以下固定结构：
+所有命令以当前工作目录为项目根，只加载以下集中式结构：
 
 ```text
 <project-root>/
-  SPEC.md
-  PLAN.md
-  AGENTS.md
-  tasks/
-    <task-id>.md
+  orchestration/
+    SPEC.md
+    tasks/
+      <task-id>.md
 ```
 
-系统不读取任何项目级 YAML、JSON、环境变量或 CLI 配置。Worker 固定使用 `sonnet/high`，Reviewer 固定使用全新 `sonnet/high` 只读会话，Git 提交前缀固定为 `task`。
+`orchestration/SPEC.md` 是唯一项目级上下文，统一承载规格、架构与执行约束。系统不读取 `PLAN.md`、`AGENTS.md`、`PROGRESS.md` 或任何项目级 YAML、JSON、环境变量、CLI 配置。Worker 固定使用 `sonnet/high`，Reviewer 固定使用全新 `sonnet/high` 只读会话，Git 提交前缀固定为 `task`。
 
-项目结构约定集中在 `domain/project.ts`，执行策略集中在 `application/orchestrator-policy.ts`。初始化器和运行时分别复用这两个单一事实源，不在调用点散落路径或策略常量。
+项目结构约定集中在 `domain/project.ts`，执行策略集中在 `application/orchestrator-policy.ts`。初始化器和运行时分别复用这两个单一事实源，不在调用点散落路径或策略常量，也不提供旧根目录 fallback。
 
 ## 4. TASK 文档契约
 
@@ -98,7 +97,7 @@ manualAcceptance:
 
 `maxAttempts` 和 `timeoutMinutes` 可以省略。`status`、`scope`、`gates` 以及其他未知字段会被严格 Schema 拒绝。
 
-TASK 目录是唯一任务事实源。仓储加载所有 Markdown 文件后再执行 DAG 校验，不存在配置索引与目录内容漂移的问题。
+`orchestration/tasks` 是唯一任务事实源。仓储加载其中所有 Markdown 文件后再执行 DAG 校验，不存在配置索引与目录内容漂移的问题。
 
 ## 5. Run 启动与队列推进
 
@@ -231,7 +230,7 @@ Worker 返回 `completed` 后，应用层立即调用 `Workspace.captureCandidat
 3. 所有直接依赖均已复用；
 4. 依赖完成提交指纹相同。
 
-任务正文、人工验收或项目上下文变化会使完成证据失效。TASK 的超时和重试次数只影响执行资源，不改变完成定义；Reviewer 属于不可关闭的系统契约。
+任务正文、人工验收或唯一 SPEC 变化会使完成证据失效。完成契约版本为 v4，旧目录结构产生的证据不会被复用。TASK 的超时和重试次数只影响执行资源，不改变完成定义；Reviewer 属于不可关闭的系统契约。
 
 `--fresh` 只禁止本次 Run 复用，不删除历史。
 
@@ -286,7 +285,7 @@ blocked/failed TASK 的未提交候选会写入确定性的 `refs/claude-task-or
 
 测试覆盖：
 
-- 固定模板加载、配置文件忽略和 TASK 严格解析；
+- 集中式目录加载、旧路径拒绝、配置文件忽略和 TASK 严格解析；
 - 稳定 DAG、依赖传播和单并发；
 - Worker 完整工具能力且不注入路径 Hook；
 - 实现、审核、repair、阻塞和恢复状态流；

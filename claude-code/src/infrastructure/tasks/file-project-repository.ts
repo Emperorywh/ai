@@ -1,5 +1,5 @@
 /*
- * 文件项目仓储把固定项目模板与 TASK 目录编译成完整、稳定的运行契约。
+ * 文件项目仓储把唯一规格文档与完整 TASK 目录编译成稳定的运行契约。
  * 每个 Markdown 文件既是任务正文也是机器元数据来源，目录中的任务不会被静默遗漏。
  */
 import { createHash } from "node:crypto";
@@ -9,7 +9,6 @@ import { parse } from "yaml";
 import { createStableTaskOrder } from "../../domain/dag.js";
 import { ConfigurationError } from "../../domain/errors.js";
 import {
-  PROJECT_CONTEXT_FILES,
   PROJECT_STRUCTURE,
   taskDefinitionSchema,
   taskDocumentMetadataSchema,
@@ -30,9 +29,13 @@ export class FileProjectRepository implements ProjectRepository {
     const absoluteProjectRoot = resolve(projectRoot);
     await this.assertDirectory(absoluteProjectRoot);
 
-    const contextDocuments = await Promise.all(
-      PROJECT_CONTEXT_FILES.map((path) =>
-        this.loadDocument(absoluteProjectRoot, path)),
+    /*
+     * 规格文档是唯一项目级上下文，加载失败必须立即终止。
+     * 这里不保留空集合或额外策略文件 fallback，保证提示词和契约哈希共享同一事实源。
+     */
+    const specificationDocument = await this.loadDocument(
+      absoluteProjectRoot,
+      PROJECT_STRUCTURE.specification,
     );
     const taskEntries = await this.loadTaskDocuments(absoluteProjectRoot);
     const tasks = createStableTaskOrder(taskEntries.map((entry) => entry.task));
@@ -53,7 +56,7 @@ export class FileProjectRepository implements ProjectRepository {
         createTaskContractHash({
           task,
           taskDocument,
-          contextDocuments,
+          specificationDocument,
         }),
       ] as const;
     }));
@@ -62,12 +65,12 @@ export class FileProjectRepository implements ProjectRepository {
       tasks,
       projectRoot: absoluteProjectRoot,
       projectHash: this.createContentHash(
-        contextDocuments,
+        specificationDocument,
         taskEntries.map((entry) => entry.document),
       ),
       taskDocuments,
       taskContractHashes,
-      contextDocuments,
+      specificationDocument,
     };
   }
 
@@ -192,11 +195,15 @@ export class FileProjectRepository implements ProjectRepository {
   }
 
   private createContentHash(
-    contextDocuments: readonly TextDocument[],
+    specificationDocument: TextDocument,
     taskDocuments: readonly TextDocument[],
   ): string {
     const hash = createHash("sha256");
-    for (const document of [...contextDocuments, ...taskDocuments]) {
+    /*
+     * 项目快照先绑定唯一规格，再按稳定文件名顺序绑定所有任务。
+     * 显式顺序让恢复判断不依赖文件系统枚举行为，也不会混入运行状态文件。
+     */
+    for (const document of [specificationDocument, ...taskDocuments]) {
       hash.update(document.path);
       hash.update("\0");
       hash.update(document.content);

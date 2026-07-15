@@ -1,6 +1,6 @@
 /*
  * 所有提示词在一个模块中组装，确保实现、修复和审核共享同一组不可变边界。
- * 上下文按“项目策略、规格、任务、失败反馈”分区，便于人和 AI 快速推导信息来源。
+ * 上下文按“规格、任务、失败反馈”分区，唯一事实来源让人和 AI 都能快速推导约束来源。
  */
 import type {
   LoadedProject,
@@ -18,7 +18,7 @@ const writeSafetyRules = `
 
 const reviewSafetyRules = `
 你是全新、只读的独立审核会话。不得修改任何文件，不得调用其他 Agent。
-依据 SPEC、PLAN、TASK、实际代码和当前 Git diff 判断正确性，不得只复述实现者结论。
+依据 SPEC、TASK、实际代码和当前 Git diff 判断正确性，不得只复述实现者结论。
 重点检查架构边界、数据流、状态流、边界条件、回归风险和测试缺口。
 `;
 
@@ -31,7 +31,7 @@ export class PromptBuilder {
       "# 执行目标",
       `实现 TASK ${task.id}：${task.title}`,
       writeSafetyRules,
-      this.renderProjectContext(loaded.contextDocuments),
+      this.renderSpecification(loaded.specificationDocument),
       this.renderTaskContext(loaded, task),
       "完成修改后返回结构化结果。若存在无法从现有文档推导的关键决策，返回 blocked。",
     ].join("\n\n");
@@ -46,7 +46,7 @@ export class PromptBuilder {
       "# 修复目标",
       `修复 TASK ${task.id} 当前工作区中的未完成实现：${task.title}`,
       writeSafetyRules,
-      this.renderProjectContext(loaded.contextDocuments),
+      this.renderSpecification(loaded.specificationDocument),
       this.renderTaskContext(loaded, task),
       "# 上一轮客观反馈",
       feedback,
@@ -78,7 +78,7 @@ export class PromptBuilder {
       "# 审核目标",
       `审核 TASK ${task.id}：${task.title}`,
       reviewSafetyRules,
-      this.renderProjectContext(loaded.contextDocuments),
+      this.renderSpecification(loaded.specificationDocument),
       this.renderTaskContext(loaded, task),
       "# 实际变更文件",
       changedFiles.map((file) => `- ${file}`).join("\n"),
@@ -88,15 +88,15 @@ export class PromptBuilder {
     ].join("\n\n");
   }
 
-  private renderProjectContext(documents: readonly TextDocument[]): string {
-    if (documents.length === 0) {
-      return "# 项目策略\n未声明额外项目策略文件。";
-    }
-
+  /*
+   * SPEC 是不可缺省的项目级上下文，加载器已经保证其存在且非空。
+   * 提示词层只负责渲染，不提供空规格 fallback，也不重新解释文件发现规则。
+   */
+  private renderSpecification(document: TextDocument): string {
     return [
-      "# 项目策略",
-      ...documents.map((document) =>
-        `## ${document.path}\n\n${document.content}`),
+      "# 项目规格",
+      `来源：${document.path}`,
+      document.content,
     ].join("\n\n");
   }
 

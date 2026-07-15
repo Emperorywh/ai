@@ -17,7 +17,7 @@ function createTask(
   return {
     id,
     title: `任务 ${id}`,
-    file: `tasks/${id}.md`,
+    file: `orchestration/tasks/${id}.md`,
     dependsOn: [...dependsOn],
     manualAcceptance: [],
   };

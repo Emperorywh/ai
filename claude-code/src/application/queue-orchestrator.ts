@@ -379,7 +379,7 @@ export class QueueOrchestrator {
   ): void {
     if (state.projectHash !== loaded.projectHash) {
       throw new ConfigurationError(
-        "SPEC、PLAN、AGENTS 或 TASK 已变化，不能混用旧运行状态。请创建新运行。",
+        "orchestration/SPEC.md 或 TASK 已变化，不能混用旧运行状态。请创建新运行。",
       );
     }
     if (state.projectRoot !== loaded.projectRoot) {

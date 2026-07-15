@@ -4,6 +4,7 @@
  */
 import type { AgentRunOutcome } from "../../src/domain/agent-result.js";
 import {
+  PROJECT_STRUCTURE,
   taskDefinitionSchema,
   type LoadedProject,
   type TaskDefinition,
@@ -223,10 +224,18 @@ export function createLoadedProject(
     contractRevision?: string;
   }[],
 ): LoadedProject {
+  /*
+   * 应用层夹具同样提供唯一规格文档，避免测试通过空上下文绕过生产不变量。
+   * 所有任务契约共享该规格，contractRevision 仍只用于控制单个 TASK 的局部变化。
+   */
+  const specificationDocument = {
+    path: PROJECT_STRUCTURE.specification,
+    content: "# 规格说明\n\n测试项目规格。\n",
+  };
   const tasks = taskInputs.map((input) => taskDefinitionSchema.parse({
       id: input.id,
       title: input.id,
-      file: `tasks/${input.id}.md`,
+      file: `${PROJECT_STRUCTURE.taskDirectory}/${input.id}.md`,
       dependsOn: input.dependsOn ?? [],
       manualAcceptance: [],
     }));
@@ -253,7 +262,7 @@ export function createLoadedProject(
       createTaskContractHash({
         task,
         taskDocument,
-        contextDocuments: [],
+        specificationDocument,
       }),
     ] as const;
   }));
@@ -264,7 +273,7 @@ export function createLoadedProject(
     projectHash: "project-hash",
     taskDocuments,
     taskContractHashes,
-    contextDocuments: [],
+    specificationDocument,
   };
 }
 

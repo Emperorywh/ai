@@ -37,7 +37,7 @@ const program = new Command()
 
 program
   .command("init")
-  .description("增量生成固定项目模板，保留并跳过已有普通文件")
+  .description("增量生成集中式编排目录，保留并跳过已有普通文件")
   .argument("[directory]", "目标项目目录", ".")
   .action(async (directory: string) => {
     const result = await writeSampleProject(directory);
@@ -46,7 +46,7 @@ program
 
 program
   .command("validate")
-  .description("校验固定项目模板、完整 TASK 目录和任务 DAG")
+  .description("校验唯一规格、完整 TASK 目录和任务 DAG")
   .action(async () => {
     const loaded = await loadProject(PROJECT_ROOT);
     process.stdout.write([
