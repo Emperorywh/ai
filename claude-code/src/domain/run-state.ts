@@ -71,6 +71,17 @@ export interface CandidateArchiveState {
   readonly archivedAt: string;
 }
 
+/*
+ * 完成证据说明本次 Run 是实际执行了任务，还是复用了 Git 历史中的有效完成提交。
+ * 契约与依赖指纹仍以提交 trailer 为项目级事实，本字段只是便于状态展示和运行审计的投影。
+ */
+export interface TaskCompletionState {
+  readonly origin: "executed" | "reused";
+  readonly evidenceRunId: string;
+  readonly contractHash: string;
+  readonly dependencyFingerprint: string;
+}
+
 export interface TaskRunState {
   readonly taskId: string;
   readonly status: TaskStatus;
@@ -82,6 +93,7 @@ export interface TaskRunState {
   readonly reviewSessionId?: string | undefined;
   readonly reviewSummary?: string | undefined;
   readonly commitSha?: string | undefined;
+  readonly completion?: TaskCompletionState | undefined;
   readonly failureReason?: string | undefined;
   readonly candidateArchive?: CandidateArchiveState | undefined;
   readonly updatedAt: string;
@@ -155,6 +167,13 @@ const candidateArchiveStateSchema = z.object({
   archivedAt: z.string(),
 }).strict();
 
+const taskCompletionStateSchema = z.object({
+  origin: z.enum(["executed", "reused"]),
+  evidenceRunId: z.string(),
+  contractHash: z.string(),
+  dependencyFingerprint: z.string(),
+}).strict();
+
 const taskRunStateSchema = z.object({
   taskId: z.string(),
   status: z.enum(taskStatuses),
@@ -166,6 +185,7 @@ const taskRunStateSchema = z.object({
   reviewSessionId: z.uuid().optional(),
   reviewSummary: z.string().optional(),
   commitSha: z.string().optional(),
+  completion: taskCompletionStateSchema.optional(),
   failureReason: z.string().optional(),
   candidateArchive: candidateArchiveStateSchema.optional(),
   updatedAt: z.string(),
@@ -208,22 +228,36 @@ export function createInitialRunState(input: {
   manifestHash: string;
   projectRoot: string;
   workspace: RunWorkspaceState;
-  taskIds: readonly string[];
+  tasks: readonly InitialTaskRunState[];
   now: string;
 }): RunState {
-  const tasks = Object.fromEntries(
-    input.taskIds.map((taskId) => [
-      taskId,
-      {
-        taskId,
-        status: "pending" as const,
-        attempts: [],
-        gateRuns: [],
-        reviewAttempts: 0,
-        updatedAt: input.now,
-      },
-    ]),
-  );
+  /*
+   * 显式构造 Record，避免 Object.fromEntries 把 pending/reused 联合类型退化为 any。
+   * 每个初始任务只有两种可推导状态：没有证据时 pending，有核验证据时 completed/reused。
+   */
+  const tasks: Record<string, TaskRunState> = {};
+  for (const task of input.tasks) {
+    const shared = {
+      taskId: task.taskId,
+      attempts: [],
+      gateRuns: [],
+      reviewAttempts: 0,
+      updatedAt: input.now,
+    };
+    tasks[task.taskId] = task.reusedCompletion === undefined
+      ? { ...shared, status: "pending" }
+      : {
+          ...shared,
+          status: "completed",
+          commitSha: task.reusedCompletion.commitSha,
+          completion: {
+            origin: "reused",
+            evidenceRunId: task.reusedCompletion.evidenceRunId,
+            contractHash: task.reusedCompletion.contractHash,
+            dependencyFingerprint: task.reusedCompletion.dependencyFingerprint,
+          },
+        };
+  }
 
   return {
     version: 2,
@@ -237,6 +271,20 @@ export function createInitialRunState(input: {
     updatedAt: input.now,
     tasks,
   };
+}
+
+/*
+ * 新 Run 的任务种子只接受 pending 或已经由进度协调器核验的复用证据。
+ * 领域状态构造器不读取 Git，避免把基础设施判断隐式藏进状态初始化过程。
+ */
+export interface InitialTaskRunState {
+  readonly taskId: string;
+  readonly reusedCompletion?: {
+    readonly commitSha: string;
+    readonly evidenceRunId: string;
+    readonly contractHash: string;
+    readonly dependencyFingerprint: string;
+  } | undefined;
 }
 
 export function replaceExpectedHead(

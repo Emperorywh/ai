@@ -25,9 +25,11 @@ import {
   type RetryContext,
   type RunState,
   type TaskAttemptState,
+  type TaskCompletionState,
   type TaskRunState,
   type TaskStatus,
 } from "../domain/run-state.js";
+import { createDependencyCompletionFingerprint } from "../domain/task-completion.js";
 import type { AgentExecutor } from "../ports/agent-executor.js";
 import type { Clock } from "../ports/clock.js";
 import type { GateRunner } from "../ports/gate-runner.js";
@@ -307,14 +309,10 @@ export class TaskExecutionService {
     if (auditFailure !== undefined) {
       return this.blockTask(input, auditFailure);
     }
-    if (beforeAudit.changedFiles.length === 0) {
-      return this.retryOrFail(input, input.state, {
-        kind: "repair",
-        reason: "没有文件变更",
-        feedback: "实现会话没有产生任何文件变更，请重新检查 TASK 并完成实现。",
-      });
-    }
-
+    /*
+     * 没有候选差异不等于任务未完成：--fresh 或人工预先实现时，现有代码可能已经满足契约。
+     * 空候选仍必须经过完整门禁与独立审核，最终由空提交记录新的可复用完成证据。
+     */
     const candidateBeforeGates = await this.workspace.captureCandidate();
     const startedAt = this.now();
     const verification = await this.workspace.openVerificationWorkspace({
@@ -720,6 +718,7 @@ export class TaskExecutionService {
     if (taskState?.candidateFingerprint === undefined) {
       return this.blockTask(input, "提交阶段缺少门禁候选指纹");
     }
+    const completion = this.createCompletionState(input);
     const existingCommit = await this.workspace.findTaskCommit(
       {
         runId: input.state.runId,
@@ -745,7 +744,7 @@ export class TaskExecutionService {
         input.task.id,
         "completed",
         this.now(),
-        { commitSha: existingCommit },
+        { commitSha: existingCommit, completion },
       );
       return {
         state: replaceExpectedHead(completed, existingCommit, this.now()),
@@ -758,12 +757,17 @@ export class TaskExecutionService {
       input.loaded.protectedPaths,
     );
     const auditFailure = this.describeAuditFailure(audit);
-    if (auditFailure !== undefined || audit.changedFiles.length === 0) {
+    if (auditFailure !== undefined) {
       return this.blockTask(
         input,
-        auditFailure ?? "提交前没有文件变更",
+        auditFailure,
       );
     }
+
+    /*
+     * 提交阶段不再重复要求非空 diff；门禁和审核已经验证当前项目状态满足 TASK。
+     * 空候选仍受同一指纹校验约束，并由 Workspace 生成只承载完成证据的空提交。
+     */
 
     const candidate = await this.workspace.captureCandidate();
     if (candidate.fingerprint !== taskState.candidateFingerprint) {
@@ -779,17 +783,43 @@ export class TaskExecutionService {
       messagePrefix: input.loaded.manifest.git.commitMessagePrefix,
       expectedHead: input.state.workspace.expectedHead,
       expectedFingerprint: taskState.candidateFingerprint,
+      taskContractHash: completion.contractHash,
+      dependencyFingerprint: completion.dependencyFingerprint,
     });
     const completed = transitionTask(
       input.state,
       input.task.id,
       "completed",
       this.now(),
-      { commitSha },
+      { commitSha, completion },
     );
     return {
       state: replaceExpectedHead(completed, commitSha, this.now()),
       message: `任务已提交：${commitSha}`,
+    };
+  }
+
+  /*
+   * 完成提交绑定当前 TASK 契约与所有直接依赖的具体提交，形成可沿 DAG 推导的验证链。
+   * 缺少依赖提交属于状态不变量破坏，必须立即失败，不能写入可被后续 Run 误复用的证据。
+   */
+  private createCompletionState(input: TaskStepInput): TaskCompletionState {
+    const contractHash = input.loaded.taskContractHashes.get(input.task.id);
+    if (contractHash === undefined) {
+      throw new Error(`任务缺少完成契约指纹：${input.task.id}`);
+    }
+    const dependencies = input.task.dependsOn.map((taskId) => {
+      const commitSha = input.state.tasks[taskId]?.commitSha;
+      if (commitSha === undefined) {
+        throw new Error(`依赖任务缺少完成提交：${taskId}`);
+      }
+      return { taskId, commitSha };
+    });
+    return {
+      origin: "executed",
+      evidenceRunId: input.state.runId,
+      contractHash,
+      dependencyFingerprint: createDependencyCompletionFingerprint(dependencies),
     };
   }
 

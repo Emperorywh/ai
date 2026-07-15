@@ -10,6 +10,7 @@ import {
   type TaskDefinition,
 } from "../../src/domain/manifest.js";
 import type { RunState } from "../../src/domain/run-state.js";
+import { createTaskContractHash } from "../../src/domain/task-completion.js";
 import type {
   AgentExecutor,
   AgentRunRequest,
@@ -23,6 +24,7 @@ import type {
   CandidateSnapshot,
   ChangeAuditResult,
   VerificationWorkspace,
+  TaskCompletionEvidence,
   Workspace,
 } from "../../src/ports/workspace.js";
 
@@ -121,6 +123,8 @@ export class RecordingWorkspace implements Workspace {
   public cleanChecks = 0;
   public verificationDisposals = 0;
   public quarantines = 0;
+  private currentHead = "base-sha";
+  private readonly completionHistory: TaskCompletionEvidence[] = [];
 
   public async getStateDirectory(): Promise<string> {
     return "/state";
@@ -130,7 +134,7 @@ export class RecordingWorkspace implements Workspace {
     return {
       repositoryRoot: "/project",
       branch: "main",
-      head: this.commits.at(-1)?.toLowerCase().concat("-sha") ?? "base-sha",
+      head: this.currentHead,
     };
   }
 
@@ -185,13 +189,28 @@ export class RecordingWorkspace implements Workspace {
     messagePrefix: string;
     expectedHead: string;
     expectedFingerprint: string;
+    taskContractHash: string;
+    dependencyFingerprint: string;
   }): Promise<string> {
     this.commits.push(input.task.id);
-    return `${input.task.id.toLowerCase()}-sha`;
+    const commitSha = `${input.task.id.toLowerCase()}-${this.commits.length}-sha`;
+    this.currentHead = commitSha;
+    this.completionHistory.unshift({
+      taskId: input.task.id,
+      commitSha,
+      runId: input.runId,
+      taskContractHash: input.taskContractHash,
+      dependencyFingerprint: input.dependencyFingerprint,
+    });
+    return commitSha;
   }
 
   public async findTaskCommit(): Promise<string | undefined> {
     return undefined;
+  }
+
+  public async readTaskCompletionHistory(): Promise<readonly TaskCompletionEvidence[]> {
+    return this.completionHistory;
   }
 }
 
@@ -242,6 +261,7 @@ export function createLoadedManifest(
   taskInputs: readonly {
     id: string;
     dependsOn?: readonly string[];
+    contractRevision?: string;
   }[],
 ): LoadedTaskManifest {
   const manifest = taskManifestSchema.parse({
@@ -283,9 +303,31 @@ export function createLoadedManifest(
   const taskDocuments = new Map(
     tasks.map((task) => [
       task.id,
-      { path: task.file, content: `# ${task.id}` },
+      {
+        path: task.file,
+        content: `# ${task.id}\n${taskInputs.find((input) => input.id === task.id)?.contractRevision ?? ""}`,
+      },
     ]),
   );
+  /*
+   * 测试夹具使用与生产仓储相同的契约哈希函数，跨 Run 复用测试不会依赖手写假哈希。
+   * contractRevision 只改变指定 TASK 正文，便于验证局部失效和 DAG 下游传播。
+   */
+  const taskContractHashes = new Map(tasks.map((task) => {
+    const taskDocument = taskDocuments.get(task.id);
+    if (taskDocument === undefined) {
+      throw new Error(`测试任务缺少文档：${task.id}`);
+    }
+    return [
+      task.id,
+      createTaskContractHash({
+        manifest,
+        task,
+        taskDocument,
+        contextDocuments: [],
+      }),
+    ] as const;
+  }));
 
   return {
     manifest,
@@ -294,6 +336,7 @@ export function createLoadedManifest(
     projectRoot: "/project",
     manifestHash: "manifest-hash",
     taskDocuments,
+    taskContractHashes,
     contextDocuments: [],
     protectedPaths: [
       "orchestrator.yaml",

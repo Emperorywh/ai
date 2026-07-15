@@ -95,6 +95,7 @@ export interface LoadedTaskManifest {
   readonly projectRoot: string;
   readonly manifestHash: string;
   readonly taskDocuments: ReadonlyMap<string, TextDocument>;
+  readonly taskContractHashes: ReadonlyMap<string, string>;
   readonly contextDocuments: readonly TextDocument[];
   readonly protectedPaths: readonly string[];
 }

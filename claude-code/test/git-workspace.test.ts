@@ -3,6 +3,7 @@
  * 所有 Git 身份与提交配置都限制在临时目录，不读取或修改用户的真实仓库配置。
  */
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +14,7 @@ import { GitWorkspace } from "../src/infrastructure/git/git-workspace.js";
 
 const execFileAsync = promisify(execFile);
 const temporaryRoots: string[] = [];
+const rootProjectHistoryKey = createHash("sha256").update(".").digest("hex");
 
 interface GitFixture {
   readonly root: string;
@@ -173,6 +175,8 @@ describe("GitWorkspace", () => {
         messagePrefix: "task",
         expectedHead: fixture.initialHead,
         expectedFingerprint: candidate.fingerprint,
+        taskContractHash: "1".repeat(64),
+        dependencyFingerprint: "2".repeat(64),
       }),
     ).rejects.toThrow("候选内容已变化，拒绝提交未经当前门禁和审核的版本");
     expect((await runGit(fixture.root, ["rev-parse", "HEAD"])).trim()).toBe(
@@ -301,6 +305,8 @@ describe("GitWorkspace", () => {
     const fixture = await createGitFixture();
     const task = createTask("TASK-10");
     const runId = "run-exact-trailers";
+    const taskContractHash = "1".repeat(64);
+    const dependencyFingerprint = "2".repeat(64);
     await writeFile(
       join(fixture.root, "feature.ts"),
       "export const completed = true;\n",
@@ -314,6 +320,8 @@ describe("GitWorkspace", () => {
       messagePrefix: "task",
       expectedHead: fixture.initialHead,
       expectedFingerprint: candidate.fingerprint,
+      taskContractHash,
+      dependencyFingerprint,
     });
     const commitBody = (
       await runGit(fixture.root, ["show", "-s", "--format=%B", commitSha])
@@ -323,9 +331,25 @@ describe("GitWorkspace", () => {
       "task: TASK-10 实现候选提交",
       "",
       `Orchestrator-Run: ${runId}`,
+      `Orchestrator-Project: ${rootProjectHistoryKey}`,
       "Orchestrator-Task: TASK-10",
       `Orchestrator-Candidate: ${candidate.fingerprint}`,
+      `Orchestrator-Task-Contract: ${taskContractHash}`,
+      `Orchestrator-Task-Dependencies: ${dependencyFingerprint}`,
     ].join("\n"));
+    /*
+     * 完成历史必须从当前 HEAD 的祖先链解析出结构化证据，供新 Run 一次性核验全部 TASK。
+     * 自由文本标题不参与匹配，契约和依赖指纹必须来自精确 trailer。
+     */
+    await expect(
+      fixture.workspace.readTaskCompletionHistory(commitSha),
+    ).resolves.toEqual([{
+      taskId: "TASK-10",
+      commitSha,
+      runId,
+      taskContractHash,
+      dependencyFingerprint,
+    }]);
     await expect(
       fixture.workspace.findTaskCommit({
         runId,
@@ -366,5 +390,38 @@ describe("GitWorkspace", () => {
         "--untracked-files=all",
       ]),
     ).toBe("");
+  });
+
+  it("代码无变化时用空提交保存已通过核验的完成证据", async () => {
+    const fixture = await createGitFixture();
+    const candidate = await fixture.workspace.captureCandidate();
+    const taskContractHash = "3".repeat(64);
+    const dependencyFingerprint = "4".repeat(64);
+
+    const commitSha = await fixture.workspace.commitTask({
+      runId: "run-empty-completion",
+      task: createTask("TASK-EMPTY"),
+      messagePrefix: "task",
+      expectedHead: fixture.initialHead,
+      expectedFingerprint: candidate.fingerprint,
+      taskContractHash,
+      dependencyFingerprint,
+    });
+
+    /*
+     * 空提交不会出现在带项目 pathspec 的日志中，因此完成历史必须使用项目 trailer 隔离后读取完整祖先链。
+     * 该断言同时守护 --fresh 对“现有实现已满足 TASK”的确定性收敛路径。
+     */
+    expect(commitSha).not.toBe(fixture.initialHead);
+    await expect(
+      fixture.workspace.readTaskCompletionHistory(commitSha),
+    ).resolves.toEqual([{
+      taskId: "TASK-EMPTY",
+      commitSha,
+      runId: "run-empty-completion",
+      taskContractHash,
+      dependencyFingerprint,
+    }]);
+    await expect(fixture.workspace.assertClean()).resolves.toBeUndefined();
   });
 });

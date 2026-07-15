@@ -18,6 +18,7 @@ import {
   type TextDocument,
 } from "../../domain/manifest.js";
 import type { ManifestRepository } from "../../ports/manifest-repository.js";
+import { createTaskContractHash } from "../../domain/task-completion.js";
 
 interface LoadedTaskDocument {
   readonly task: TaskDefinition;
@@ -53,6 +54,25 @@ export class YamlManifestRepository implements ManifestRepository {
       ...contextDocuments.map((document) => document.path),
       ...taskCatalog.map((entry) => entry.document.path),
     ];
+    /*
+     * 整体 manifestHash 服务于同一 Run 的精确恢复；逐 TASK 契约指纹服务于新 Run 的安全复用。
+     * 两者职责不同，不能用会被模型和重试策略影响的整体哈希替代任务完成契约。
+     */
+    const taskContractHashes = new Map(tasks.map((task) => {
+      const taskDocument = taskDocuments.get(task.id);
+      if (taskDocument === undefined) {
+        throw new ConfigurationError(`缺少任务文档：${task.id}`);
+      }
+      return [
+        task.id,
+        createTaskContractHash({
+          manifest,
+          task,
+          taskDocument,
+          contextDocuments,
+        }),
+      ] as const;
+    }));
 
     return {
       manifest,
@@ -65,6 +85,7 @@ export class YamlManifestRepository implements ManifestRepository {
         taskCatalog.map((entry) => entry.document),
       ),
       taskDocuments,
+      taskContractHashes,
       contextDocuments,
       protectedPaths: [...new Set(protectedPaths)],
     };

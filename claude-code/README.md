@@ -8,6 +8,7 @@
 Manifest 项目策略
   + TASK 目录（唯一任务事实源）
   → 严格元数据校验与稳定 DAG
+  → 核验当前 HEAD 中的任务完成证据
   → 写入 Worker
   → 路径审计
   → 隔离 worktree 门禁
@@ -25,6 +26,7 @@ Manifest 项目策略
 - 门禁越界、Agent 需要人工决策等真正阻塞会终止当前 TASK，但不会阻止独立 DAG 分支继续执行。
 - 阻塞或失败 TASK 的候选会保存到持久 Git 引用并清理主工作区；其依赖子图标记为 `dependency_blocked`。
 - 每次状态转换、SDK 会话初始化、门禁结果和候选归档都会落盘，进程中断后可精确恢复。
+- 新 `run` 默认按任务契约、依赖完成提交和 Git 可达性复用有效进度；`--fresh` 才会明确全量重跑。
 - 隔离 worktree 使用独立资源租约释放；Windows 文件占用会触发重试、文件系统兜底和 Git prune，不会覆盖已经完成的门禁结论或中断后续 TASK。
 - 编排器不启动浏览器或 UI 自动化。全部可运行任务结束后生成运行摘要和人工验收清单。
 
@@ -153,8 +155,11 @@ manualAcceptance:
 # 只校验配置、完整任务目录、文档、路径和 DAG
 pnpm start validate --manifest orchestrator.yaml
 
-# 新建运行；要求整个 Git 仓库干净
+# 新建运行；核验并复用当前 HEAD 中仍然有效的 TASK 完成证据
 pnpm start run --manifest orchestrator.yaml
+
+# 新建运行并明确放弃历史完成证据，全量重跑
+pnpm start run --fresh --manifest orchestrator.yaml
 
 # 恢复最近或指定的 running 运行
 pnpm start resume --manifest orchestrator.yaml
@@ -199,8 +204,15 @@ pnpm start status <run-id> --manifest orchestrator.yaml
 每个成功 TASK 产生独立提交，并包含：
 
 - `Orchestrator-Run`
+- `Orchestrator-Project`
 - `Orchestrator-Task`
 - `Orchestrator-Candidate`
+- `Orchestrator-Task-Contract`
+- `Orchestrator-Task-Dependencies`
+
+默认 `run` 会按 DAG 顺序读取当前 HEAD 的完成提交：任务契约指纹相同、直接依赖绑定的完成提交相同，且证据提交仍在当前分支祖先链中时，该 TASK 在新 Run 中直接记为 `completed/reused`。任务正文、scope、门禁、人工验收、上下文或审核开关变化会使对应任务失效；上游重新执行会通过依赖指纹使下游失效。模型、effort、预算、超时和重试次数只影响执行过程，不会让已经验收通过的任务失效。每个 TASK 只核验当前祖先链中的最新完成证据，不会越过较新的异契约提交回退复用旧结果。
+
+若现有代码已经满足 TASK，Worker 可以不产生 diff；编排器仍会执行完整门禁和审核，并以空提交保存新的完成证据。`--fresh` 不删除历史，只明确禁止本次 Run 复用它们。
 
 阻塞/失败候选保存在 `refs/claude-task-orchestrator/quarantine/*`。Worker 虽拥有自主开发工具，但系统工作流仍明确禁止 push、merge、rebase、部署或浏览器测试；Reviewer 始终只读。
 

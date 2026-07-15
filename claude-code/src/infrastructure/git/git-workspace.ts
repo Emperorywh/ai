@@ -29,6 +29,7 @@ import type {
   ChangeAuditResult,
   VerificationWorkspace,
   VerificationWorkspaceRelease,
+  TaskCompletionEvidence,
   Workspace,
   WorkspaceIdentity,
 } from "../../ports/workspace.js";
@@ -339,6 +340,8 @@ export class GitWorkspace implements Workspace {
     messagePrefix: string;
     expectedHead: string;
     expectedFingerprint: string;
+    taskContractHash: string;
+    dependencyFingerprint: string;
   }): Promise<string> {
     const identity = await this.getIdentity();
     if (identity.head !== input.expectedHead) {
@@ -356,29 +359,34 @@ export class GitWorkspace implements Workspace {
 
     await this.assertCandidate(input.expectedFingerprint);
     const changedFiles = await this.getChangedProjectFiles();
-    if (changedFiles.length === 0) {
-      throw new InfrastructureError(`任务 ${input.task.id} 没有可提交的文件变更`);
-    }
 
     await this.git(["add", "--all", "--", "."]);
     await this.assertCandidate(input.expectedFingerprint);
+    const projectHistoryKey = await this.getProjectHistoryKey();
     const message = [
       `${input.messagePrefix}: ${input.task.id} ${input.task.title}`,
       "",
       `Orchestrator-Run: ${input.runId}`,
+      `Orchestrator-Project: ${projectHistoryKey}`,
       `Orchestrator-Task: ${input.task.id}`,
       `Orchestrator-Candidate: ${input.expectedFingerprint}`,
+      `Orchestrator-Task-Contract: ${input.taskContractHash}`,
+      `Orchestrator-Task-Dependencies: ${input.dependencyFingerprint}`,
     ].join("\n");
-    await this.git([
+    /*
+     * --fresh 或人工预先实现可能得到“代码无变化但门禁与审核通过”的合法结果。
+     * 空提交只记录完成证据；非空候选仍使用项目 pathspec，绝不夹带父仓库其他目录的改动。
+     */
+    const commitArguments = [
       "commit",
       "--no-verify",
       "--no-gpg-sign",
-      "--only",
+      ...(changedFiles.length === 0 ? ["--allow-empty"] : ["--only"]),
       "-m",
       message,
-      "--",
-      ".",
-    ]);
+      ...(changedFiles.length === 0 ? [] : ["--", "."]),
+    ];
+    await this.git(commitArguments);
     const commitSha = (await this.git(["rev-parse", "HEAD"])).trim();
     await this.assertClean();
     return commitSha;
@@ -405,6 +413,69 @@ export class GitWorkspace implements Workspace {
     }
     const parent = (await this.git(["rev-parse", `${head}^`])).trim();
     return parent === input.expectedParent ? head : undefined;
+  }
+
+  /*
+   * Git 历史是项目级完成账本：只搜索当前 HEAD 的祖先，并要求任务、契约和依赖三项 trailer 精确匹配。
+   * 选择最近匹配提交可以复用同一契约的最新完成事实，同时自动排除其他分支和被改写掉的历史。
+   */
+  public async readTaskCompletionHistory(
+    head: string,
+  ): Promise<readonly TaskCompletionEvidence[]> {
+    const projectHistoryKey = await this.getProjectHistoryKey();
+    const history = await this.git([
+      "log",
+      "--format=%H%x00%B%x00",
+      "--fixed-strings",
+      `--grep=Orchestrator-Project: ${projectHistoryKey}`,
+      head,
+    ]);
+    const fields = history.split("\0");
+    const evidence: TaskCompletionEvidence[] = [];
+    for (let index = 0; index + 1 < fields.length; index += 2) {
+      const commitSha = fields[index]?.trim();
+      const body = fields[index + 1];
+      if (commitSha === undefined || commitSha.length === 0 || body === undefined) {
+        continue;
+      }
+      const trailers = parseExactTrailers(body);
+      const taskId = trailers.get("Orchestrator-Task");
+      const runId = trailers.get("Orchestrator-Run");
+      const project = trailers.get("Orchestrator-Project");
+      const taskContractHash = trailers.get("Orchestrator-Task-Contract");
+      const dependencyFingerprint = trailers.get(
+        "Orchestrator-Task-Dependencies",
+      );
+      if (
+        taskId !== undefined
+        && runId !== undefined
+        && project === projectHistoryKey
+        && taskContractHash !== undefined
+        && dependencyFingerprint !== undefined
+      ) {
+        evidence.push({
+          taskId,
+          commitSha,
+          runId,
+          taskContractHash,
+          dependencyFingerprint,
+        });
+      }
+    }
+    return evidence;
+  }
+
+  /*
+   * 空完成提交没有文件路径，读取历史时不能依赖 pathspec 过滤；项目键用于隔离同一父仓库中的多个子项目。
+   * Git 前缀经哈希后写入 trailer，根项目统一以点号参与哈希，避免特殊路径字符注入提交元数据。
+   */
+  private async getProjectHistoryKey(): Promise<string> {
+    const prefix = normalize(
+      (await this.git(["rev-parse", "--show-prefix"])).trim(),
+    ).replace(/\/$/u, "");
+    return createHash("sha256")
+      .update(prefix.length === 0 ? "." : prefix)
+      .digest("hex");
   }
 
   private async assertCandidate(expectedFingerprint: string): Promise<void> {
@@ -730,6 +801,28 @@ function normalize(path: string): string {
 
 function splitNullList(output: string): readonly string[] {
   return output.split("\0").filter(Boolean);
+}
+
+/*
+ * 完成证据只接受恰好出现一次的精确 trailer；重复键会被视为歧义并拒绝复用。
+ * 解析器不依赖提交标题或自由文本，因此任务名包含相似前缀时也不会发生误匹配。
+ */
+function parseExactTrailers(body: string): ReadonlyMap<string, string> {
+  const values = new Map<string, string[]>();
+  for (const line of body.split(/\r?\n/u)) {
+    const match = /^(Orchestrator-[A-Za-z-]+):\s*(.+)$/u.exec(line.trim());
+    if (match?.[1] === undefined || match[2] === undefined) {
+      continue;
+    }
+    const existing = values.get(match[1]) ?? [];
+    existing.push(match[2]);
+    values.set(match[1], existing);
+  }
+  return new Map(
+    [...values.entries()]
+      .filter(([, entries]) => entries.length === 1)
+      .map(([key, entries]) => [key, entries[0] as string]),
+  );
 }
 
 function isMissingPath(error: unknown): boolean {

@@ -20,15 +20,26 @@ import type { StateStore } from "../ports/state-store.js";
 import type { TimeFormatter } from "../ports/time-formatter.js";
 import type { Workspace } from "../ports/workspace.js";
 import type { TaskExecutionService } from "./task-execution-service.js";
+import type { TaskProgressReconciler } from "./task-progress-reconciler.js";
 
 export interface OrchestratorResult {
   readonly state: RunState;
   readonly artifacts: readonly string[];
 }
 
+/*
+ * 新 Run 默认核验并复用项目级完成证据；fresh 只由显式 CLI 参数开启。
+ * signal 与运行策略放在同一选项对象中，避免后续扩展继续增加易混淆的位置参数。
+ */
+export interface StartRunOptions {
+  readonly fresh?: boolean | undefined;
+  readonly signal?: AbortSignal | undefined;
+}
+
 export class QueueOrchestrator {
   public constructor(
     private readonly taskExecution: TaskExecutionService,
+    private readonly taskProgress: TaskProgressReconciler,
     private readonly stateStore: StateStore,
     private readonly runLock: RunLock,
     private readonly workspace: Workspace,
@@ -39,7 +50,7 @@ export class QueueOrchestrator {
 
   public async start(
     loaded: LoadedTaskManifest,
-    signal?: AbortSignal,
+    options: StartRunOptions = {},
   ): Promise<OrchestratorResult> {
     const runId = this.createRunId();
     const lock = await this.runLock.acquire(runId);
@@ -48,6 +59,12 @@ export class QueueOrchestrator {
       const workspaceIdentity = await this.workspace.getIdentity();
       const now = this.now();
       const orderedTasks = createStableTaskOrder(loaded.tasks);
+      const progressPlan = await this.taskProgress.createPlan({
+        loaded,
+        orderedTasks,
+        head: workspaceIdentity.head,
+        fresh: options.fresh === true,
+      });
       const state = createInitialRunState({
         runId,
         manifestPath: loaded.manifestPath,
@@ -58,17 +75,35 @@ export class QueueOrchestrator {
           branch: workspaceIdentity.branch,
           expectedHead: workspaceIdentity.head,
         },
-        taskIds: orderedTasks.map((task) => task.id),
+        tasks: progressPlan.tasks,
         now,
       });
+      const reusedTaskIds = progressPlan.decisions
+        .filter((decision) => decision.reason === "reused")
+        .map((decision) => decision.taskId);
+      const pendingTaskIds = progressPlan.decisions
+        .filter((decision) => decision.reason !== "reused")
+        .map((decision) => decision.taskId);
       await this.checkpoint(
         state,
         undefined,
         "run_started",
-        this.describeTaskQueue("新运行已创建", orderedTasks),
-        { taskOrder: orderedTasks.map((task) => task.id) },
+        `${this.describeTaskQueue("新运行已创建", orderedTasks)}；复用 ${reusedTaskIds.length} 个，待执行 ${pendingTaskIds.length} 个`,
+        {
+          taskOrder: orderedTasks.map((task) => task.id),
+          fresh: options.fresh === true,
+          reusedTaskIds,
+          pendingTaskIds,
+          reuseDecisions: progressPlan.decisions,
+        },
       );
-      return await this.drive(loaded, orderedTasks, state, false, signal);
+      return await this.drive(
+        loaded,
+        orderedTasks,
+        state,
+        false,
+        options.signal,
+      );
     } finally {
       await lock.release();
     }

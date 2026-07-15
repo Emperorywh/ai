@@ -6,7 +6,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { stringify } from "yaml";
+import { parse, stringify } from "yaml";
 import { YamlManifestRepository } from "../src/infrastructure/tasks/yaml-manifest-repository.js";
 
 const temporaryRoots: string[] = [];
@@ -141,6 +141,9 @@ describe("YamlManifestRepository", () => {
       "tasks/TASK-001.md",
     ]);
     expect(loaded.manifestHash).toMatch(/^[a-f0-9]{64}$/u);
+    expect(loaded.taskContractHashes.get("TASK-001")).toMatch(
+      /^[a-f0-9]{64}$/u,
+    );
   });
 
   it("新增 TASK 文档后自动进入稳定 DAG，无需修改 Manifest", async () => {
@@ -221,6 +224,35 @@ describe("YamlManifestRepository", () => {
     const changed = await repository.load(fixture.manifestPath);
 
     expect(changed.manifestHash).not.toBe(initial.manifestHash);
+    expect(changed.taskContractHashes.get("TASK-001")).not.toBe(
+      initial.taskContractHashes.get("TASK-001"),
+    );
+  });
+
+  it("执行资源策略变化不让任务完成契约失效", async () => {
+    const fixture = await createProjectFixture();
+    const repository = new YamlManifestRepository();
+    const initial = await repository.load(fixture.manifestPath);
+    const rawManifest = await readFile(fixture.manifestPath, "utf8");
+    const manifest = parse(rawManifest) as Record<string, unknown>;
+    manifest["defaults"] = {
+      maxAttempts: 9,
+      maxTurns: 120,
+      model: "opus",
+      effort: "xhigh",
+    };
+    await writeFile(fixture.manifestPath, stringify(manifest), "utf8");
+
+    const changed = await repository.load(fixture.manifestPath);
+
+    /*
+     * 整体哈希仍变化以阻止同一 Run 混用策略，但已验收任务的完成契约保持稳定。
+     * 新 Run 因此可以调整模型、预算或重试策略，而不浪费已经通过的 TASK。
+     */
+    expect(changed.manifestHash).not.toBe(initial.manifestHash);
+    expect(changed.taskContractHashes.get("TASK-001")).toBe(
+      initial.taskContractHashes.get("TASK-001"),
+    );
   });
 
   it("拒绝 Manifest 未知字段和旧版本 tasks 数组", async () => {

@@ -33,7 +33,7 @@ describe("FileStateStore", () => {
         branch: "main",
         expectedHead: "base",
       },
-      taskIds: ["TASK-001"],
+      tasks: [{ taskId: "TASK-001" }],
       now: "2026-07-14T19:28:40.710Z",
     });
 
@@ -60,7 +60,7 @@ describe("FileStateStore", () => {
         branch: "main",
         expectedHead: "base",
       },
-      taskIds: ["TASK-001"],
+      tasks: [{ taskId: "TASK-001" }],
       now: "2026-07-13T00:00:00.000Z",
     });
     const updated = {

@@ -22,6 +22,7 @@
 - `domain/manifest.ts`：项目策略、TASK 元数据和加载结果的唯一类型契约。
 - `domain/dag.ts`：重复 ID、依赖合法性、环检测和稳定拓扑排序。
 - `domain/run-state.ts`：TASK/Run 状态、合法转换和状态 Schema。
+- `domain/task-completion.ts`：任务完成契约与依赖完成指纹。
 - `domain/agent-result.ts`：Worker 与 Reviewer 的结构化输出契约。
 - `domain/errors.ts`：配置、基础设施和状态转换错误。
 
@@ -34,6 +35,7 @@
 - `application/prompt-builder.ts`：集中组装 Worker/Reviewer 提示词。
 - `application/agent-session-checkpoint.ts`：SDK 会话初始化和尝试状态落盘。
 - `application/run-state-presentation.ts`：把 UTC 状态显式投影为北京时间 CLI 输出。
+- `application/task-progress-reconciler.ts`：核验 Git 完成账本并生成新 Run 初始计划。
 
 队列不解析 Markdown、不拼接 Git 命令、不执行门禁子进程。单任务服务不决定下一个 TASK。
 
@@ -97,8 +99,11 @@ TASK 目录中的每个 `.md` 都必须包含严格 YAML 前置元数据：
 5. ID 和依赖合法性检查；
 6. DAG 环检测；
 7. Manifest、上下文与所有 TASK 的整体内容哈希。
+8. 每个 TASK 独立的完成契约指纹。
 
 静态 TASK 不允许包含 `status`。运行状态只写入状态库。
+
+整体内容哈希用于同一 Run 的精确恢复；TASK 完成契约用于新 Run 的安全复用。完成契约包含规范化任务定义、正文、上下文、审核开关和验证共享路径，不包含模型、预算、超时及重试次数等执行资源策略。
 
 ## 4. TASK 状态流
 
@@ -108,7 +113,10 @@ pending
   → gating
   → reviewing（可关闭）
   → committing
-  → completed
+  → completed（executed）
+
+新 Run 核验 Git 完成证据
+  → completed（reused）
 
 executing/gating/reviewing
   → retry_pending
@@ -133,6 +141,14 @@ pending
 ## 5. DAG 调度
 
 队列始终单并发，但不再把单个 TASK 的失败提升为立即停止整个 Run。
+
+新 `run` 创建状态前先按拓扑顺序核验完成历史：
+
+1. `--fresh` 直接把全部 TASK 初始化为 pending；
+2. 默认一次读取当前 HEAD 祖先链中的结构化完成 trailers；
+3. 任务契约和直接依赖完成指纹均匹配时初始化为 completed/reused；
+4. 上游未复用时，下游确定性失效为 pending；
+5. 模型、预算和重试策略变化不影响任务完成契约。
 
 每轮按以下顺序处理：
 
@@ -245,8 +261,13 @@ critical/high/medium finding 会触发 repair。
 - `Orchestrator-Run`
 - `Orchestrator-Task`
 - `Orchestrator-Candidate`
+- `Orchestrator-Project`
+- `Orchestrator-Task-Contract`
+- `Orchestrator-Task-Dependencies`
 
 每个 TASK 提交后更新 `expectedHead`。恢复时仅允许当前 HEAD 等于 expectedHead，或精确匹配“提交完成但状态尚未落盘”的唯一崩溃窗口。
+
+完成提交同时承担项目级进度账本职责。`Orchestrator-Project` 使用仓库内项目路径哈希隔离同一父仓库中的多个子项目；任务契约指纹决定自身是否有效；依赖指纹绑定直接依赖的具体提交。每个 TASK 只核验当前祖先链中的最新完成证据，不越过较新的异契约提交回退匹配旧指纹。无代码差异但完整门禁和审核通过时使用空提交保存证据，因此复用逻辑不依赖文件 diff 是否非空。
 
 ## 10. 持久化与中断
 

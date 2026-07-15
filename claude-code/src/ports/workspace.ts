@@ -34,6 +34,18 @@ export interface CandidateArchive {
 }
 
 /*
+ * 可复用完成证据来自当前 HEAD 可达的任务提交，Run ID 只用于审计来源。
+ * 契约与依赖指纹由应用层提供，Workspace 只负责验证不可伪造的 Git 历史事实。
+ */
+export interface TaskCompletionEvidence {
+  readonly taskId: string;
+  readonly commitSha: string;
+  readonly runId: string;
+  readonly taskContractHash: string;
+  readonly dependencyFingerprint: string;
+}
+
+/*
  * 释放状态是临时资源生命周期事实，不是门禁通过/失败事实。
  * deferred 必须携带诊断，但调用方仍可持久化门禁结论并推进任务状态机。
  */
@@ -83,6 +95,8 @@ export interface Workspace {
     messagePrefix: string;
     expectedHead: string;
     expectedFingerprint: string;
+    taskContractHash: string;
+    dependencyFingerprint: string;
   }): Promise<string>;
   findTaskCommit(input: {
     runId: string;
@@ -90,4 +104,7 @@ export interface Workspace {
     expectedParent: string;
     candidateFingerprint: string;
   }): Promise<string | undefined>;
+  readTaskCompletionHistory(
+    head: string,
+  ): Promise<readonly TaskCompletionEvidence[]>;
 }

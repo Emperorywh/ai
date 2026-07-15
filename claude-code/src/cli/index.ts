@@ -27,6 +27,10 @@ interface ManifestOptions {
   readonly manifest: string;
 }
 
+interface RunOptions extends ManifestOptions {
+  readonly fresh: boolean;
+}
+
 const program = new Command()
   .name("claude-task-orchestrator")
   .description("基于 Claude Agent SDK 的单并发 TASK 队列编排器");
@@ -58,13 +62,21 @@ program
 
 program
   .command("run")
-  .description("创建新运行并串行执行全部 TASK")
+  .description("创建新运行，核验并复用有效 TASK 进度")
   .option("-m, --manifest <path>", "Manifest 文件", DEFAULT_MANIFEST)
-  .action(async (options: ManifestOptions) => {
+  .option("--fresh", "明确放弃历史完成证据并全量重跑", false)
+  .action(async (options: RunOptions) => {
     const runtime = await createOrchestratorRuntime(resolve(options.manifest));
+    /*
+     * run 始终创建新的 Run 记录，但默认先做项目级进度核验；只有显式 --fresh 才跳过复用。
+     * resume 继续保持同一 Run checkpoint 语义，两条路径不会共享隐式状态。
+     */
     await executeRuntime(
       runtime,
-      (signal) => runtime.orchestrator.start(runtime.loaded, signal),
+      (signal) => runtime.orchestrator.start(runtime.loaded, {
+        fresh: options.fresh,
+        signal,
+      }),
     );
   });
 
@@ -102,7 +114,7 @@ program
     await executeRuntime(
       runtime,
       state === undefined
-        ? (signal) => runtime.orchestrator.start(runtime.loaded, signal)
+        ? (signal) => runtime.orchestrator.start(runtime.loaded, { signal })
         : (signal) => runtime.orchestrator.resume(
             runtime.loaded,
             state.runId,
