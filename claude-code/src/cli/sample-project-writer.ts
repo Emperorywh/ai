@@ -22,18 +22,13 @@ const SAMPLE_FILES: Readonly<Record<string, string>> = {
 `,
   [`${PROJECT_STRUCTURE.taskDirectory}/TASK-001.md`]: `---
 id: TASK-001
-title: 实现第一个独立任务
-dependsOn: []
-manualAcceptance:
-  - 在本地浏览器中完成功能与视觉验收
+title: 实现第一个任务
 ---
-
-# TASK-001 — 实现第一个独立任务
 
 ## 任务描述
 
 请直接描述希望 AI 完成的任务、期望效果和必要背景。
-AI 将自行阅读项目、分析架构、设计方案并完成实现。
+AI 将自行阅读项目、分析架构、设计方案并完成实现；当前 TASK 完成后才会开启下一个 TASK。
 `,
 };
 

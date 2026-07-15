@@ -76,7 +76,7 @@ describe("北京时间人类可读输出", () => {
 
 function createRunState(): RunState {
   return {
-    version: 4,
+    version: 5,
     runId: "run-1",
     status: "failed",
     projectHash: "hash",

@@ -14,29 +14,26 @@ export interface TaskContractHashInput {
   readonly specificationDocument: TextDocument;
 }
 
-export interface DependencyCompletion {
+export interface PredecessorCompletion {
   readonly taskId: string;
   readonly commitSha: string;
 }
 
 /*
- * TASK 前置元数据已经由严格 Schema 解析，因此契约使用规范化字段，并只从原文保留任务正文。
- * maxAttempts 和 timeoutMinutes 被有意排除，它们只控制单任务执行过程，不改变完成定义。
- * 独立审核是系统固定流程，契约版本显式绑定该语义，不存在项目级开关。
+ * TASK 前置元数据已经由严格 Schema 解析，因此契约使用规范化身份并只从原文保留任务正文。
+ * 线性顺序属于项目结构而非单任务内容；独立审核是固定流程，不存在任务级覆盖开关。
  */
 export function createTaskContractHash(input: TaskContractHashInput): string {
   const contract = {
     /*
-     * 第四版完成契约把唯一规格与 TASK 集中到 orchestration 目录，并移除多上下文文件模型。
-     * 显式换代确保旧目录结构产生的提交证据不会在新执行模型下被错误复用。
+     * 第五版完成契约只接受 id、title 与正文，并切换到严格线性任务模型。
+     * 显式换代确保旧 DAG 提交证据不会在新执行模型下被错误复用。
      */
-    version: 4,
+    version: 5,
     task: {
       id: input.task.id,
       title: input.task.title,
       file: input.task.file,
-      dependsOn: input.task.dependsOn,
-      manualAcceptance: input.task.manualAcceptance,
       body: extractTaskBody(input.taskDocument.content),
     },
     reviewRequired: true,
@@ -51,17 +48,19 @@ export function createTaskContractHash(input: TaskContractHashInput): string {
 }
 
 /*
- * 下游任务绑定依赖任务的具体完成提交，而不是只绑定 completed 布尔值。
- * 任一依赖重新执行并产生新提交时，下游指纹都会改变，从而沿 DAG 确定性传播失效。
+ * 每个任务只绑定直接前驱的具体完成提交，前驱链会传递覆盖此前的全部完成历史。
+ * 根任务使用显式根标记；任一前驱重新执行后，后续任务的指纹都会按线性顺序失效。
  */
-export function createDependencyCompletionFingerprint(
-  dependencies: readonly DependencyCompletion[],
+export function createPredecessorCompletionFingerprint(
+  predecessor: PredecessorCompletion | undefined,
 ): string {
   const hash = createHash("sha256");
-  for (const dependency of dependencies) {
-    hash.update(dependency.taskId);
+  if (predecessor === undefined) {
+    hash.update("ROOT\0");
+  } else {
+    hash.update(predecessor.taskId);
     hash.update("\0");
-    hash.update(dependency.commitSha);
+    hash.update(predecessor.commitSha);
     hash.update("\0");
   }
   return hash.digest("hex");

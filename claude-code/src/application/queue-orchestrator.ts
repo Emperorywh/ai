@@ -1,16 +1,14 @@
 /*
- * QueueOrchestrator 是单并发 DAG 驱动器：每轮只推进一个 TASK 阶段并持久化 checkpoint。
- * 终态候选先隔离，依赖子图显式阻塞，互不依赖的可运行节点继续执行到全局收敛。
+ * QueueOrchestrator 是严格线性驱动器：每轮只推进当前 TASK 的一个阶段并持久化 checkpoint。
+ * 当前任务只有完成后才会开放后继；阻塞或失败会在隔离候选后立即结束整个 Run。
  */
 import { randomUUID } from "node:crypto";
-import { createStableTaskOrder } from "../domain/dag.js";
 import { ConfigurationError } from "../domain/errors.js";
 import type { LoadedProject, TaskDefinition } from "../domain/project.js";
 import {
   createInitialRunState,
   finishRun,
   replaceTaskFields,
-  transitionTask,
   type RunState,
 } from "../domain/run-state.js";
 import type { Clock } from "../ports/clock.js";
@@ -58,10 +56,9 @@ export class QueueOrchestrator {
       await this.workspace.assertClean();
       const workspaceIdentity = await this.workspace.getIdentity();
       const now = this.now();
-      const orderedTasks = createStableTaskOrder(loaded.tasks);
+      const orderedTasks = loaded.tasks;
       const progressPlan = await this.taskProgress.createPlan({
         loaded,
-        orderedTasks,
         head: workspaceIdentity.head,
         fresh: options.fresh === true,
       });
@@ -125,7 +122,7 @@ export class QueueOrchestrator {
     const lock = await this.runLock.acquire(runId);
     try {
       await this.assertResumeWorkspaceCompatible(existing);
-      const orderedTasks = createStableTaskOrder(loaded.tasks);
+      const orderedTasks = loaded.tasks;
       await this.checkpoint(
         existing,
         undefined,
@@ -167,7 +164,7 @@ export class QueueOrchestrator {
         return { state, artifacts: [] };
       }
 
-      const stateAfterQuarantine = await this.quarantineNextTerminalCandidate(
+      const stateAfterQuarantine = await this.quarantineTerminalCandidate(
         state,
         orderedTasks,
       );
@@ -176,25 +173,16 @@ export class QueueOrchestrator {
         continue;
       }
 
-      const stateAfterDependencyPropagation = await this.propagateNextDependencyBlock(
-        state,
-        orderedTasks,
-      );
-      if (stateAfterDependencyPropagation !== undefined) {
-        state = stateAfterDependencyPropagation;
-        continue;
-      }
-
-      const currentTask = this.selectRunnableTask(state, orderedTasks);
+      const currentTask = this.selectCurrentTask(state, orderedTasks);
       if (currentTask === undefined) {
-        return this.finishConvergedRun(loaded, state, orderedTasks);
+        return this.finishLinearRun(loaded, state, orderedTasks);
       }
 
       const taskState = state.tasks[currentTask.id];
       if (taskState === undefined) {
         throw new ConfigurationError(`运行状态缺少任务 ${currentTask.id}`);
       }
-      this.assertDependenciesCompleted(state, currentTask);
+      this.assertPreviousTasksCompleted(state, orderedTasks, currentTask);
 
       const result = await this.taskExecution.step({
         loaded,
@@ -229,18 +217,26 @@ export class QueueOrchestrator {
   }
 
   /*
-   * 终态候选归档是释放主工作区的前置条件；每轮只处理一个任务并立即 checkpoint。
+   * 当前终态候选归档是结束线性 Run 的前置条件；每轮只处理一个任务并立即 checkpoint。
    * 崩溃恢复会通过确定性 Git ref 找回已归档候选，不会重复覆盖或丢失文件树。
    */
-  private async quarantineNextTerminalCandidate(
+  private async quarantineTerminalCandidate(
     state: RunState,
     orderedTasks: readonly TaskDefinition[],
   ): Promise<RunState | undefined> {
-    const task = orderedTasks.find((candidate) => {
-      const taskState = state.tasks[candidate.id];
-      return (taskState?.status === "blocked" || taskState?.status === "failed")
-        && taskState.candidateArchive === undefined;
-    });
+    const task = orderedTasks.find(
+      (candidate) => state.tasks[candidate.id]?.status !== "completed",
+    );
+    const taskState = task === undefined ? undefined : state.tasks[task.id];
+    if (
+      taskState?.status !== "blocked"
+      && taskState?.status !== "failed"
+    ) {
+      return undefined;
+    }
+    if (taskState.candidateArchive !== undefined) {
+      return undefined;
+    }
     if (task === undefined) {
       return undefined;
     }
@@ -274,74 +270,31 @@ export class QueueOrchestrator {
   }
 
   /*
-   * 依赖阻塞按拓扑顺序逐个传播，状态中会保留直接未完成依赖而不是笼统跳过。
-   * 传播只处理 pending 节点，已完成或正在执行的任务不会被回溯修改。
+   * 第一个未完成任务就是线性队列的唯一当前位置，不允许跳过它扫描后继任务。
+   * 当前位置进入 blocked/failed 后返回空，由收敛逻辑立即结束 Run 并保留后续 pending 状态。
    */
-  private async propagateNextDependencyBlock(
-    state: RunState,
-    orderedTasks: readonly TaskDefinition[],
-  ): Promise<RunState | undefined> {
-    const task = orderedTasks.find((candidate) => {
-      const taskState = state.tasks[candidate.id];
-      return taskState?.status === "pending"
-        && candidate.dependsOn.some((dependencyId) => {
-          const dependencyStatus = state.tasks[dependencyId]?.status;
-          return dependencyStatus === "blocked"
-            || dependencyStatus === "failed"
-            || dependencyStatus === "dependency_blocked";
-        });
-    });
-    if (task === undefined) {
-      return undefined;
-    }
-
-    const blockedDependencies = task.dependsOn.filter(
-      (dependencyId) => state.tasks[dependencyId]?.status !== "completed",
-    );
-    const reason = `依赖任务未完成：${blockedDependencies.join(", ")}`;
-    const nextState = transitionTask(
-      state,
-      task.id,
-      "dependency_blocked",
-      this.now(),
-      { failureReason: reason },
-    );
-    await this.checkpoint(
-      nextState,
-      task.id,
-      "task_dependency_blocked",
-      reason,
-    );
-    return nextState;
-  }
-
-  /*
-   * 已进入执行阶段的任务拥有当前主工作区，必须优先恢复；否则选择第一个依赖均完成的节点。
-   * blocked/failed 节点不会终止扫描，互不依赖的后续节点仍可继续推进。
-   */
-  private selectRunnableTask(
+  private selectCurrentTask(
     state: RunState,
     orderedTasks: readonly TaskDefinition[],
   ): TaskDefinition | undefined {
-    return orderedTasks.find((task) => {
-      const status = state.tasks[task.id]?.status;
-      return status === "executing"
-        || status === "reviewing"
-        || status === "committing";
-    }) ?? orderedTasks.find((task) => {
-      const status = state.tasks[task.id]?.status;
-      return (status === "pending" || status === "retry_pending")
-        && task.dependsOn.every(
-          (dependencyId) => state.tasks[dependencyId]?.status === "completed",
-        );
-    });
+    const task = orderedTasks.find(
+      (candidate) => state.tasks[candidate.id]?.status !== "completed",
+    );
+    if (task === undefined) {
+      return undefined;
+    }
+    const status = state.tasks[task.id]?.status;
+    if (status === undefined) {
+      throw new ConfigurationError(`运行状态缺少任务 ${task.id}`);
+    }
+    return status === "blocked" || status === "failed" ? undefined : task;
   }
 
   /*
-   * 没有可运行节点表示 DAG 已全局收敛，此时统一计算 Run 终态并生成完整产物。
-   * failed 优先于 blocked，避免部分成功掩盖任何已经耗尽重试的任务。
+   * 没有当前位置只可能表示全部完成，或队首未完成任务已经 blocked/failed。
+   * pending 后继不参与终态计算，避免把尚未开放的任务误报为额外失败。
    */
-  private async finishConvergedRun(
+  private async finishLinearRun(
     loaded: LoadedProject,
     state: RunState,
     orderedTasks: readonly TaskDefinition[],
@@ -349,14 +302,21 @@ export class QueueOrchestrator {
     const allCompleted = orderedTasks.every(
       (task) => state.tasks[task.id]?.status === "completed",
     );
+    const terminalTask = orderedTasks
+      .map((task) => state.tasks[task.id])
+      .find((taskState) =>
+        taskState?.status === "blocked" || taskState?.status === "failed");
+    if (!allCompleted && terminalTask === undefined) {
+      throw new ConfigurationError("线性队列没有可执行任务，也没有可解释的终态任务");
+    }
     const terminalStatus = allCompleted
       ? "completed" as const
-      : orderedTasks.some((task) => state.tasks[task.id]?.status === "failed")
+      : terminalTask?.status === "failed"
         ? "failed" as const
         : "blocked" as const;
     const failureReason = allCompleted
       ? undefined
-      : this.describeTerminalFailures(state, orderedTasks);
+      : `${terminalTask?.taskId ?? "unknown"}: ${terminalTask?.failureReason ?? terminalStatus}`;
     const completedState = finishRun(
       state,
       terminalStatus,
@@ -421,16 +381,27 @@ export class QueueOrchestrator {
     );
   }
 
-  private assertDependenciesCompleted(
+  /*
+   * 线性队列要求当前位置之前的所有 TASK 都已完成，直接前驱完成只是该不变量的最小表现。
+   * 完整检查可以在损坏或人工构造的恢复状态进入 Agent 前立即暴露顺序缺口。
+   */
+  private assertPreviousTasksCompleted(
     state: RunState,
+    orderedTasks: readonly TaskDefinition[],
     task: TaskDefinition,
   ): void {
-    const incomplete = task.dependsOn.filter(
-      (dependencyId) => state.tasks[dependencyId]?.status !== "completed",
+    const taskIndex = orderedTasks.findIndex((candidate) => candidate.id === task.id);
+    if (taskIndex < 0) {
+      throw new ConfigurationError(`线性任务序列中不存在任务：${task.id}`);
+    }
+    const incomplete = orderedTasks.slice(0, taskIndex).filter(
+      (previousTask) => state.tasks[previousTask.id]?.status !== "completed",
     );
     if (incomplete.length > 0) {
       throw new ConfigurationError(
-        `任务 ${task.id} 的依赖尚未完成：${incomplete.join(", ")}`,
+        `任务 ${task.id} 之前仍有任务未完成：${incomplete
+          .map((previousTask) => previousTask.id)
+          .join(", ")}`,
       );
     }
   }
@@ -457,7 +428,7 @@ export class QueueOrchestrator {
     loaded: LoadedProject,
     state: RunState,
   ): Promise<readonly string[]> {
-    const manualAcceptance = [
+    const acceptanceChecklist = [
       `# 人工验收清单`,
       "",
       `Run ID：${state.runId}`,
@@ -467,9 +438,7 @@ export class QueueOrchestrator {
         .flatMap((task) => [
         `## ${task.id} ${task.title}`,
         "",
-        ...(task.manualAcceptance.length === 0
-          ? ["- 未声明额外人工验收项"]
-          : task.manualAcceptance.map((item) => `- [ ] ${item}`)),
+        "- [ ] 按该 TASK 的任务描述完成人工验收",
         "",
       ]),
       "> 编排器没有启动浏览器或执行 UI 自动化；以上项目必须由人工验收。",
@@ -494,22 +463,10 @@ export class QueueOrchestrator {
       this.stateStore.writeArtifact(
         state.runId,
         "manual-acceptance.md",
-        manualAcceptance,
+        acceptanceChecklist,
       ),
       this.stateStore.writeArtifact(state.runId, "summary.md", summary),
     ]);
-  }
-
-  private describeTerminalFailures(
-    state: RunState,
-    orderedTasks: readonly TaskDefinition[],
-  ): string {
-    return orderedTasks
-      .map((task) => state.tasks[task.id])
-      .filter((taskState) => taskState?.status !== "completed")
-      .map((taskState) =>
-        `${taskState?.taskId ?? "unknown"}: ${taskState?.failureReason ?? taskState?.status ?? "missing"}`)
-      .join("；");
   }
 
   private createRunId(): string {
@@ -522,7 +479,7 @@ export class QueueOrchestrator {
   }
 
   /*
-   * 队列计划在运行开始和恢复时显式输出，展示 TASK 目录经过严格校验后的真实 DAG 顺序。
+   * 队列计划在运行开始和恢复时显式输出，展示 TASK 目录经过严格校验后的真实线性顺序。
    * 日志中的数量必须与目录加载结果一致，便于在 Agent 启动前确认完整任务范围。
    */
   private describeTaskQueue(

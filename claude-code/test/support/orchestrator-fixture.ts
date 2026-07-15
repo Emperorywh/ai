@@ -11,6 +11,7 @@ import {
 } from "../../src/domain/project.js";
 import type { RunState } from "../../src/domain/run-state.js";
 import { createTaskContractHash } from "../../src/domain/task-completion.js";
+import { createLinearTaskSequence } from "../../src/domain/task-sequence.js";
 import type {
   AgentExecutor,
   AgentRunRequest,
@@ -132,7 +133,7 @@ export class RecordingWorkspace implements Workspace {
     expectedHead: string;
     expectedFingerprint: string;
     taskContractHash: string;
-    dependencyFingerprint: string;
+    predecessorFingerprint: string;
   }): Promise<string> {
     this.commits.push(input.task.id);
     const commitSha = `${input.task.id.toLowerCase()}-${this.commits.length}-sha`;
@@ -142,7 +143,7 @@ export class RecordingWorkspace implements Workspace {
       commitSha,
       runId: input.runId,
       taskContractHash: input.taskContractHash,
-      dependencyFingerprint: input.dependencyFingerprint,
+      predecessorFingerprint: input.predecessorFingerprint,
     });
     return commitSha;
   }
@@ -220,7 +221,6 @@ export function completedBehavior(
 export function createLoadedProject(
   taskInputs: readonly {
     id: string;
-    dependsOn?: readonly string[];
     contractRevision?: string;
   }[],
 ): LoadedProject {
@@ -232,25 +232,23 @@ export function createLoadedProject(
     path: PROJECT_STRUCTURE.specification,
     content: "# 规格说明\n\n测试项目规格。\n",
   };
-  const tasks = taskInputs.map((input) => taskDefinitionSchema.parse({
+  const tasks = createLinearTaskSequence(taskInputs.map((input) => taskDefinitionSchema.parse({
       id: input.id,
       title: input.id,
       file: `${PROJECT_STRUCTURE.taskDirectory}/${input.id}.md`,
-      dependsOn: input.dependsOn ?? [],
-      manualAcceptance: [],
-    }));
+    })));
   const taskDocuments = new Map(
     tasks.map((task) => [
       task.id,
       {
         path: task.file,
-        content: `# ${task.id}\n${taskInputs.find((input) => input.id === task.id)?.contractRevision ?? ""}`,
+        content: `---\nid: ${task.id}\ntitle: ${task.title}\n---\n\n## 任务描述\n\n${taskInputs.find((input) => input.id === task.id)?.contractRevision ?? "测试任务正文"}\n`,
       },
     ]),
   );
   /*
    * 测试夹具使用与生产仓储相同的契约哈希函数，跨 Run 复用测试不会依赖手写假哈希。
-   * contractRevision 只改变指定 TASK 正文，便于验证局部失效和 DAG 下游传播。
+   * contractRevision 只改变指定 TASK 正文，便于验证局部失效和线性后继传播。
    */
   const taskContractHashes = new Map(tasks.map((task) => {
     const taskDocument = taskDocuments.get(task.id);

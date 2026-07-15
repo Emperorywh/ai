@@ -10,12 +10,7 @@ import {
   type ImplementationResult,
   type ReviewResult,
 } from "../domain/agent-result.js";
-import {
-  getTaskAttemptLimit,
-  getTaskTimeoutMinutes,
-  type LoadedProject,
-  type TaskDefinition,
-} from "../domain/project.js";
+import type { LoadedProject, TaskDefinition } from "../domain/project.js";
 import {
   replaceCurrentAttempt,
   replaceExpectedHead,
@@ -27,7 +22,8 @@ import {
   type TaskCompletionState,
   type TaskRunState,
 } from "../domain/run-state.js";
-import { createDependencyCompletionFingerprint } from "../domain/task-completion.js";
+import { createPredecessorCompletionFingerprint } from "../domain/task-completion.js";
+import { findTaskPredecessor } from "../domain/task-sequence.js";
 import type { AgentExecutor } from "../ports/agent-executor.js";
 import type { Clock } from "../ports/clock.js";
 import type { Workspace } from "../ports/workspace.js";
@@ -51,10 +47,6 @@ export interface TaskStepInput {
   readonly resumeExistingExecution: boolean;
   readonly signal?: AbortSignal;
   readonly onCheckpoint?: TaskCheckpointWriter;
-}
-
-interface AgentResourceLimits {
-  readonly timeoutMs?: number;
 }
 
 export class TaskExecutionService {
@@ -84,7 +76,6 @@ export class TaskExecutionService {
       case "completed":
       case "blocked":
       case "failed":
-      case "dependency_blocked":
         return { state: input.state, message: `任务已处于终态 ${taskState.status}` };
     }
   }
@@ -215,7 +206,7 @@ export class TaskExecutionService {
     }
 
     if (outcome.data.status === "failed") {
-      return this.retryOrFail(
+      return this.scheduleRetry(
         input,
         finishedState,
         {
@@ -259,7 +250,6 @@ export class TaskExecutionService {
       cwd: input.loaded.projectRoot,
       model: ORCHESTRATOR_POLICY.worker.model,
       effort: ORCHESTRATOR_POLICY.worker.effort,
-      ...this.buildTaskResourceLimits(input.task),
       ...(input.signal === undefined ? {} : { signal: input.signal }),
       ...(shouldResume
         ? { resumeSessionId: attempt.sessionId }
@@ -363,7 +353,7 @@ export class TaskExecutionService {
         },
         this.now(),
       );
-      return this.retryOrFail(input, stateWithReview, {
+      return this.scheduleRetry(input, stateWithReview, {
         kind: "repair",
         reason: "独立审核未通过",
         feedback: this.formatReviewFeedback(outcome.data),
@@ -405,7 +395,6 @@ export class TaskExecutionService {
       cwd: input.loaded.projectRoot,
       model: ORCHESTRATOR_POLICY.reviewer.model,
       effort: ORCHESTRATOR_POLICY.reviewer.effort,
-      ...this.buildTaskResourceLimits(input.task),
       ...(input.signal === undefined ? {} : { signal: input.signal }),
       sessionId: randomUUID(),
       resultSchema: reviewResultSchema,
@@ -461,7 +450,7 @@ export class TaskExecutionService {
       expectedHead: input.state.workspace.expectedHead,
       expectedFingerprint: taskState.candidateFingerprint,
       taskContractHash: completion.contractHash,
-      dependencyFingerprint: completion.dependencyFingerprint,
+      predecessorFingerprint: completion.predecessorFingerprint,
     });
     const completed = transitionTask(
       input.state,
@@ -477,27 +466,41 @@ export class TaskExecutionService {
   }
 
   /*
-   * 完成提交绑定当前 TASK 契约与所有直接依赖的具体提交，形成可沿 DAG 推导的验证链。
-   * 缺少依赖提交属于状态不变量破坏，必须立即失败，不能写入可被后续 Run 误复用的证据。
+   * 完成提交绑定当前 TASK 契约与直接前驱的具体提交，形成可沿线性序列推导的验证链。
+   * 缺少前驱提交属于状态不变量破坏，必须立即失败，不能写入可被后续 Run 误复用的证据。
    */
   private createCompletionState(input: TaskStepInput): TaskCompletionState {
     const contractHash = input.loaded.taskContractHashes.get(input.task.id);
     if (contractHash === undefined) {
       throw new Error(`任务缺少完成契约指纹：${input.task.id}`);
     }
-    const dependencies = input.task.dependsOn.map((taskId) => {
-      const commitSha = input.state.tasks[taskId]?.commitSha;
-      if (commitSha === undefined) {
-        throw new Error(`依赖任务缺少完成提交：${taskId}`);
-      }
-      return { taskId, commitSha };
-    });
+    const predecessor = findTaskPredecessor(input.loaded.tasks, input.task.id);
+    const predecessorCompletion = predecessor === undefined
+      ? undefined
+      : {
+          taskId: predecessor.id,
+          commitSha: this.requireCompletedTaskCommit(input.state, predecessor.id),
+        };
     return {
       origin: "executed",
       evidenceRunId: input.state.runId,
       contractHash,
-      dependencyFingerprint: createDependencyCompletionFingerprint(dependencies),
+      predecessorFingerprint: createPredecessorCompletionFingerprint(
+        predecessorCompletion,
+      ),
     };
+  }
+
+  private requireCompletedTaskCommit(state: RunState, taskId: string): string {
+    /*
+     * 前驱状态与提交必须同时存在，completed 但缺少 commitSha 仍是不可写入证据的损坏状态。
+     * 守卫集中在完成证据边界，避免 Workspace 接收到无法验证的空前驱事实。
+     */
+    const taskState = state.tasks[taskId];
+    if (taskState?.status !== "completed" || taskState.commitSha === undefined) {
+      throw new Error(`前驱任务缺少完成提交：${taskId}`);
+    }
+    return taskState.commitSha;
   }
 
   private handleAgentFailure(
@@ -518,7 +521,7 @@ export class TaskExecutionService {
       };
     }
 
-    return this.retryOrFail(input, state, {
+    return this.scheduleRetry(input, state, {
       kind: outcome.sessionId === undefined ? "repair" : "resume",
       reason: `Agent ${outcome.kind} 错误`,
       feedback: outcome.message,
@@ -529,46 +532,14 @@ export class TaskExecutionService {
   }
 
   /*
-   * 实现与审核共享 TASK 显式超时，换算逻辑集中在一处避免两个调用点逐渐漂移。
-   * 未声明超时时不注入隐藏限制，外部中断仍可安全终止当前阶段并保存 checkpoint。
+   * 任务级尝试次数和超时已经从静态 TASK 契约删除，repair 循环只受明确阻塞或外部中止控制。
+   * 该方法只负责构造下一次显式尝试，不再混入按任务变化的资源策略分支。
    */
-  private buildTaskResourceLimits(
-    task: TaskDefinition,
-  ): AgentResourceLimits {
-    const timeoutMinutes = getTaskTimeoutMinutes(task);
-    return {
-      ...(timeoutMinutes === undefined
-        ? {}
-        : { timeoutMs: timeoutMinutes * 60_000 }),
-    };
-  }
-
-  private retryOrFail(
+  private scheduleRetry(
     input: TaskStepInput,
     state: RunState,
     retry: RetryContext,
   ): TaskStepResult {
-    const taskState = state.tasks[input.task.id];
-    if (taskState === undefined) {
-      throw new Error(`运行状态中不存在任务 ${input.task.id}`);
-    }
-    const attemptLimit = getTaskAttemptLimit(input.task);
-    if (
-      attemptLimit !== undefined
-      && taskState.attempts.length >= attemptLimit
-    ) {
-      return {
-        state: transitionTask(
-          state,
-          input.task.id,
-          "failed",
-          this.now(),
-          { failureReason: `${retry.reason}；已达到 ${attemptLimit} 次尝试上限` },
-        ),
-        message: `${retry.reason}，已达到重试上限`,
-      };
-    }
-
     return {
       state: transitionTask(
         state,

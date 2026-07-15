@@ -3,9 +3,9 @@
  * 它不执行任务、不写状态，也不理解 Git 命令；所有历史事实通过 Workspace 端口读取。
  */
 import { ConfigurationError } from "../domain/errors.js";
-import type { LoadedProject, TaskDefinition } from "../domain/project.js";
+import type { LoadedProject } from "../domain/project.js";
 import type { InitialTaskRunState } from "../domain/run-state.js";
-import { createDependencyCompletionFingerprint } from "../domain/task-completion.js";
+import { createPredecessorCompletionFingerprint } from "../domain/task-completion.js";
 import type {
   TaskCompletionEvidence,
   Workspace,
@@ -16,7 +16,7 @@ export type TaskReuseReason =
   | "fresh_run"
   | "never_completed"
   | "contract_changed"
-  | "dependency_changed";
+  | "predecessor_changed";
 
 export interface TaskReuseDecision {
   readonly taskId: string;
@@ -34,19 +34,18 @@ export class TaskProgressReconciler {
   public constructor(private readonly workspace: Workspace) {}
 
   /*
-   * fresh 明确绕过历史读取；默认模式只复用契约、依赖指纹均匹配且位于当前 HEAD 祖先链的提交。
-   * 任务按拓扑顺序决策，因此上游没有复用时，下游即使存在旧提交也会被标记为依赖失效。
+   * fresh 明确绕过历史读取；默认模式只复用契约、前驱指纹均匹配且位于当前 HEAD 祖先链的提交。
+   * 复用必须形成从根任务开始的连续前缀，任一节点失效后不再探测后续节点的历史证据。
    */
   public async createPlan(input: {
     loaded: LoadedProject;
-    orderedTasks: readonly TaskDefinition[];
     head: string;
     fresh: boolean;
   }): Promise<TaskProgressPlan> {
     if (input.fresh) {
       return {
-        tasks: input.orderedTasks.map((task) => ({ taskId: task.id })),
-        decisions: input.orderedTasks.map((task) => ({
+        tasks: input.loaded.tasks.map((task) => ({ taskId: task.id })),
+        decisions: input.loaded.tasks.map((task) => ({
           taskId: task.id,
           reason: "fresh_run",
         })),
@@ -64,36 +63,38 @@ export class TaskProgressReconciler {
         latestCompletionByTask.set(evidence.taskId, evidence);
       }
     }
-    const reused = new Map<string, TaskCompletionEvidence>();
     const tasks: InitialTaskRunState[] = [];
     const decisions: TaskReuseDecision[] = [];
+    let reusablePrefix = true;
+    let predecessor: TaskCompletionEvidence | undefined;
 
-    for (const task of input.orderedTasks) {
+    for (const task of input.loaded.tasks) {
       const contractHash = input.loaded.taskContractHashes.get(task.id);
       if (contractHash === undefined) {
         throw new ConfigurationError(`任务缺少完成契约指纹：${task.id}`);
       }
-      const dependencies = task.dependsOn.map((taskId) => ({
-        taskId,
-        evidence: reused.get(taskId),
-      }));
-      if (dependencies.some((dependency) => dependency.evidence === undefined)) {
+
+      /*
+       * 前缀一旦断裂，后续任务即使局部契约未变也必须重新执行。
+       * 这里不读取后续旧证据，避免出现中间缺口却复用尾部任务的非线性状态。
+       */
+      if (!reusablePrefix) {
         tasks.push({ taskId: task.id });
-        decisions.push({ taskId: task.id, reason: "dependency_changed" });
+        decisions.push({ taskId: task.id, reason: "predecessor_changed" });
         continue;
       }
-      const dependencyFingerprint = createDependencyCompletionFingerprint(
-        dependencies.map((dependency) => ({
-          taskId: dependency.taskId,
-          commitSha: requireDependencyEvidence(dependency).commitSha,
-        })),
+      const predecessorFingerprint = createPredecessorCompletionFingerprint(
+        predecessor === undefined
+          ? undefined
+          : { taskId: predecessor.taskId, commitSha: predecessor.commitSha },
       );
       const latest = latestCompletionByTask.get(task.id);
       if (
         latest === undefined
         || latest.taskContractHash !== contractHash
-        || latest.dependencyFingerprint !== dependencyFingerprint
+        || latest.predecessorFingerprint !== predecessorFingerprint
       ) {
+        reusablePrefix = false;
         tasks.push({ taskId: task.id });
         decisions.push({
           taskId: task.id,
@@ -101,19 +102,19 @@ export class TaskProgressReconciler {
             ? "never_completed"
             : latest.taskContractHash !== contractHash
               ? "contract_changed"
-              : "dependency_changed",
+              : "predecessor_changed",
         });
         continue;
       }
 
-      reused.set(task.id, latest);
+      predecessor = latest;
       tasks.push({
         taskId: task.id,
         reusedCompletion: {
           commitSha: latest.commitSha,
           evidenceRunId: latest.runId,
           contractHash,
-          dependencyFingerprint,
+          predecessorFingerprint,
         },
       });
       decisions.push({
@@ -126,18 +127,4 @@ export class TaskProgressReconciler {
 
     return { tasks, decisions };
   }
-}
-
-/*
- * 调用方已经在生成依赖指纹前完成整组存在性检查；此守卫把该不变量显式带入类型系统。
- * 若未来循环结构变化破坏检查顺序，这里会立即失败，而不是写入带空字符串的魔法指纹。
- */
-function requireDependencyEvidence(input: {
-  readonly taskId: string;
-  readonly evidence: TaskCompletionEvidence | undefined;
-}): TaskCompletionEvidence {
-  if (input.evidence === undefined) {
-    throw new ConfigurationError(`依赖缺少完成证据：${input.taskId}`);
-  }
-  return input.evidence;
 }

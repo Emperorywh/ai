@@ -70,8 +70,6 @@ function createTask(id: string): TaskDefinition {
     id,
     title: "实现候选提交",
     file: `orchestration/tasks/${id}.md`,
-    dependsOn: [],
-    manualAcceptance: [],
   };
 }
 
@@ -151,12 +149,12 @@ describe("GitWorkspace", () => {
     await expect(
       fixture.workspace.commitTask({
         runId: "run-fingerprint",
-        task: createTask("TASK-1"),
+        task: createTask("TASK-001"),
         messagePrefix: "task",
         expectedHead: fixture.initialHead,
         expectedFingerprint: candidate.fingerprint,
         taskContractHash: "1".repeat(64),
-        dependencyFingerprint: "2".repeat(64),
+        predecessorFingerprint: "2".repeat(64),
       }),
     ).rejects.toThrow("候选内容已变化，拒绝提交未经当前审核确认的版本");
     expect((await runGit(fixture.root, ["rev-parse", "HEAD"])).trim()).toBe(
@@ -180,7 +178,7 @@ describe("GitWorkspace", () => {
 
     const archive = await fixture.workspace.quarantineCandidate({
       runId: "run-quarantine",
-      taskId: "TASK-BLOCKED",
+      taskId: "TASK-001",
     });
 
     expect(archive.changedFiles).toEqual(["README.md", "feature.ts"]);
@@ -201,17 +199,17 @@ describe("GitWorkspace", () => {
      */
     const recovered = await fixture.workspace.quarantineCandidate({
       runId: "run-quarantine",
-      taskId: "TASK-BLOCKED",
+      taskId: "TASK-001",
     });
     expect(recovered).toEqual(archive);
   });
 
   it("正常提交写入精确 trailers，并按任务、父提交和候选恢复", async () => {
     const fixture = await createGitFixture();
-    const task = createTask("TASK-10");
+    const task = createTask("TASK-010");
     const runId = "run-exact-trailers";
     const taskContractHash = "1".repeat(64);
-    const dependencyFingerprint = "2".repeat(64);
+    const predecessorFingerprint = "2".repeat(64);
     await writeFile(
       join(fixture.root, "feature.ts"),
       "export const completed = true;\n",
@@ -226,39 +224,39 @@ describe("GitWorkspace", () => {
       expectedHead: fixture.initialHead,
       expectedFingerprint: candidate.fingerprint,
       taskContractHash,
-      dependencyFingerprint,
+      predecessorFingerprint,
     });
     const commitBody = (
       await runGit(fixture.root, ["show", "-s", "--format=%B", commitSha])
     ).replaceAll("\r\n", "\n").trimEnd();
 
     expect(commitBody).toBe([
-      "task: TASK-10 实现候选提交",
+      "task: TASK-010 实现候选提交",
       "",
       `Orchestrator-Run: ${runId}`,
       `Orchestrator-Project: ${rootProjectHistoryKey}`,
-      "Orchestrator-Task: TASK-10",
+      "Orchestrator-Task: TASK-010",
       `Orchestrator-Candidate: ${candidate.fingerprint}`,
       `Orchestrator-Task-Contract: ${taskContractHash}`,
-      `Orchestrator-Task-Dependencies: ${dependencyFingerprint}`,
+      `Orchestrator-Task-Predecessor: ${predecessorFingerprint}`,
     ].join("\n"));
     /*
      * 完成历史必须从当前 HEAD 的祖先链解析出结构化证据，供新 Run 一次性核验全部 TASK。
-     * 自由文本标题不参与匹配，契约和依赖指纹必须来自精确 trailer。
+     * 自由文本标题不参与匹配，契约和前驱指纹必须来自精确 trailer。
      */
     await expect(
       fixture.workspace.readTaskCompletionHistory(commitSha),
     ).resolves.toEqual([{
-      taskId: "TASK-10",
+      taskId: "TASK-010",
       commitSha,
       runId,
       taskContractHash,
-      dependencyFingerprint,
+      predecessorFingerprint,
     }]);
     await expect(
       fixture.workspace.findTaskCommit({
         runId,
-        taskId: "TASK-10",
+        taskId: "TASK-010",
         expectedParent: fixture.initialHead,
         candidateFingerprint: candidate.fingerprint,
       }),
@@ -266,7 +264,7 @@ describe("GitWorkspace", () => {
     await expect(
       fixture.workspace.findTaskCommit({
         runId,
-        taskId: "TASK-1",
+        taskId: "TASK-001",
         expectedParent: fixture.initialHead,
         candidateFingerprint: candidate.fingerprint,
       }),
@@ -274,7 +272,7 @@ describe("GitWorkspace", () => {
     await expect(
       fixture.workspace.findTaskCommit({
         runId,
-        taskId: "TASK-10",
+        taskId: "TASK-010",
         expectedParent: commitSha,
         candidateFingerprint: candidate.fingerprint,
       }),
@@ -282,7 +280,7 @@ describe("GitWorkspace", () => {
     await expect(
       fixture.workspace.findTaskCommit({
         runId,
-        taskId: "TASK-10",
+        taskId: "TASK-010",
         expectedParent: fixture.initialHead,
         candidateFingerprint: "0".repeat(64),
       }),
@@ -301,16 +299,16 @@ describe("GitWorkspace", () => {
     const fixture = await createGitFixture();
     const candidate = await fixture.workspace.captureCandidate();
     const taskContractHash = "3".repeat(64);
-    const dependencyFingerprint = "4".repeat(64);
+    const predecessorFingerprint = "4".repeat(64);
 
     const commitSha = await fixture.workspace.commitTask({
       runId: "run-empty-completion",
-      task: createTask("TASK-EMPTY"),
+      task: createTask("TASK-011"),
       messagePrefix: "task",
       expectedHead: fixture.initialHead,
       expectedFingerprint: candidate.fingerprint,
       taskContractHash,
-      dependencyFingerprint,
+      predecessorFingerprint,
     });
 
     /*
@@ -321,11 +319,11 @@ describe("GitWorkspace", () => {
     await expect(
       fixture.workspace.readTaskCompletionHistory(commitSha),
     ).resolves.toEqual([{
-      taskId: "TASK-EMPTY",
+      taskId: "TASK-011",
       commitSha,
       runId: "run-empty-completion",
       taskContractHash,
-      dependencyFingerprint,
+      predecessorFingerprint,
     }]);
     await expect(fixture.workspace.assertClean()).resolves.toBeUndefined();
   });

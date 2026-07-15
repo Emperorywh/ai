@@ -1,14 +1,14 @@
 # Claude Task Orchestrator 源码功能说明
 
-本文档描述固定项目契约与 RunState v4 的当前实现。系统不读取项目级配置文件，也不兼容包含 `scope`、`gates`、`verification` 或旧状态版本的数据。
+本文档描述固定项目契约与 RunState v5 的当前实现。系统不读取项目级配置文件，也不兼容 DAG TASK、额外 TASK 元数据或旧状态版本的数据。
 
 ## 1. 系统目标
 
 编排器负责：
 
 1. 从 TASK Markdown 目录加载完整任务集合；
-2. 校验静态元数据与依赖 DAG；
-3. 按稳定拓扑顺序单并发推进任务；
+2. 校验静态元数据并建立数字线性序列；
+3. 只有前一任务完成后才单并发推进下一任务；
 4. 为每个任务启动拥有完整 Claude Code 能力的自主 Worker；
 5. 冻结 Worker 产出的完整项目候选；
 6. 使用全新只读 Reviewer 审核候选；
@@ -22,16 +22,16 @@
 ### 2.1 领域层
 
 - `domain/project.ts`：集中式编排目录、TASK 元数据与加载后契约。
-- `domain/dag.ts`：依赖合法性和稳定拓扑排序。
+- `domain/task-sequence.ts`：数字线性排序、序号唯一性和直接前驱推导。
 - `domain/run-state.ts`：Run/TASK 状态、合法转换与状态 Schema。
-- `domain/task-completion.ts`：任务契约指纹和依赖完成指纹。
+- `domain/task-completion.ts`：任务契约指纹和直接前驱完成指纹。
 - `domain/agent-result.ts`：Worker 与 Reviewer 的结构化结果协议。
 
 领域层不读取文件、不执行 Git，也不依赖 Claude SDK。
 
 ### 2.2 应用层
 
-- `application/queue-orchestrator.ts`：单并发 DAG 驱动器、checkpoint 与 Run 收敛。
+- `application/queue-orchestrator.ts`：严格线性驱动器、checkpoint 与 Run 收敛。
 - `application/task-execution-service.ts`：实现、审核、修复和提交阶段。
 - `application/task-progress-reconciler.ts`：新 Run 的 Git 完成证据核验与复用计划。
 - `application/orchestrator-policy.ts`：不可配置的 Worker、Reviewer 与 Git 执行策略。
@@ -54,7 +54,7 @@
 
 ### 2.4 基础设施层
 
-- `infrastructure/claude/claude-agent-sdk-executor.ts`：Claude Agent SDK 消息流、结构化输出、中止和资源熔断。
+- `infrastructure/claude/claude-agent-sdk-executor.ts`：Claude Agent SDK 消息流、结构化输出和中止。
 - `infrastructure/git/git-workspace.ts`：候选指纹、隔离归档、原子提交和完成历史。
 - `infrastructure/tasks/file-project-repository.ts`：唯一规格与 TASK Markdown 编译。
 - `infrastructure/persistence/*`：原子文件状态库与独占锁。
@@ -80,24 +80,22 @@
 
 ## 4. TASK 文档契约
 
-TASK 文件名必须为 `<id>.md`，首个一级标题必须为 `# <id> — <title>`。
+TASK 文件名必须为 `<id>.md`，ID 必须采用 `TASK-数字` 且数字至少三位。TASK 文档只有以下结构：
 
-```yaml
+```markdown
 ---
 id: TASK-002
-title: 实现用户列表状态层
-dependsOn:
-  - TASK-001
-maxAttempts: 5
-timeoutMinutes: 60
-manualAcceptance:
-  - 在浏览器中验收全部页面状态
+title: 实现用户列表
 ---
+
+## 任务描述
+
+这里是任务正文。
 ```
 
-`maxAttempts` 和 `timeoutMinutes` 可以省略。`status`、`scope`、`gates` 以及其他未知字段会被严格 Schema 拒绝。
+前置元数据只允许 `id` 和 `title`。`dependsOn`、`maxAttempts`、`timeoutMinutes`、`manualAcceptance`、`status`、`scope`、`gates` 以及其他未知字段都会被严格 Schema 拒绝。任务特有验收事实写入任务描述，通用验收和架构规则写入唯一 `SPEC.md`。
 
-`orchestration/tasks` 是唯一任务事实源。仓储加载其中所有 Markdown 文件后再执行 DAG 校验，不存在配置索引与目录内容漂移的问题。
+`orchestration/tasks` 是唯一任务事实源。仓储加载其中所有 Markdown 文件后按 ID 数字值排序，拒绝重复 ID 和重复数字序号，不存在配置索引与目录内容漂移的问题。
 
 ## 5. Run 启动与队列推进
 
@@ -107,24 +105,24 @@ manualAcceptance:
 2. 取得项目级独占锁；
 3. 要求 Git 工作区干净；
 4. 读取仓库根、分支和 HEAD；
-5. 对 TASK 做稳定拓扑排序；
+5. 使用项目仓储已经建立的线性 TASK 序列；
 6. 核验当前 HEAD 中的完成证据；
-7. 创建 RunState v4；
+7. 创建 RunState v5；
 8. 写入启动 checkpoint；
 9. 进入 `drive()` 循环。
 
 `drive()` 每轮只推进一个显式事实：
 
 1. 响应外部中断；
-2. 归档下一个 blocked/failed 候选；
-3. 传播下一个依赖阻塞；
-4. 优先恢复正在执行、审核或提交的 TASK；
-5. 否则选择第一个依赖全部完成的 pending/retry_pending TASK；
+2. 归档当前 blocked/failed TASK 的候选；
+3. 选择线性序列中的第一个未完成 TASK；
+4. 如果该 TASK 已 blocked/failed，则立即结束 Run；
+5. 校验此前全部 TASK 已 completed；
 6. 调用 `TaskExecutionService.step()`；
 7. 原子保存状态并写事件；
 8. 重新根据最新状态选择。
 
-队列不维护会漂移的可变游标。选择结果完全由稳定拓扑序和持久化 RunState 推导。
+队列不维护会漂移的可变游标。选择结果完全由稳定线性序列和持久化 RunState 推导，不能跳过当前任务扫描后继。
 
 ## 6. TASK 状态机
 
@@ -150,8 +148,9 @@ executing/reviewing
 
 - `completed`：候选已提交并写入完成证据；
 - `blocked`：需要外部信息或人工决策；
-- `failed`：不可重试或达到显式上限；
-- `dependency_blocked`：直接或传递依赖未完成。
+- `failed`：不可重试的执行或基础设施错误。
+
+`blocked` 或 `failed` 出现后，当前 Run 立即结束，全部后继保持 `pending`。
 
 ## 7. 自主 Worker
 
@@ -217,7 +216,7 @@ Worker 返回 `completed` 后，应用层立即调用 `Workspace.captureCandidat
 - `Orchestrator-Task`
 - `Orchestrator-Candidate`
 - `Orchestrator-Task-Contract`
-- `Orchestrator-Task-Dependencies`
+- `Orchestrator-Task-Predecessor`
 
 无文件差异时仍创建空提交，完成事实不依赖 diff 是否非空。
 
@@ -225,12 +224,12 @@ Worker 返回 `completed` 后，应用层立即调用 `Workspace.captureCandidat
 
 新 Run 默认读取当前 HEAD 祖先链上的完成提交。TASK 只有同时满足以下条件才复用：
 
-1. 最新完成证据存在；
-2. TASK 契约指纹相同；
-3. 所有直接依赖均已复用；
-4. 依赖完成提交指纹相同。
+1. 从首个 TASK 到当前 TASK 的全部前序证据已经连续复用；
+2. 当前 TASK 的最新完成证据存在；
+3. TASK 契约指纹相同；
+4. 直接前驱完成提交指纹相同。
 
-任务正文、人工验收或唯一 SPEC 变化会使完成证据失效。完成契约版本为 v4，旧目录结构产生的证据不会被复用。TASK 的超时和重试次数只影响执行资源，不改变完成定义；Reviewer 属于不可关闭的系统契约。
+任一任务正文或唯一 SPEC 变化都会在该位置断开复用前缀，该任务以及全部后继重新执行。完成契约版本为 v5，旧 DAG 结构产生的证据不会被复用。Reviewer 属于不可关闭的系统契约。
 
 `--fresh` 只禁止本次 Run 复用，不删除历史。
 
@@ -247,9 +246,7 @@ Worker 返回 `completed` 后，应用层立即调用 `Workspace.captureCandidat
 
 ## 12. 阻塞候选隔离
 
-blocked/failed TASK 的未提交候选会写入确定性的 `refs/claude-task-orchestrator/quarantine/*`，随后清理主工作区。这样独立 DAG 分支可以继续执行，失败现场仍能审计和恢复。
-
-依赖该 TASK 的 pending 节点按拓扑顺序转为 `dependency_blocked`，无依赖的其他分支继续运行到全局收敛。
+blocked/failed TASK 的未提交候选会写入确定性的 `refs/claude-task-orchestrator/quarantine/*`，随后清理主工作区并结束 Run。失败现场仍能审计和恢复，后继 TASK 不发生状态转换并保持 `pending`。
 
 ## 13. 状态存储与时间
 
@@ -272,13 +269,13 @@ blocked/failed TASK 的未提交候选会写入确定性的 `refs/claude-task-or
 
 1. 同一项目同一时刻只有一个编排器实例；
 2. 同一时刻只推进一个 TASK；
-3. TASK 只有在直接依赖全部 completed 后才能运行；
+3. TASK 只有在此前全部 TASK completed 后才能运行；
 4. Worker 拥有完整项目修改能力，不存在 TASK 路径白名单；
 5. 编排器不运行预声明外部命令；
 6. Reviewer 始终只读且使用全新会话；
 7. Reviewer 与提交必须绑定同一候选 fingerprint；
 8. 原子提交不能夹带父仓库兄弟目录变化；
-9. 任务完成证据必须绑定契约和直接依赖提交；
+9. 任务完成证据必须绑定契约和直接前驱提交；
 10. 项目级配置文件不进入运行数据流，旧 RunState 不进入兼容路径。
 
 ## 15. 自动化验证
@@ -286,11 +283,11 @@ blocked/failed TASK 的未提交候选会写入确定性的 `refs/claude-task-or
 测试覆盖：
 
 - 集中式目录加载、旧路径拒绝、配置文件忽略和 TASK 严格解析；
-- 稳定 DAG、依赖传播和单并发；
+- 数字线性序列、阻塞即停和单并发；
 - Worker 完整工具能力且不注入路径 Hook；
 - 实现、审核、repair、阻塞和恢复状态流；
 - 候选 fingerprint、原子提交、空提交和 quarantine；
-- 完成证据复用与下游失效传播；
+- 连续前缀复用与后继失效传播；
 - 状态原子写入、锁和北京时间展示。
 
 测试使用 Fake Agent 或临时 Git 仓库，不调用真实 Claude，也不启动浏览器。

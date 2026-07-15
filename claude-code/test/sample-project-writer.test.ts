@@ -7,6 +7,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  readFile,
   rm,
   stat,
   writeFile,
@@ -48,6 +49,15 @@ describe("writeSampleProject", () => {
     const loaded = await new FileProjectRepository().load(root);
     expect(loaded.tasks.map((task) => task.id)).toEqual(["TASK-001"]);
     expect(loaded.specificationDocument.path).toBe("orchestration/SPEC.md");
+    const taskTemplate = await readFile(
+      join(root, "orchestration", "tasks", "TASK-001.md"),
+      "utf8",
+    );
+    expect(taskTemplate).toContain(
+      "---\nid: TASK-001\ntitle: 实现第一个任务\n---\n\n## 任务描述\n",
+    );
+    expect(taskTemplate).not.toContain("dependsOn");
+    expect(taskTemplate).not.toContain("# TASK-001");
     await expect(access(join(root, "PLAN.md"))).rejects.toMatchObject({
       code: "ENOENT",
     });

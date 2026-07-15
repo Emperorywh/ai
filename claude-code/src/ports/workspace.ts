@@ -30,14 +30,14 @@ export interface CandidateArchive {
 
 /*
  * 可复用完成证据来自当前 HEAD 可达的任务提交，Run ID 只用于审计来源。
- * 契约与依赖指纹由应用层提供，Workspace 只负责验证不可伪造的 Git 历史事实。
+ * 契约与前驱指纹由应用层提供，Workspace 只负责验证不可伪造的 Git 历史事实。
  */
 export interface TaskCompletionEvidence {
   readonly taskId: string;
   readonly commitSha: string;
   readonly runId: string;
   readonly taskContractHash: string;
-  readonly dependencyFingerprint: string;
+  readonly predecessorFingerprint: string;
 }
 
 export interface Workspace {
@@ -56,7 +56,7 @@ export interface Workspace {
     expectedHead: string;
     expectedFingerprint: string;
     taskContractHash: string;
-    dependencyFingerprint: string;
+    predecessorFingerprint: string;
   }): Promise<string>;
   findTaskCommit(input: {
     runId: string;

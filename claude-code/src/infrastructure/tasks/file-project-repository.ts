@@ -6,7 +6,6 @@ import { createHash } from "node:crypto";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { basename, relative, resolve } from "node:path";
 import { parse } from "yaml";
-import { createStableTaskOrder } from "../../domain/dag.js";
 import { ConfigurationError } from "../../domain/errors.js";
 import {
   PROJECT_STRUCTURE,
@@ -17,7 +16,10 @@ import {
   type TextDocument,
 } from "../../domain/project.js";
 import { createTaskContractHash } from "../../domain/task-completion.js";
+import { createLinearTaskSequence } from "../../domain/task-sequence.js";
 import type { ProjectRepository } from "../../ports/project-repository.js";
+
+const TASK_FRONT_MATTER_PATTERN = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/u;
 
 interface LoadedTaskDocument {
   readonly task: TaskDefinition;
@@ -38,7 +40,7 @@ export class FileProjectRepository implements ProjectRepository {
       PROJECT_STRUCTURE.specification,
     );
     const taskEntries = await this.loadTaskDocuments(absoluteProjectRoot);
-    const tasks = createStableTaskOrder(taskEntries.map((entry) => entry.task));
+    const tasks = createLinearTaskSequence(taskEntries.map((entry) => entry.task));
     const taskDocuments = new Map(
       taskEntries.map((entry) => [entry.task.id, entry.document] as const),
     );
@@ -66,7 +68,13 @@ export class FileProjectRepository implements ProjectRepository {
       projectRoot: absoluteProjectRoot,
       projectHash: this.createContentHash(
         specificationDocument,
-        taskEntries.map((entry) => entry.document),
+        tasks.map((task) => {
+          const document = taskDocuments.get(task.id);
+          if (document === undefined) {
+            throw new ConfigurationError(`缺少任务文档：${task.id}`);
+          }
+          return document;
+        }),
       ),
       taskDocuments,
       taskContractHashes,
@@ -107,7 +115,7 @@ export class FileProjectRepository implements ProjectRepository {
         ...metadata,
         file: relativePath,
       });
-      this.validateTaskHeading(task, content);
+      this.validateTaskBody(task, content);
       return {
         task,
         document: { path: relativePath, content },
@@ -120,7 +128,7 @@ export class FileProjectRepository implements ProjectRepository {
    * TASK 状态不属于静态定义，诸如 status: pending 的字段会由严格 Schema 明确拒绝。
    */
   private parseTaskMetadata(path: string, content: string) {
-    const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/u.exec(content);
+    const match = TASK_FRONT_MATTER_PATTERN.exec(content);
     if (match?.[1] === undefined) {
       throw new ConfigurationError(`TASK 缺少 YAML 前置元数据：${path}`);
     }
@@ -142,12 +150,16 @@ export class FileProjectRepository implements ProjectRepository {
     return parsed.data;
   }
 
-  private validateTaskHeading(task: TaskDefinition, content: string): void {
-    const firstHeading = content.split(/\r?\n/u).find((line) => line.startsWith("# "));
-    const expected = `# ${task.id} — ${task.title}`;
-    if (firstHeading !== expected) {
+  /*
+   * TASK 正文只有一个固定入口，标题身份不再复制到 Markdown 一级标题中。
+   * 任务描述必须包含实际内容，避免合法元数据包裹空任务后进入 Agent 执行阶段。
+   */
+  private validateTaskBody(task: TaskDefinition, content: string): void {
+    const metadata = TASK_FRONT_MATTER_PATTERN.exec(content);
+    const body = metadata === null ? "" : content.slice(metadata[0].length);
+    if (!/^\r?\n## 任务描述\r?\n\r?\n[\s\S]*\S(?:\r?\n)?$/u.test(body)) {
       throw new ConfigurationError(
-        `TASK 标题必须与前置元数据一致：${task.file} 期望“${expected}”`,
+        `TASK 正文必须使用“## 任务描述”且内容不能为空：${task.file}`,
       );
     }
   }

@@ -14,7 +14,6 @@ export const taskStatuses = [
   "completed",
   "blocked",
   "failed",
-  "dependency_blocked",
 ] as const;
 
 export type TaskStatus = (typeof taskStatuses)[number];
@@ -50,13 +49,13 @@ export interface CandidateArchiveState {
 
 /*
  * 完成证据说明本次 Run 是实际执行了任务，还是复用了 Git 历史中的有效完成提交。
- * 契约与依赖指纹仍以提交 trailer 为项目级事实，本字段只是便于状态展示和运行审计的投影。
+ * 契约与前驱指纹仍以提交 trailer 为项目级事实，本字段只是便于状态展示和运行审计的投影。
  */
 export interface TaskCompletionState {
   readonly origin: "executed" | "reused";
   readonly evidenceRunId: string;
   readonly contractHash: string;
-  readonly dependencyFingerprint: string;
+  readonly predecessorFingerprint: string;
 }
 
 export interface TaskRunState {
@@ -82,7 +81,7 @@ export interface RunWorkspaceState {
 }
 
 export interface RunState {
-  readonly version: 4;
+  readonly version: 5;
   readonly runId: string;
   readonly status: RunStatus;
   readonly projectHash: string;
@@ -124,7 +123,7 @@ const taskCompletionStateSchema = z.object({
   origin: z.enum(["executed", "reused"]),
   evidenceRunId: z.string(),
   contractHash: z.string(),
-  dependencyFingerprint: z.string(),
+  predecessorFingerprint: z.string(),
 }).strict();
 
 const taskRunStateSchema = z.object({
@@ -145,10 +144,10 @@ const taskRunStateSchema = z.object({
 
 export const runStateSchema: z.ZodType<RunState> = z.object({
   /*
-   * 第四版状态移除外部配置身份，项目内容哈希成为唯一的运行契约快照。
-   * 旧状态不补字段也不迁移，恢复路径始终面对当前单一状态图。
+   * 第五版状态删除 DAG 依赖终态，并把完成关系收敛为唯一前驱指纹。
+   * 旧状态不补字段也不迁移，恢复路径始终面对当前线性状态图。
    */
-  version: z.literal(4),
+  version: z.literal(5),
   runId: z.string(),
   status: z.enum(["running", "completed", "blocked", "failed"]),
   projectHash: z.string(),
@@ -165,7 +164,7 @@ export const runStateSchema: z.ZodType<RunState> = z.object({
 }).strict();
 
 const allowedTransitions: Readonly<Record<TaskStatus, readonly TaskStatus[]>> = {
-  pending: ["executing", "blocked", "failed", "dependency_blocked"],
+  pending: ["executing", "blocked", "failed"],
   executing: ["reviewing", "committing", "retry_pending", "blocked", "failed"],
   reviewing: ["reviewing", "committing", "retry_pending", "blocked", "failed"],
   committing: ["completed", "blocked", "failed"],
@@ -173,7 +172,6 @@ const allowedTransitions: Readonly<Record<TaskStatus, readonly TaskStatus[]>> = 
   completed: [],
   blocked: [],
   failed: [],
-  dependency_blocked: [],
 };
 
 export function createInitialRunState(input: {
@@ -206,13 +204,13 @@ export function createInitialRunState(input: {
             origin: "reused",
             evidenceRunId: task.reusedCompletion.evidenceRunId,
             contractHash: task.reusedCompletion.contractHash,
-            dependencyFingerprint: task.reusedCompletion.dependencyFingerprint,
+            predecessorFingerprint: task.reusedCompletion.predecessorFingerprint,
           },
         };
   }
 
   return {
-    version: 4,
+    version: 5,
     runId: input.runId,
     status: "running",
     projectHash: input.projectHash,
@@ -234,7 +232,7 @@ export interface InitialTaskRunState {
     readonly commitSha: string;
     readonly evidenceRunId: string;
     readonly contractHash: string;
-    readonly dependencyFingerprint: string;
+    readonly predecessorFingerprint: string;
   } | undefined;
 }
 

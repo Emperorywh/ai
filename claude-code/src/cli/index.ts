@@ -46,7 +46,7 @@ program
 
 program
   .command("validate")
-  .description("校验唯一规格、完整 TASK 目录和任务 DAG")
+  .description("校验唯一规格、完整 TASK 目录和线性任务序列")
   .action(async () => {
     const loaded = await loadProject(PROJECT_ROOT);
     process.stdout.write([

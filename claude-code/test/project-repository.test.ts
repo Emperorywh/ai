@@ -31,7 +31,6 @@ async function createProjectFixture(): Promise<ProjectFixture> {
       createTaskDocument({
         id: "TASK-001",
         title: "实现任务目录",
-        dependsOn: [],
       }),
       "utf8",
     ),
@@ -47,17 +46,14 @@ async function createProjectFixture(): Promise<ProjectFixture> {
 function createTaskDocument(input: {
   readonly id: string;
   readonly title: string;
-  readonly dependsOn: readonly string[];
   readonly extraMetadata?: Readonly<Record<string, unknown>>;
 }): string {
   const metadata = stringify({
     id: input.id,
     title: input.title,
-    dependsOn: input.dependsOn,
-    manualAcceptance: [],
     ...input.extraMetadata,
   }).trimEnd();
-  return `---\n${metadata}\n---\n\n# ${input.id} — ${input.title}\n\n任务正文。\n`;
+  return `---\n${metadata}\n---\n\n## 任务描述\n\n任务正文。\n`;
 }
 
 afterEach(async () => {
@@ -79,7 +75,6 @@ describe("FileProjectRepository", () => {
       id: "TASK-001",
       title: "实现任务目录",
       file: "orchestration/tasks/TASK-001.md",
-      dependsOn: [],
     });
     expect(loaded.projectHash).toMatch(/^[a-f0-9]{64}$/u);
     expect(loaded.taskContractHashes.get("TASK-001")).toMatch(
@@ -87,22 +82,73 @@ describe("FileProjectRepository", () => {
     );
   });
 
-  it("新增 TASK 文档后自动进入稳定 DAG，无需同步维护索引", async () => {
+  it("新增 TASK 文档后按数字而非文件名字符串排序，无需同步维护索引", async () => {
     const fixture = await createProjectFixture();
-    await writeFile(
-      join(fixture.root, "orchestration", "tasks", "TASK-002.md"),
-      createTaskDocument({
-        id: "TASK-002",
-        title: "消费任务目录",
-        dependsOn: ["TASK-001"],
-      }),
-      "utf8",
-    );
+    await Promise.all([
+      writeFile(
+        join(fixture.root, "orchestration", "tasks", "TASK-010.md"),
+        createTaskDocument({
+          id: "TASK-010",
+          title: "实现第十个任务",
+        }),
+        "utf8",
+      ),
+      writeFile(
+        join(fixture.root, "orchestration", "tasks", "TASK-002.md"),
+        createTaskDocument({
+          id: "TASK-002",
+          title: "实现第二个任务",
+        }),
+        "utf8",
+      ),
+    ]);
 
     const loaded = await new FileProjectRepository().load(fixture.root);
 
-    expect(loaded.tasks.map((task) => task.id)).toEqual(["TASK-001", "TASK-002"]);
-    expect(loaded.taskDocuments.size).toBe(2);
+    expect(loaded.tasks.map((task) => task.id)).toEqual([
+      "TASK-001",
+      "TASK-002",
+      "TASK-010",
+    ]);
+    expect(loaded.taskDocuments.size).toBe(3);
+  });
+
+  it("拒绝旧重复标题、缺失任务描述和空正文", async () => {
+    const duplicateHeadingFixture = await createProjectFixture();
+    const emptyBodyFixture = await createProjectFixture();
+    const duplicateHeadingPath = join(
+      duplicateHeadingFixture.root,
+      "orchestration",
+      "tasks",
+      "TASK-001.md",
+    );
+    const duplicateHeadingDocument = await readFile(duplicateHeadingPath, "utf8");
+    await Promise.all([
+      writeFile(
+        duplicateHeadingPath,
+        duplicateHeadingDocument.replace(
+          "## 任务描述",
+          "# TASK-001 — 实现任务目录\n\n## 任务描述",
+        ),
+        "utf8",
+      ),
+      writeFile(
+        join(emptyBodyFixture.root, "orchestration", "tasks", "TASK-001.md"),
+        "---\nid: TASK-001\ntitle: 实现任务目录\n---\n\n## 任务描述\n\n",
+        "utf8",
+      ),
+    ]);
+
+    /*
+     * 标题身份只能存在于 YAML，正文入口和非空内容也属于同一严格模板。
+     * 两类错误都必须在启动 Agent 前由仓储拒绝，不能依赖提示词阶段猜测文档结构。
+     */
+    await expect(
+      new FileProjectRepository().load(duplicateHeadingFixture.root),
+    ).rejects.toThrow("TASK 正文必须使用");
+    await expect(
+      new FileProjectRepository().load(emptyBodyFixture.root),
+    ).rejects.toThrow("TASK 正文必须使用");
   });
 
   it("拒绝缺失的唯一规格、旧根目录 fallback 和文件名与 ID 漂移", async () => {
@@ -120,7 +166,7 @@ describe("FileProjectRepository", () => {
     );
     await writeFile(
       join(identityFixture.root, "orchestration", "tasks", "TASK-001.md"),
-      original.replaceAll("TASK-001", "TASK-OTHER"),
+      original.replaceAll("TASK-001", "TASK-002"),
       "utf8",
     );
     const repository = new FileProjectRepository();
@@ -140,7 +186,6 @@ describe("FileProjectRepository", () => {
       createTaskDocument({
         id: "TASK-001",
         title: "实现任务目录",
-        dependsOn: [],
         extraMetadata: { status: "pending" },
       }),
       "utf8",
@@ -179,7 +224,6 @@ describe("FileProjectRepository", () => {
       createTaskDocument({
         id: "TASK-002",
         title: "实现第二个独立任务",
-        dependsOn: [],
       }),
       "utf8",
     );
@@ -205,31 +249,30 @@ describe("FileProjectRepository", () => {
     }
   });
 
-  it("单任务资源熔断变化不让已完成任务契约失效", async () => {
+  it("拒绝依赖、资源熔断和人工验收旧字段", async () => {
     const fixture = await createProjectFixture();
-    const repository = new FileProjectRepository();
-    const initial = await repository.load(fixture.root);
     await writeFile(
       join(fixture.root, "orchestration", "tasks", "TASK-001.md"),
       createTaskDocument({
         id: "TASK-001",
         title: "实现任务目录",
-        dependsOn: [],
-        extraMetadata: { maxAttempts: 9, timeoutMinutes: 120 },
+        extraMetadata: {
+          dependsOn: [],
+          maxAttempts: 9,
+          timeoutMinutes: 120,
+          manualAcceptance: ["人工浏览器验收"],
+        },
       }),
       "utf8",
     );
 
-    const changed = await repository.load(fixture.root);
-
     /*
-     * 项目哈希仍变化以阻止同一 Run 混用熔断值，但完成定义保持稳定。
-     * 新 Run 因此可以调整单任务资源保护，而不浪费已经审核通过的完成证据。
+     * 线性前驱由 ID 顺序推导，执行限制属于系统策略，验收要求属于任务正文或 SPEC。
+     * 严格 Schema 必须一次拒绝所有旧入口，不能静默忽略并形成灰度契约。
      */
-    expect(changed.projectHash).not.toBe(initial.projectHash);
-    expect(changed.taskContractHashes.get("TASK-001")).toBe(
-      initial.taskContractHashes.get("TASK-001"),
-    );
+    await expect(
+      new FileProjectRepository().load(fixture.root),
+    ).rejects.toThrow("Unrecognized keys");
   });
 
   it("忽略任意同名 YAML 文件，不提供文件配置入口", async () => {
@@ -259,7 +302,6 @@ describe("FileProjectRepository", () => {
       createTaskDocument({
         id: "TASK-001",
         title: "实现任务目录",
-        dependsOn: [],
         extraMetadata: {
           scope: { allow: ["src/**"], deny: [] },
           gates: [{ name: "test", command: "pnpm", args: ["test"] }],

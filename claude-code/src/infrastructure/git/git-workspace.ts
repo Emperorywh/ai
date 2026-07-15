@@ -148,7 +148,7 @@ export class GitWorkspace implements Workspace {
 
   /*
    * 终态任务的未提交候选先写入专用 Git 引用，再从主工作区精确清除。
-   * 这样独立 DAG 分支可以继续执行，同时阻塞任务的完整文件树仍可审计和恢复。
+   * 线性队列会在归档完成后终止 Run，同时阻塞任务的完整文件树仍可审计和恢复。
    */
   public async quarantineCandidate(input: {
     runId: string;
@@ -235,7 +235,7 @@ export class GitWorkspace implements Workspace {
     expectedHead: string;
     expectedFingerprint: string;
     taskContractHash: string;
-    dependencyFingerprint: string;
+    predecessorFingerprint: string;
   }): Promise<string> {
     const identity = await this.getIdentity();
     if (identity.head !== input.expectedHead) {
@@ -265,7 +265,7 @@ export class GitWorkspace implements Workspace {
       `Orchestrator-Task: ${input.task.id}`,
       `Orchestrator-Candidate: ${input.expectedFingerprint}`,
       `Orchestrator-Task-Contract: ${input.taskContractHash}`,
-      `Orchestrator-Task-Dependencies: ${input.dependencyFingerprint}`,
+      `Orchestrator-Task-Predecessor: ${input.predecessorFingerprint}`,
     ].join("\n");
     /*
      * --fresh 或人工预先实现可能得到“代码无变化但任务契约已经满足”的合法结果。
@@ -310,8 +310,8 @@ export class GitWorkspace implements Workspace {
   }
 
   /*
-   * Git 历史是项目级完成账本：只搜索当前 HEAD 的祖先，并要求任务、契约和依赖三项 trailer 精确匹配。
-   * 选择最近匹配提交可以复用同一契约的最新完成事实，同时自动排除其他分支和被改写掉的历史。
+   * Git 历史是项目级完成账本：只搜索当前 HEAD 的祖先，并要求任务、契约和前驱三项 trailer 完整。
+   * 选择每个任务的最近完成事实，同时由应用层验证它是否属于当前连续线性前缀。
    */
   public async readTaskCompletionHistory(
     head: string,
@@ -337,22 +337,22 @@ export class GitWorkspace implements Workspace {
       const runId = trailers.get("Orchestrator-Run");
       const project = trailers.get("Orchestrator-Project");
       const taskContractHash = trailers.get("Orchestrator-Task-Contract");
-      const dependencyFingerprint = trailers.get(
-        "Orchestrator-Task-Dependencies",
+      const predecessorFingerprint = trailers.get(
+        "Orchestrator-Task-Predecessor",
       );
       if (
         taskId !== undefined
         && runId !== undefined
         && project === projectHistoryKey
         && taskContractHash !== undefined
-        && dependencyFingerprint !== undefined
+        && predecessorFingerprint !== undefined
       ) {
         evidence.push({
           taskId,
           commitSha,
           runId,
           taskContractHash,
-          dependencyFingerprint,
+          predecessorFingerprint,
         });
       }
     }
