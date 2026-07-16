@@ -1,13 +1,18 @@
 {
-  "name": "claude-task-orchestrator",
+  "name": "apex-coding-agent",
   "version": "0.1.0",
-  "description": "基于 Claude Agent SDK 的单并发任务编排器",
+  "description": "基于 Claude Agent SDK 的严格线性、单并发、可恢复编码任务代理",
   "type": "module",
   "bin": {
-    "claude-task-orchestrator": "./dist/cli/index.js"
+    "apex-coding-agent": "./dist/cli/index.js"
   },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./dist/index.js"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
   },
   "files": [
     "dist",
@@ -19,7 +24,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint src test",
-    "start": "tsx src/cli/index.ts"
+    "apex-coding-agent": "tsx src/cli/index.ts",
+    "prepack": "pnpm build",
+    "prepublishOnly": "pnpm typecheck && pnpm lint && pnpm test"
   },
   "engines": {
     "node": ">=20"

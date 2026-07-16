@@ -17,6 +17,7 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { ConfigurationError, InfrastructureError } from "../../domain/errors.js";
 import type { TaskDefinition } from "../../domain/project.js";
+import { PRODUCT_IDENTITY } from "../../product-identity.js";
 import type {
   CandidateSnapshot,
   CandidateArchive,
@@ -48,7 +49,7 @@ export class GitWorkspace implements Workspace {
       .slice(0, 16);
     return resolve(
       absoluteCommonDirectory,
-      "claude-task-orchestrator",
+      PRODUCT_IDENTITY.slug,
       projectKey,
     );
   }
@@ -158,7 +159,7 @@ export class GitWorkspace implements Workspace {
       .update(`${input.runId}\0${input.taskId}`)
       .digest("hex")
       .slice(0, 32);
-    const reference = `refs/claude-task-orchestrator/quarantine/${referenceKey}`;
+    const reference = `${PRODUCT_IDENTITY.gitReferenceRoot}/quarantine/${referenceKey}`;
     const existingCommit = (
       await this.git(["for-each-ref", "--format=%(objectname)", reference])
     ).trim();
@@ -190,7 +191,9 @@ export class GitWorkspace implements Workspace {
       return { changedFiles: [] };
     }
 
-    const temporaryRoot = await mkdtemp(join(tmpdir(), "claude-task-archive-"));
+    const temporaryRoot = await mkdtemp(
+      join(tmpdir(), `${PRODUCT_IDENTITY.slug}-archive-`),
+    );
     const temporaryIndex = join(temporaryRoot, "index");
     const environment = {
       ...process.env,
@@ -260,12 +263,12 @@ export class GitWorkspace implements Workspace {
     const message = [
       `${input.messagePrefix}: ${input.task.id} ${input.task.title}`,
       "",
-      `Orchestrator-Run: ${input.runId}`,
-      `Orchestrator-Project: ${projectHistoryKey}`,
-      `Orchestrator-Task: ${input.task.id}`,
-      `Orchestrator-Candidate: ${input.expectedFingerprint}`,
-      `Orchestrator-Task-Contract: ${input.taskContractHash}`,
-      `Orchestrator-Task-Predecessor: ${input.predecessorFingerprint}`,
+      `${PRODUCT_IDENTITY.gitTrailers.run}: ${input.runId}`,
+      `${PRODUCT_IDENTITY.gitTrailers.project}: ${projectHistoryKey}`,
+      `${PRODUCT_IDENTITY.gitTrailers.task}: ${input.task.id}`,
+      `${PRODUCT_IDENTITY.gitTrailers.candidate}: ${input.expectedFingerprint}`,
+      `${PRODUCT_IDENTITY.gitTrailers.taskContract}: ${input.taskContractHash}`,
+      `${PRODUCT_IDENTITY.gitTrailers.taskPredecessor}: ${input.predecessorFingerprint}`,
     ].join("\n");
     /*
      * --fresh 或人工预先实现可能得到“代码无变化但任务契约已经满足”的合法结果。
@@ -297,10 +300,14 @@ export class GitWorkspace implements Workspace {
     const trailerLines = new Set(
       body.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean),
     );
-    const matches = trailerLines.has(`Orchestrator-Run: ${input.runId}`)
-      && trailerLines.has(`Orchestrator-Task: ${input.taskId}`)
+    const matches = trailerLines.has(
+      `${PRODUCT_IDENTITY.gitTrailers.run}: ${input.runId}`,
+    )
       && trailerLines.has(
-        `Orchestrator-Candidate: ${input.candidateFingerprint}`,
+        `${PRODUCT_IDENTITY.gitTrailers.task}: ${input.taskId}`,
+      )
+      && trailerLines.has(
+        `${PRODUCT_IDENTITY.gitTrailers.candidate}: ${input.candidateFingerprint}`,
       );
     if (!matches) {
       return undefined;
@@ -321,7 +328,7 @@ export class GitWorkspace implements Workspace {
       "log",
       "--format=%H%x00%B%x00",
       "--fixed-strings",
-      `--grep=Orchestrator-Project: ${projectHistoryKey}`,
+      `--grep=${PRODUCT_IDENTITY.gitTrailers.project}: ${projectHistoryKey}`,
       head,
     ]);
     const fields = history.split("\0");
@@ -333,12 +340,14 @@ export class GitWorkspace implements Workspace {
         continue;
       }
       const trailers = parseExactTrailers(body);
-      const taskId = trailers.get("Orchestrator-Task");
-      const runId = trailers.get("Orchestrator-Run");
-      const project = trailers.get("Orchestrator-Project");
-      const taskContractHash = trailers.get("Orchestrator-Task-Contract");
+      const taskId = trailers.get(PRODUCT_IDENTITY.gitTrailers.task);
+      const runId = trailers.get(PRODUCT_IDENTITY.gitTrailers.run);
+      const project = trailers.get(PRODUCT_IDENTITY.gitTrailers.project);
+      const taskContractHash = trailers.get(
+        PRODUCT_IDENTITY.gitTrailers.taskContract,
+      );
       const predecessorFingerprint = trailers.get(
-        "Orchestrator-Task-Predecessor",
+        PRODUCT_IDENTITY.gitTrailers.taskPredecessor,
       );
       if (
         taskId !== undefined
@@ -420,7 +429,7 @@ export class GitWorkspace implements Workspace {
         ? content.toString("utf8")
         : `<二进制或超大新文件；请直接读取 ${relativePath}>`;
       previews.push([
-        `diff --orchestrator-new-file ${relativePath}`,
+        `diff --${PRODUCT_IDENTITY.slug}-new-file ${relativePath}`,
         preview,
       ].join("\n"));
     }
@@ -577,14 +586,21 @@ function splitNullList(output: string): readonly string[] {
  */
 function parseExactTrailers(body: string): ReadonlyMap<string, string> {
   const values = new Map<string, string[]>();
+  const knownKeys = Object.values(PRODUCT_IDENTITY.gitTrailers);
   for (const line of body.split(/\r?\n/u)) {
-    const match = /^(Orchestrator-[A-Za-z-]+):\s*(.+)$/u.exec(line.trim());
-    if (match?.[1] === undefined || match[2] === undefined) {
+    const normalizedLine = line.trim();
+    const key = knownKeys.find((candidate) =>
+      normalizedLine.startsWith(`${candidate}:`));
+    if (key === undefined) {
       continue;
     }
-    const existing = values.get(match[1]) ?? [];
-    existing.push(match[2]);
-    values.set(match[1], existing);
+    const value = normalizedLine.slice(key.length + 1).trim();
+    if (value.length === 0) {
+      continue;
+    }
+    const existing = values.get(key) ?? [];
+    existing.push(value);
+    values.set(key, existing);
   }
   return new Map(
     [...values.entries()]

@@ -136,7 +136,7 @@ describe("FileRunLock", () => {
 });
 
 async function createTemporaryDirectory(): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), "claude-orchestrator-state-"));
+  const directory = await mkdtemp(join(tmpdir(), "apex-coding-agent-state-"));
   temporaryDirectories.push(directory);
   return directory;
 }

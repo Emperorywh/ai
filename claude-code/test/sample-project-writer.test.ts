@@ -114,7 +114,7 @@ describe("writeSampleProject", () => {
  * 清理逻辑集中在 afterEach，测试失败时也不会遗留生成的任务骨架。
  */
 async function createTemporaryRoot(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), "claude-orchestrator-init-"));
+  const root = await mkdtemp(join(tmpdir(), "apex-coding-agent-init-"));
   temporaryRoots.push(root);
   return root;
 }

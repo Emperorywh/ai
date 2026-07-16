@@ -1,6 +1,6 @@
-# Claude Task Orchestrator 源码功能说明
+# Apex Coding Agent 源码功能说明
 
-本文档描述固定项目契约与 RunState v5 的当前实现。系统不读取项目级配置文件，也不兼容 DAG TASK、额外 TASK 元数据或旧状态版本的数据。
+本文档描述 `apex-coding-agent` 的固定项目契约与 RunState v5 当前实现。系统不读取项目级配置文件，也不兼容 DAG TASK、额外 TASK 元数据、旧状态版本或旧产品命名空间的数据。
 
 ## 1. 系统目标
 
@@ -62,9 +62,17 @@
 
 `cli/composition-root.ts` 是具体实现的唯一装配位置。
 
+### 2.5 产品身份与发布边界
+
+- `product-identity.ts`：集中声明显示名称、npm/CLI 标识、Git refs 根和完成证据 trailer 键。
+- `cli/package-manifest.ts`：从实际发布的 `package.json` 读取版本，并校验包名与产品身份一致。
+- `package.json`：把 `apex-coding-agent` 映射到无业务逻辑的 CLI 启动入口，同时声明公共库入口和 TypeScript 类型入口。
+
+产品身份模块只承载稳定外部命名，不参与 TASK 领域规则或 Run 状态转换。CLI 和 Git 基础设施单向依赖该模块，领域层、应用层和端口层不依赖 npm manifest。
+
 ## 3. 固定项目与执行契约
 
-所有命令以当前工作目录为项目根，只加载以下集中式结构：
+所有命令都以 `apex-coding-agent` 为前缀，并以当前工作目录为项目根，只加载以下集中式结构：
 
 ```text
 <project-root>/
@@ -211,12 +219,12 @@ Worker 返回 `completed` 后，应用层立即调用 `Workspace.captureCandidat
 
 提交 trailer：
 
-- `Orchestrator-Run`
-- `Orchestrator-Project`
-- `Orchestrator-Task`
-- `Orchestrator-Candidate`
-- `Orchestrator-Task-Contract`
-- `Orchestrator-Task-Predecessor`
+- `Apex-Coding-Agent-Run`
+- `Apex-Coding-Agent-Project`
+- `Apex-Coding-Agent-Task`
+- `Apex-Coding-Agent-Candidate`
+- `Apex-Coding-Agent-Task-Contract`
+- `Apex-Coding-Agent-Task-Predecessor`
 
 无文件差异时仍创建空提交，完成事实不依赖 diff 是否非空。
 
@@ -246,14 +254,14 @@ Worker 返回 `completed` 后，应用层立即调用 `Workspace.captureCandidat
 
 ## 12. 阻塞候选隔离
 
-blocked/failed TASK 的未提交候选会写入确定性的 `refs/claude-task-orchestrator/quarantine/*`，随后清理主工作区并结束 Run。失败现场仍能审计和恢复，后继 TASK 不发生状态转换并保持 `pending`。
+blocked/failed TASK 的未提交候选会写入确定性的 `refs/apex-coding-agent/quarantine/*`，随后清理主工作区并结束 Run。失败现场仍能审计和恢复，后继 TASK 不发生状态转换并保持 `pending`。
 
 ## 13. 状态存储与时间
 
 状态目录位于 Git common directory：
 
 ```text
-.git/claude-task-orchestrator/<project-hash>/
+.git/apex-coding-agent/<project-hash>/
   active.lock
   latest
   runs/<run-id>/
@@ -277,6 +285,7 @@ blocked/failed TASK 的未提交候选会写入确定性的 `refs/claude-task-or
 8. 原子提交不能夹带父仓库兄弟目录变化；
 9. 任务完成证据必须绑定契约和直接前驱提交；
 10. 项目级配置文件不进入运行数据流，旧 RunState 不进入兼容路径。
+11. npm 包、全局命令、状态目录、Git refs 和完成证据只使用 `apex-coding-agent` 产品身份，不读取旧命名空间。
 
 ## 15. 自动化验证
 

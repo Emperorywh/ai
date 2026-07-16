@@ -22,3 +22,4 @@ export * from "./ports/run-lock.js";
 export * from "./ports/state-store.js";
 export * from "./ports/time-formatter.js";
 export * from "./ports/workspace.js";
+export * from "./product-identity.js";

@@ -43,12 +43,16 @@ async function runGit(
  * 仓库级用户身份与签名配置避免测试依赖开发机器的全局 Git 设置。
  */
 async function createGitFixture(): Promise<GitFixture> {
-  const root = await mkdtemp(join(tmpdir(), "claude-git-workspace-"));
+  const root = await mkdtemp(join(tmpdir(), "apex-coding-agent-git-"));
   temporaryRoots.push(root);
 
   await runGit(root, ["init", "--quiet"]);
-  await runGit(root, ["config", "user.name", "Orchestrator Test"]);
-  await runGit(root, ["config", "user.email", "orchestrator@example.invalid"]);
+  await runGit(root, ["config", "user.name", "Apex Coding Agent Test"]);
+  await runGit(root, [
+    "config",
+    "user.email",
+    "apex-coding-agent@example.invalid",
+  ]);
   await runGit(root, ["config", "commit.gpgSign", "false"]);
   await writeFile(join(root, "README.md"), "# 临时仓库\n", "utf8");
   await runGit(root, ["add", "--all", "--", "."]);
@@ -81,6 +85,21 @@ afterEach(async () => {
 });
 
 describe("GitWorkspace", () => {
+  it("把运行状态隔离在 Apex Coding Agent 专属 Git 命名空间", async () => {
+    const fixture = await createGitFixture();
+    const stateDirectory = (
+      await fixture.workspace.getStateDirectory()
+    ).replaceAll("\\", "/");
+
+    /*
+     * 状态目录属于外部持久化契约，必须使用新产品标识且按项目身份继续隔离。
+     * 该断言同时确保实现没有回退读取旧产品目录。
+     */
+    expect(stateDirectory).toMatch(
+      /\/\.git\/apex-coding-agent\/[a-f0-9]{16}$/u,
+    );
+  });
+
   it("候选内容在加入暂存区前后保持相同 fingerprint", async () => {
     const fixture = await createGitFixture();
     await writeFile(
@@ -182,7 +201,9 @@ describe("GitWorkspace", () => {
     });
 
     expect(archive.changedFiles).toEqual(["README.md", "feature.ts"]);
-    expect(archive.reference).toMatch(/^refs\/claude-task-orchestrator\/quarantine\//u);
+    expect(archive.reference).toMatch(
+      /^refs\/apex-coding-agent\/quarantine\//u,
+    );
     await expect(fixture.workspace.assertClean()).resolves.toBeUndefined();
     await expect(access(join(fixture.root, "feature.ts"))).rejects.toMatchObject({
       code: "ENOENT",
@@ -233,12 +254,12 @@ describe("GitWorkspace", () => {
     expect(commitBody).toBe([
       "task: TASK-010 实现候选提交",
       "",
-      `Orchestrator-Run: ${runId}`,
-      `Orchestrator-Project: ${rootProjectHistoryKey}`,
-      "Orchestrator-Task: TASK-010",
-      `Orchestrator-Candidate: ${candidate.fingerprint}`,
-      `Orchestrator-Task-Contract: ${taskContractHash}`,
-      `Orchestrator-Task-Predecessor: ${predecessorFingerprint}`,
+      `Apex-Coding-Agent-Run: ${runId}`,
+      `Apex-Coding-Agent-Project: ${rootProjectHistoryKey}`,
+      "Apex-Coding-Agent-Task: TASK-010",
+      `Apex-Coding-Agent-Candidate: ${candidate.fingerprint}`,
+      `Apex-Coding-Agent-Task-Contract: ${taskContractHash}`,
+      `Apex-Coding-Agent-Task-Predecessor: ${predecessorFingerprint}`,
     ].join("\n"));
     /*
      * 完成历史必须从当前 HEAD 的祖先链解析出结构化证据，供新 Run 一次性核验全部 TASK。

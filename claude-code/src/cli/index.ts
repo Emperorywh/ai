@@ -7,10 +7,12 @@ import { Command } from "commander";
 import type { OrchestratorResult } from "../application/queue-orchestrator.js";
 import { presentRunState } from "../application/run-state-presentation.js";
 import type { RunState } from "../domain/run-state.js";
+import { PRODUCT_IDENTITY } from "../product-identity.js";
 import {
   createOrchestratorRuntime,
   loadProject,
 } from "./composition-root.js";
+import { readPackageVersion } from "./package-manifest.js";
 import {
   writeSampleProject,
   type SampleProjectWriteResult,
@@ -31,9 +33,14 @@ interface RunOptions {
  */
 const PROJECT_ROOT = process.cwd();
 
+/*
+ * 全局可执行名只读取统一产品身份，版本则来自实际发布的 package.json。
+ * npm 包名、帮助信息和用户输入前缀因此在构建产物中保持一致。
+ */
 const program = new Command()
-  .name("claude-task-orchestrator")
-  .description("基于 Claude Agent SDK 的单并发 TASK 队列编排器");
+  .name(PRODUCT_IDENTITY.slug)
+  .description(`${PRODUCT_IDENTITY.displayName}：基于 Claude Agent SDK 的单并发 TASK 队列编排器`)
+  .version(await readPackageVersion());
 
 program
   .command("init")

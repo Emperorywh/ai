@@ -1,6 +1,6 @@
-# Claude Task Orchestrator
+# Apex Coding Agent
 
-基于 `@anthropic-ai/claude-agent-sdk` 的严格线性、单并发、可恢复 TASK 编排器。一次运行会自动加载任务目录中的全部 TASK，并按数字序号逐个执行，无需人工逐次向 Claude Code 投喂任务。
+`apex-coding-agent` 是基于 `@anthropic-ai/claude-agent-sdk` 的严格线性、单并发、可恢复 TASK 编排代理。一次运行会自动加载任务目录中的全部 TASK，并按数字序号逐个执行，无需人工逐次向 Claude Code 投喂任务。
 
 ## 执行模型
 
@@ -40,12 +40,31 @@ $env:ANTHROPIC_API_KEY = "你的 API Key"
 
 不要把密钥写入 TASK、`.env` 或仓库。
 
-## 初始化
+## 安装全局命令
 
 ```powershell
+# 从当前源码构建并安装
 pnpm install
 pnpm build
-pnpm start init .
+npm install --global .
+
+# 确认全局入口及版本
+apex-coding-agent --version
+apex-coding-agent --help
+```
+
+包发布到 npm 后，可以在任意目录直接安装：
+
+```powershell
+npm install --global apex-coding-agent
+```
+
+## 初始化
+
+在目标项目根目录执行：
+
+```powershell
+apex-coding-agent init .
 ```
 
 初始化器只增量创建静态编排输入：
@@ -97,24 +116,24 @@ title: 实现用户列表
 
 ```powershell
 # 只校验唯一规格、完整任务目录、文档和线性顺序
-pnpm start validate
+apex-coding-agent validate
 
 # 新建运行；核验并复用当前 HEAD 中仍然有效的 TASK 完成证据
-pnpm start run
+apex-coding-agent run
 
 # 新建运行并明确放弃历史完成证据，全量重跑
-pnpm start run --fresh
+apex-coding-agent run --fresh
 
 # 恢复最近或指定的 running 运行
-pnpm start resume
-pnpm start resume <run-id>
+apex-coding-agent resume
+apex-coding-agent resume <run-id>
 
 # supervisor 幂等入口：无状态时新建，running 时恢复，终态时返回
-pnpm start continue
+apex-coding-agent continue
 
 # 查看状态
-pnpm start status
-pnpm start status <run-id>
+apex-coding-agent status
+apex-coding-agent status <run-id>
 ```
 
 退出码：`0` 全部完成，`1` 存在失败或基础设施错误，`2` 存在人工阻塞，`130` 收到中断并保留可恢复状态。
@@ -126,7 +145,7 @@ pnpm start status <run-id>
 状态保存在 Git common directory：
 
 ```text
-.git/claude-task-orchestrator/<project-hash>/
+.git/apex-coding-agent/<project-hash>/
   active.lock
   latest
   runs/<run-id>/
@@ -140,18 +159,18 @@ Worker 返回 `completed` 后，编排器捕获完整项目候选并保存稳定
 
 每个成功 TASK 产生独立提交，并包含：
 
-- `Orchestrator-Run`
-- `Orchestrator-Project`
-- `Orchestrator-Task`
-- `Orchestrator-Candidate`
-- `Orchestrator-Task-Contract`
-- `Orchestrator-Task-Predecessor`
+- `Apex-Coding-Agent-Run`
+- `Apex-Coding-Agent-Project`
+- `Apex-Coding-Agent-Task`
+- `Apex-Coding-Agent-Candidate`
+- `Apex-Coding-Agent-Task-Contract`
+- `Apex-Coding-Agent-Task-Predecessor`
 
 默认 `run` 会按线性顺序读取当前 HEAD 的完成提交：任务契约指纹相同、直接前驱绑定的完成提交相同，且证据提交仍在当前分支祖先链中时，该 TASK 在新 Run 中记为 `completed/reused`。复用必须形成从首个 TASK 开始的连续前缀；任一任务正文或项目上下文变化后，该任务以及全部后继都会重新执行。每个 TASK 只核验当前祖先链中的最新完成证据，不会越过较新的异契约提交回退复用旧结果。
 
 若现有代码已经满足 TASK，Worker 可以不产生 diff；编排器仍会执行独立审核，并以空提交保存新的完成证据。`--fresh` 不删除历史，只明确禁止本次 Run 复用它们。
 
-阻塞/失败候选保存在 `refs/claude-task-orchestrator/quarantine/*`，归档后本次 Run 立即终止，所有后继保持 `pending`。Worker 虽拥有自主开发工具，但系统工作流仍明确禁止 push、merge、rebase、部署或浏览器测试；Reviewer 始终只读。
+阻塞/失败候选保存在 `refs/apex-coding-agent/quarantine/*`，归档后本次 Run 立即终止，所有后继保持 `pending`。Worker 虽拥有自主开发工具，但系统工作流仍明确禁止 push、merge、rebase、部署或浏览器测试；Reviewer 始终只读。
 
 ## 开发验证
 
