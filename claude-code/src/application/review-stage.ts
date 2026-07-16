@@ -51,21 +51,27 @@ export class ReviewStage {
     if (initialTaskState.candidateFingerprint === undefined) {
       return this.support.block(input, "审核阶段缺少实现候选指纹");
     }
+    const reusableReviewAttempt = this.createReusableReviewAttempt(
+      input,
+      initialTaskState,
+    );
     const reconciledState = this.finishInterruptedReview(input.state, input.task.id);
     const taskState = reconciledState.tasks[input.task.id];
     if (taskState === undefined) {
       throw new Error(`任务 ${input.task.id} 缺少 Reviewer 状态`);
     }
-    const exhaustionReason = this.resourceBudget.getExhaustionReason(
-      taskState,
-      "reviewer",
-    );
-    if (exhaustionReason !== undefined) {
-      return this.support.block(
-        input,
-        `TASK 资源预算耗尽：${exhaustionReason}`,
-        reconciledState,
+    if (reusableReviewAttempt === undefined) {
+      const exhaustionReason = this.resourceBudget.getExhaustionReason(
+        taskState,
+        "reviewer",
       );
+      if (exhaustionReason !== undefined) {
+        return this.support.block(
+          input,
+          `TASK 资源预算耗尽：${exhaustionReason}`,
+          reconciledState,
+        );
+      }
     }
 
     let reviewBundle: Awaited<ReturnType<CandidateStore["captureReviewCandidate"]>>;
@@ -84,32 +90,14 @@ export class ReviewStage {
         reconciledState,
       );
     }
-    /*
-     * Reviewer 是独立的新 attempt，因此在冻结候选校验通过后读取一次当前 CC Switch 模型。
-     * 解析结果先进入 reviewAttempt，再用于 SDK 请求和会话初始化 checkpoint。
-     */
-    const requestedModel = await this.modelResolver.resolveModel(
-      input.loaded.projectRoot,
-    );
-    const sessionId = randomUUID();
-    const reviewAttempt: ReviewAttemptState = {
-      number: taskState.reviewAttempts.length + 1,
-      sessionId,
-      sessionInitialized: false,
-      requestedModel,
-      startedAt: this.support.now(),
-    };
-    let workingState = replaceTaskFields(
+    const preparedAttempt = await this.prepareReviewAttempt(
+      input,
+      taskState,
       reconciledState,
-      input.task.id,
-      { reviewAttempts: [...taskState.reviewAttempts, reviewAttempt] },
-      this.support.now(),
+      reusableReviewAttempt,
     );
-    await input.onCheckpoint?.(
-      workingState,
-      `开始第 ${reviewAttempt.number} 次 Reviewer 会话`,
-      { sessionId },
-    );
+    const reviewAttempt = preparedAttempt.attempt;
+    let workingState = preparedAttempt.state;
     const sessionCheckpoint = new ReviewSessionCheckpoint(
       workingState,
       input.task.id,
@@ -280,6 +268,87 @@ export class ReviewStage {
       },
       this.support.now(),
     );
+  }
+
+  /*
+   * 只有从持久化 Run 恢复、且 Reviewer 从未收到 system/init 时，才允许复用 attempt 编号。
+   * 已初始化会话可能产生过只读工具事实，必须先结束为 interrupted，再创建可审计的新 Reviewer。
+   */
+  private createReusableReviewAttempt(
+    input: TaskStepInput,
+    taskState: TaskRunState,
+  ): ReviewAttemptState | undefined {
+    const current = taskState.reviewAttempts.at(-1);
+    if (
+      !input.resumeExistingExecution
+      || current === undefined
+      || current.finishedAt !== undefined
+      || current.sessionInitialized
+    ) {
+      return undefined;
+    }
+    return { ...current, sessionId: randomUUID() };
+  }
+
+  /*
+   * Reviewer attempt 的“首次创建”与“init 前恢复”统一封装在同一准备边界。
+   * 调用方只消费已 checkpoint 的 attempt/state，不需要知道模型快照或 sessionId 替换细节。
+   */
+  private async prepareReviewAttempt(
+    input: TaskStepInput,
+    taskState: TaskRunState,
+    reconciledState: RunState,
+    reusableAttempt: ReviewAttemptState | undefined,
+  ): Promise<{
+    readonly attempt: ReviewAttemptState;
+    readonly state: RunState;
+  }> {
+    if (reusableAttempt !== undefined) {
+      /*
+       * 上次进程在 init 前中断时只替换 sessionId，并重新打开同一个持久化 attempt。
+       * 原 attempt 没有模型握手、轮数、费用或工具调用事实，因此不能占用一次 Reviewer 预算。
+       */
+      const state = replaceCurrentReviewAttempt(
+        reconciledState,
+        input.task.id,
+        reusableAttempt,
+        this.support.now(),
+      );
+      await input.onCheckpoint?.(
+        state,
+        "上次 Reviewer 会话尚未初始化，已准备全新会话",
+        { sessionId: reusableAttempt.sessionId },
+      );
+      return { attempt: reusableAttempt, state };
+    }
+
+    /*
+     * Reviewer 是独立的新 attempt，因此在冻结候选校验通过后读取一次当前 CC Switch 模型。
+     * 解析结果先进入 reviewAttempt，再用于 SDK 请求和会话初始化 checkpoint。
+     */
+    const requestedModel = await this.modelResolver.resolveModel(
+      input.loaded.projectRoot,
+    );
+    const sessionId = randomUUID();
+    const attempt: ReviewAttemptState = {
+      number: taskState.reviewAttempts.length + 1,
+      sessionId,
+      sessionInitialized: false,
+      requestedModel,
+      startedAt: this.support.now(),
+    };
+    const state = replaceTaskFields(
+      reconciledState,
+      input.task.id,
+      { reviewAttempts: [...taskState.reviewAttempts, attempt] },
+      this.support.now(),
+    );
+    await input.onCheckpoint?.(
+      state,
+      `开始第 ${attempt.number} 次 Reviewer 会话`,
+      { sessionId },
+    );
+    return { attempt, state };
   }
 
   private finishAttempt(

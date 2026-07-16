@@ -14,7 +14,10 @@ import type {
   AgentRunOutcome,
   AgentRunTelemetry,
 } from "../../domain/agent-result.js";
-import { ConfigurationError } from "../../domain/errors.js";
+import {
+  ConfigurationError,
+  InfrastructureError,
+} from "../../domain/errors.js";
 import type {
   AgentExecutor,
   AgentRunRequest,
@@ -294,6 +297,20 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
         throw error;
       }
       const failureAbortReason = readAbortReason(abortState);
+      /*
+       * spawn 在 system/init 之前失败，表示 Claude Code 进程根本没有建立，TASK 代码也尚未执行。
+       * 这类宿主安装或可执行文件故障必须离开 Agent repair 预算，由 Run 恢复边界单独收敛。
+       */
+      if (
+        failureAbortReason === undefined
+        && initializedSessionId === undefined
+        && isProcessLaunchError(error)
+      ) {
+        throw new InfrastructureError(
+          describeProcessLaunchError(error, capturedStderr),
+          { cause: error },
+        );
+      }
       const executionMessage = describeExecutionError(error, capturedStderr);
       const authenticationFailed = failureAbortReason === undefined
         && isAuthenticationFailure(assistantMessageError, executionMessage);
@@ -465,6 +482,59 @@ function describeExecutionError(error: unknown, capturedStderr: string): string 
     return message;
   }
   return `${message}\nClaude Code stderr:\n${stderr}`;
+}
+
+/*
+ * Node 的 child_process 错误以 syscall=spawn* 提供稳定的启动阶段事实。
+ * 不按 message 猜测普通执行错误，避免把 Agent 初始化协议故障错误提升为宿主基础设施故障。
+ */
+function isProcessLaunchError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) {
+    return false;
+  }
+  const syscall = (error as { readonly syscall?: unknown }).syscall;
+  return typeof syscall === "string" && syscall.startsWith("spawn");
+}
+
+/*
+ * 启动诊断只投影 code、syscall 和 executable path，既足以定位 ENOENT/EFTYPE/EACCES，
+ * 又不会把可能包含连接设置或提示词的完整 spawn 参数写入状态与终端日志。
+ */
+function describeProcessLaunchError(
+  error: unknown,
+  capturedStderr: string,
+): string {
+  const executionMessage = describeExecutionError(error, capturedStderr);
+  if (typeof error !== "object" || error === null) {
+    return executionMessage;
+  }
+  const diagnosticFields = [
+    readStringProperty(error, "code", "code"),
+    readStringProperty(error, "syscall", "syscall"),
+    readStringProperty(error, "path", "path"),
+  ].filter((field): field is string => field !== undefined);
+  const diagnostic = diagnosticFields.length === 0
+    ? ""
+    : `（${diagnosticFields.join("，")}）`;
+  return [
+    `Claude Code 子进程启动失败${diagnostic}：${executionMessage}`,
+    "会话尚未初始化，TASK 未开始执行。请确认 Apex 安装未在运行中被替换、Claude Agent SDK 原生 CLI 文件完整，然后恢复该 Run。",
+  ].join("\n");
+}
+
+/*
+ * Error 的平台扩展字段不属于标准 Error 类型，统一通过反射读取并限制为字符串。
+ * 该边界避免基础设施适配器向领域层暴露 NodeJS.ErrnoException 私有形状。
+ */
+function readStringProperty(
+  value: object,
+  property: string,
+  label: string,
+): string | undefined {
+  const field = (value as Readonly<Record<string, unknown>>)[property];
+  return typeof field === "string" && field.length > 0
+    ? `${label}=${field}`
+    : undefined;
 }
 
 /*

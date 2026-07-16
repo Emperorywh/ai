@@ -34,7 +34,7 @@
 
 ### 2.2 应用层
 
-- `queue-orchestrator.ts`：严格线性驱动器，只选择当前位置并推进一个 checkpoint。
+- `queue-orchestrator.ts`：严格线性驱动器，只选择当前位置并推进一个 checkpoint；基础设施中断保留最近可恢复状态，不进入 TASK 失败预算。
 - `task-execution-service.ts`：根据持久化状态分派单一阶段。
 - `implementation-stage.ts`：Worker 新建、恢复、repair、资源收敛与候选冻结。
 - `review-stage.ts`：全新只读 Reviewer、审核尝试历史和修复反馈。
@@ -235,7 +235,7 @@ Reviewer 启动前才组合：
 
 Reviewer 使用 `Read/Glob/Grep`、`dontAsk`、空 MCP、空 skills、空 setting sources。每次审核都创建全新 session，不继承 Worker、项目设置或用户权限设置；基础设施通过 Claude SDK 重新解析当前用户级/托管级配置，并投影连接环境与认证辅助命令。该读取路径与 CC Switch 切换后 Claude Code 使用的实时配置一致，不访问 `cc-switch.db`，也不在 Apex 中维护凭据副本。令牌通过合并后的子进程环境传递，不进入命令行参数；用户设置环境覆盖宿主终端同名变量，认证/网关连接和工具权限保持解耦。
 
-审核通过且没有 critical/high/medium finding 才进入提交；拒绝或实质 finding 进入 repair；人工决策进入 blocked；可恢复基础设施错误在 Reviewer 预算内新建会话重试，认证失败属于需要修复外部配置的不可重试错误并立即终止。
+审核通过且没有 critical/high/medium finding 才进入提交；拒绝或实质 finding 进入 repair；人工决策进入 blocked；会话已建立后的可恢复 Agent 错误按 Reviewer 预算新建会话重试；会话初始化前的子进程启动故障属于 Run 基础设施中断，保留 `running` 状态且不消耗 Reviewer/Worker 预算；认证失败属于需要修复外部配置的不可重试错误并立即终止。
 
 ## 10. Git 候选、账本与隔离区
 
@@ -271,7 +271,7 @@ Git 基础设施分为：
 
 完成契约版本为 v6；旧执行模型产生的契约哈希不会被当前系统复用，也没有迁移或降级分支。
 
-恢复前统一核验项目哈希、项目根、RunState 语义、仓库根、分支与 HEAD。Worker init 已落盘时使用 SDK resume；未 init 时创建新会话；Reviewer 崩溃后结束旧尝试并创建全新只读会话；committing 的 HEAD 变化只接受精确 trailer 证明的“提交成功、状态未落盘”窗口。
+恢复前统一核验项目哈希、项目根、RunState 语义、仓库根、分支与 HEAD。Worker init 已落盘时使用 SDK resume；未 init 时替换 sessionId 并复用同一 attempt，基础设施启动故障不会制造 repair 历史；Reviewer 崩溃后结束旧尝试并创建全新只读会话；committing 的 HEAD 变化只接受精确 trailer 证明的“提交成功、状态未落盘”窗口。
 
 ## 12. RunState v6 与关键不变量
 

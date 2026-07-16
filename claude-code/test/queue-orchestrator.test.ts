@@ -17,8 +17,11 @@ import { TaskProgressReconciler } from "../src/application/task-progress-reconci
 import { TaskResourceBudget } from "../src/application/task-resource-budget.js";
 import { TaskStageSupport } from "../src/application/task-stage-support.js";
 import { TerminalCandidateService } from "../src/application/terminal-candidate-service.js";
+import type { AgentRunOutcome } from "../src/domain/agent-result.js";
+import { InfrastructureError } from "../src/domain/errors.js";
 import { createInitialRunState, transitionTask } from "../src/domain/run-state.js";
 import { BeijingTimeFormatter } from "../src/infrastructure/time/beijing-time-formatter.js";
+import type { AgentRunRequest } from "../src/ports/agent-executor.js";
 import {
   FakeClock,
   FixedAgentModelResolver,
@@ -325,6 +328,82 @@ describe("QueueOrchestrator", () => {
       { ...loaded, projectHash: "changed-project-hash" },
       initial.runId,
     )).rejects.toThrow("不能混用旧运行状态");
+  });
+
+  it("会话启动基础设施故障不消耗 repair 预算且可原地恢复", async () => {
+    const agent = new FailOnceLaunchAgent();
+    const fixture = createFixture(new RecordingWorkspace(), agent);
+    const loaded = createLoadedProject([{ id: "TASK-001" }]);
+
+    const interrupted = await fixture.orchestrator.start(loaded);
+
+    /*
+     * 首次启动在 init 前中断，因此 Run 与 TASK 都必须保持可恢复的非终态；
+     * attempt 仍是唯一 implementation，不能伪造 failed/repair 记录或提前生成验收产物。
+     */
+    expect(interrupted.state.status).toBe("running");
+    expect(interrupted.state.tasks["TASK-001"]?.status).toBe("executing");
+    expect(interrupted.state.tasks["TASK-001"]?.attempts).toHaveLength(1);
+    expect(interrupted.state.tasks["TASK-001"]?.attempts[0]).toMatchObject({
+      kind: "implementation",
+      sessionInitialized: false,
+    });
+    expect(interrupted.artifacts).toEqual([]);
+    expect(fixture.logger.events.at(-1)).toMatchObject({
+      type: "run_infrastructure_interrupted",
+      taskId: "TASK-001",
+    });
+
+    const resumed = await fixture.orchestrator.resume(
+      loaded,
+      interrupted.state.runId,
+    );
+
+    expect(resumed.state.status).toBe("completed");
+    expect(resumed.state.tasks["TASK-001"]?.attempts).toHaveLength(1);
+    expect(agent.requests.map((request) => request.attemptKind)).toEqual([
+      "implementation",
+      "implementation",
+      "review",
+    ]);
+    expect(agent.requests[1]?.sessionId).not.toBe(
+      agent.requests[0]?.sessionId,
+    );
+  });
+
+  it("Reviewer 启动基础设施故障复用同一审核 attempt", async () => {
+    const agent = new FailOnceReviewLaunchAgent();
+    const fixture = createFixture(new RecordingWorkspace(), agent);
+    const loaded = createLoadedProject([{ id: "TASK-001" }]);
+
+    const interrupted = await fixture.orchestrator.start(loaded);
+
+    /*
+     * Worker 已完成而 Reviewer 尚未 init，故障边界必须停在 reviewing，并保留唯一未完成审核。
+     * 该零资源 attempt 恢复后只更换 sessionId，不能提前触发三次 Reviewer 上限。
+     */
+    expect(interrupted.state.status).toBe("running");
+    expect(interrupted.state.tasks["TASK-001"]?.status).toBe("reviewing");
+    expect(interrupted.state.tasks["TASK-001"]?.reviewAttempts).toHaveLength(1);
+    expect(interrupted.state.tasks["TASK-001"]?.reviewAttempts[0]).toMatchObject({
+      sessionInitialized: false,
+    });
+
+    const resumed = await fixture.orchestrator.resume(
+      loaded,
+      interrupted.state.runId,
+    );
+
+    expect(resumed.state.status).toBe("completed");
+    expect(resumed.state.tasks["TASK-001"]?.reviewAttempts).toHaveLength(1);
+    expect(agent.requests.map((request) => request.attemptKind)).toEqual([
+      "implementation",
+      "review",
+      "review",
+    ]);
+    expect(agent.requests[2]?.sessionId).not.toBe(
+      agent.requests[1]?.sessionId,
+    );
   });
 
   it("默认持续修复超过旧三次上限直到任务完成", async () => {
@@ -689,6 +768,44 @@ class FailOnceCandidateWorkspace extends RecordingWorkspace {
       throw new Error("candidate capture interrupted");
     }
     return super.captureCandidate();
+  }
+}
+
+class FailOnceLaunchAgent extends RecordingAgent {
+  private shouldFail = true;
+
+  /*
+   * 首次调用在 onSessionInitialized 之前模拟原生进程不可启动；第二次调用回到标准 Fake，
+   * 用同一对象证明 resume 只重建未初始化 session，不增加 attempt 或切换为 repair。
+   */
+  public override async run<T>(
+    request: AgentRunRequest<T>,
+  ): Promise<AgentRunOutcome<T>> {
+    if (this.shouldFail) {
+      this.shouldFail = false;
+      this.requests.push(request);
+      throw new InfrastructureError("Claude Code 子进程启动失败");
+    }
+    return super.run<T>(request);
+  }
+}
+
+class FailOnceReviewLaunchAgent extends RecordingAgent {
+  private shouldFailReview = true;
+
+  /*
+   * Worker 保持默认成功，仅首次 Reviewer 在 init 前抛出基础设施故障。
+   * 请求仍被记录，以便断言恢复前后是两个 session、同一个 review attempt。
+   */
+  public override async run<T>(
+    request: AgentRunRequest<T>,
+  ): Promise<AgentRunOutcome<T>> {
+    if (request.attemptKind === "review" && this.shouldFailReview) {
+      this.shouldFailReview = false;
+      this.requests.push(request);
+      throw new InfrastructureError("Claude Code Reviewer 子进程启动失败");
+    }
+    return super.run<T>(request);
   }
 }
 

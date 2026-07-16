@@ -28,6 +28,7 @@
 - Agent 需要人工决策等真正阻塞会终止当前 TASK 和本次 Run，后续 TASK 保持 `pending`。
 - 阻塞或失败 TASK 的候选会保存到持久 Git 引用并清理主工作区，不会越过当前任务继续执行。
 - 每次状态转换、SDK 会话初始化、审核结果和候选归档都会落盘，进程中断后可精确恢复。
+- Claude Code 子进程在会话初始化前启动失败时按基础设施中断处理：Run 保持 `running`，不创建 repair、不消耗 TASK 会话预算，环境恢复后可原地 `resume`。
 - 新 `run` 默认按任务契约、直接前驱提交和 Git 可达性复用连续完成前缀；`--fresh` 才会明确全量重跑。
 - 编排器不启动浏览器或 UI 自动化。全部可运行任务结束后生成运行摘要和人工验收清单。
 
@@ -64,6 +65,8 @@ npm install --global .
 apex-coding-agent --version
 apex-coding-agent --help
 ```
+
+全局安装会替换 CLI 自身目录。不要在 Apex Run 仍在执行时运行 `npm install --global .`、`npm install --global apex-coding-agent` 或其他升级命令；应先等待 Run 结束或中止到 checkpoint，完成安装并验证版本后再执行 `apex-coding-agent resume`。
 
 包发布到 npm 后，可以在任意目录直接安装：
 

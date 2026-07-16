@@ -15,6 +15,7 @@ import {
   type AgentQueryFactory,
 } from "../src/infrastructure/claude/claude-agent-sdk-executor.js";
 import { WorkerExecutionGuard } from "../src/application/worker-execution-guard.js";
+import { InfrastructureError } from "../src/domain/errors.js";
 import type { ClaudeMessageObserver } from "../src/infrastructure/claude/claude-message-observer.js";
 import type { ClaudeConnectionSettingsResolver } from "../src/infrastructure/claude/claude-connection-settings-resolver.js";
 import type { AgentRunRequest } from "../src/ports/agent-executor.js";
@@ -139,6 +140,34 @@ describe("ClaudeAgentSdkExecutor", () => {
       message: "factory failed before init",
     });
     expect(outcome.sessionId).toBeUndefined();
+  });
+
+  it("原生进程在 init 前启动失败时提升为可恢复基础设施故障", async () => {
+    /*
+     * Windows ERROR_BAD_EXE_FORMAT 会由 libuv 映射为 EFTYPE，并携带 spawn syscall 与目标路径。
+     * 执行器必须保留这组诊断，同时阻止应用层把零轮启动失败循环计为 repair 会话。
+     */
+    const launchError = Object.assign(new Error("spawn EFTYPE"), {
+      code: "EFTYPE",
+      syscall: "spawn",
+      path: "C:\\runtime\\claude.exe",
+    });
+    let closed = false;
+    const executor = new ClaudeAgentSdkExecutor({
+      queryFactory: () => createFakeQuery(
+        failingMessageStream(launchError),
+        () => {
+          closed = true;
+        },
+      ),
+    });
+
+    const outcomePromise = executor.run(createRequest());
+    await expect(outcomePromise).rejects.toThrow(InfrastructureError);
+    await expect(outcomePromise).rejects.toThrow(
+      "code=EFTYPE，syscall=spawn，path=C:\\runtime\\claude.exe",
+    );
+    expect(closed).toBe(true);
   });
 
   it("消息迭代在 init 前失败时不伪造 session 并关闭 Query", async () => {
@@ -546,11 +575,15 @@ async function* messageStream(
   }
 }
 
+/*
+ * 字符串用于普通 SDK 迭代失败，Error 对象用于保留 Node spawn 的平台诊断字段。
+ * 两条路径共享真实的异步迭代抛错时序，避免只覆盖 Query Factory 的同步异常。
+ */
 async function* failingMessageStream(
-  message: string,
+  failure: string | Error,
 ): AsyncGenerator<SDKMessage, void, unknown> {
   yield* messageStream([]);
-  throw new Error(message);
+  throw typeof failure === "string" ? new Error(failure) : failure;
 }
 
 async function* abortResultStream(

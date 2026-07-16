@@ -3,7 +3,10 @@
  * 当前任务只有完成后才会开放后继；阻塞或失败会在隔离候选后立即结束整个 Run。
  */
 import { randomUUID } from "node:crypto";
-import { ConfigurationError } from "../domain/errors.js";
+import {
+  ConfigurationError,
+  InfrastructureError,
+} from "../domain/errors.js";
 import type { LoadedProject, TaskDefinition } from "../domain/project.js";
 import {
   createInitialRunState,
@@ -16,7 +19,10 @@ import type { TimeFormatter } from "../ports/time-formatter.js";
 import type {
   WorkspaceIdentityStore,
 } from "../ports/workspace.js";
-import type { TaskExecutionService } from "./task-execution-service.js";
+import type {
+  TaskExecutionService,
+  TaskStepResult,
+} from "./task-execution-service.js";
 import type { TaskProgressReconciler } from "./task-progress-reconciler.js";
 import { aggregateRunMetrics, collectRunModelUsage } from "./run-metrics.js";
 import type { RunArtifactWriter } from "./run-artifact-writer.js";
@@ -222,24 +228,43 @@ export class QueueOrchestrator {
         return this.finishLinearRun(loaded, state, orderedTasks);
       }
 
-      const result = await this.taskExecution.step({
-        loaded,
-        state,
-        task: currentTask,
-        resumeExistingExecution: shouldResumeExecution,
-        ...(signal === undefined ? {} : { signal }),
-        onCheckpoint: async (checkpointState, message, details) => {
-          state = checkpointState;
-          await this.checkpoint(
-            checkpointState,
-            orderedTasks,
-            currentTask.id,
-            "task_progress",
-            message,
-            details,
-          );
-        },
-      });
+      let result: TaskStepResult;
+      try {
+        result = await this.taskExecution.step({
+          loaded,
+          state,
+          task: currentTask,
+          resumeExistingExecution: shouldResumeExecution,
+          ...(signal === undefined ? {} : { signal }),
+          onCheckpoint: async (checkpointState, message, details) => {
+            state = checkpointState;
+            await this.checkpoint(
+              checkpointState,
+              orderedTasks,
+              currentTask.id,
+              "task_progress",
+              message,
+              details,
+            );
+          },
+        });
+      } catch (error) {
+        /*
+         * 基础设施中断不是 TASK 实现失败：保留最近 executing checkpoint，既不创建 repair，
+         * 也不把瞬时安装/进程故障计入 Worker 预算；环境恢复后由 resume 重建未初始化会话。
+         */
+        if (!(error instanceof InfrastructureError)) {
+          throw error;
+        }
+        await this.checkpoint(
+          state,
+          orderedTasks,
+          currentTask.id,
+          "run_infrastructure_interrupted",
+          `基础设施故障，Run 已保留为可恢复状态：${error.message}`,
+        );
+        return { state, artifacts: [] };
+      }
       state = result.state;
       await this.checkpoint(
         state,
