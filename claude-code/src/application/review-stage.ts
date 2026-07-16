@@ -18,6 +18,7 @@ import {
   type TaskRunState,
 } from "../domain/run-state.js";
 import type { AgentExecutor } from "../ports/agent-executor.js";
+import type { AgentModelResolver } from "../ports/agent-model-resolver.js";
 import type { Clock } from "../ports/clock.js";
 import type { ProjectContextProvider } from "../ports/project-context-provider.js";
 import type { CandidateStore } from "../ports/workspace.js";
@@ -37,6 +38,7 @@ export class ReviewStage {
     private readonly workspace: CandidateStore,
     private readonly promptBuilder: PromptBuilder,
     private readonly projectContext: ProjectContextProvider,
+    private readonly modelResolver: AgentModelResolver,
     private readonly clock: Clock,
     private readonly resourceBudget: TaskResourceBudget,
     private readonly support: TaskStageSupport,
@@ -82,12 +84,19 @@ export class ReviewStage {
         reconciledState,
       );
     }
+    /*
+     * Reviewer 是独立的新 attempt，因此在冻结候选校验通过后读取一次当前 CC Switch 模型。
+     * 解析结果先进入 reviewAttempt，再用于 SDK 请求和会话初始化 checkpoint。
+     */
+    const requestedModel = await this.modelResolver.resolveModel(
+      input.loaded.projectRoot,
+    );
     const sessionId = randomUUID();
     const reviewAttempt: ReviewAttemptState = {
       number: taskState.reviewAttempts.length + 1,
       sessionId,
       sessionInitialized: false,
-      requestedModel: ORCHESTRATOR_POLICY.reviewer.model,
+      requestedModel,
       startedAt: this.support.now(),
     };
     let workingState = replaceTaskFields(
@@ -111,7 +120,7 @@ export class ReviewStage {
     const projectContext = await this.projectContext.compile(input.loaded.projectRoot);
     const outcome = await this.runAgent(
       input,
-      sessionId,
+      reviewAttempt,
       reviewBundle.candidate.files.map((file) => file.path),
       reviewBundle.diff,
       taskState.attempts.at(-1)?.verifications ?? [],
@@ -217,13 +226,17 @@ export class ReviewStage {
 
   private runAgent(
     input: TaskStepInput,
-    sessionId: string,
+    reviewAttempt: ReviewAttemptState,
     changedFiles: readonly string[],
     diff: string,
     verifications: NonNullable<TaskRunState["attempts"][number]["verifications"]>,
     projectContext: Awaited<ReturnType<ProjectContextProvider["compile"]>>,
     sessionCheckpoint: ReviewSessionCheckpoint,
   ): Promise<AgentRunOutcome<ReviewResult>> {
+    /*
+     * Reviewer 请求只消费已持久化的 attempt 模型，不再次读取可变用户配置。
+     * 连接字段仍由只读基础设施边界单独投影，模型选择不会削弱权限隔离。
+     */
     return this.agent.run({
       access: "read",
       attemptKind: "review",
@@ -238,14 +251,14 @@ export class ReviewStage {
         projectContext,
       ),
       cwd: input.loaded.projectRoot,
-      model: ORCHESTRATOR_POLICY.reviewer.model,
-      expectedResolvedModel: ORCHESTRATOR_POLICY.reviewer.expectedResolvedModel,
+      model: reviewAttempt.requestedModel,
+      expectedResolvedModel: reviewAttempt.requestedModel,
       effort: ORCHESTRATOR_POLICY.reviewer.effort,
       maxTurns: ORCHESTRATOR_POLICY.reviewer.maxTurns,
       maxBudgetUsd: ORCHESTRATOR_POLICY.reviewer.maxBudgetUsd,
       timeoutMs: ORCHESTRATOR_POLICY.reviewer.timeoutMs,
       ...(input.signal === undefined ? {} : { signal: input.signal }),
-      sessionId,
+      sessionId: reviewAttempt.sessionId,
       onSessionInitialized: (session) => sessionCheckpoint.initialize(session),
       resultSchema: reviewResultSchema,
     });

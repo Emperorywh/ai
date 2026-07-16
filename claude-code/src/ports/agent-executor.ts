@@ -10,7 +10,7 @@ export type AgentAttemptKind = "implementation" | "repair" | "review" | "resume"
 
 /*
  * 初始化事实来自 Claude Code 的 system/init 消息，而不是请求参数的回显。
- * 应用层据此持久化实际模型，执行器同时负责核验固定模型契约。
+ * 应用层据此持久化实际模型，执行器同时核验它与 attempt 请求模型快照一致。
  */
 export interface AgentSessionInfo {
   readonly sessionId: string;

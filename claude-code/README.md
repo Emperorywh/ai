@@ -24,7 +24,7 @@
 - 实现失败和审核意见在固定资源预算内进入 repair；会话级轮数、费用、时长以及 TASK 级累计会话、轮数和费用都有明确上限，耗尽后转为人工阻塞。
 - 写入 Worker 可自主使用完整 Claude Code 工具、终端、技能、项目 MCP 和子 Agent，并自行完成非浏览器验证。
 - Worker 按“定向检查 → 稳定后一次全量检查”执行验证，并把实际命令、范围和结果保存为结构化证据；Reviewer 会独立评估证据覆盖度。
-- SDK `system/init` 返回的实际模型必须与固定模型完全一致，否则在工具执行前以不可重试错误终止，避免别名或环境配置造成模型漂移。
+- 每个新 attempt 从 Claude 用户配置读取一次当前模型并持久化；SDK `system/init` 返回值必须与该请求快照完全一致，否则在工具执行前以不可重试错误终止。
 - Agent 需要人工决策等真正阻塞会终止当前 TASK 和本次 Run，后续 TASK 保持 `pending`。
 - 阻塞或失败 TASK 的候选会保存到持久 Git 引用并清理主工作区，不会越过当前任务继续执行。
 - 每次状态转换、SDK 会话初始化、审核结果和候选归档都会落盘，进程中断后可精确恢复。
@@ -100,7 +100,7 @@ apex-coding-agent init .
       <task-id>.md
 ```
 
-系统固定使用 `claude-sonnet-5/high` Worker、`claude-sonnet-5/high` 只读 Reviewer 和 `task` Git 提交前缀。Worker 单会话最多 80 轮、$6、45 分钟，Reviewer 单会话最多 30 轮、$2、15 分钟；每个 TASK 最多 8 个 Worker 会话、3 个 Reviewer 会话、累计 200 轮和 $15。实现失败与审核意见只在该预算内进入 repair；TASK 不能覆盖执行策略。
+Worker 与只读 Reviewer 使用 CC Switch 写入 Claude 用户配置的当前模型，effort 固定为 `high`，Git 提交前缀固定为 `task`。Worker 单会话最多 80 轮、$6、45 分钟，Reviewer 单会话最多 30 轮、$2、15 分钟；每个 TASK 最多 8 个 Worker 会话、3 个 Reviewer 会话、累计 200 轮和 $15。新 attempt 会读取最新模型，恢复已有 attempt 则继续使用状态中保存的模型快照；TASK 不能覆盖这些执行策略。
 
 ## TASK 文档
 

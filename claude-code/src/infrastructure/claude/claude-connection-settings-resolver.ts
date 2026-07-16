@@ -3,12 +3,11 @@
  * CC Switch 只是 Claude 用户配置的上游写入者；Apex 始终通过 Claude SDK 解析当前生效配置，
  * 不读取 cc-switch.db、不保存独立凭据，也不建立第二套登录状态。
  */
+import type { Settings } from "@anthropic-ai/claude-agent-sdk";
 import {
-  resolveSettings,
-  type ResolvedSettings,
-  type ResolveSettingsOptions,
-  type Settings,
-} from "@anthropic-ai/claude-agent-sdk";
+  SdkClaudeUserSettingsSource,
+  type ClaudeUserSettingsSource,
+} from "./claude-user-settings-source.js";
 
 export type ClaudeConnectionSettings = Pick<
   Settings,
@@ -20,10 +19,6 @@ export type ClaudeConnectionSettings = Pick<
   | "env"
 >;
 
-export type ClaudeSettingsLoader = (
-  options?: ResolveSettingsOptions,
-) => Promise<ResolvedSettings>;
-
 export interface ClaudeConnectionSettingsResolver {
   resolve(cwd: string): Promise<ClaudeConnectionSettings>;
 }
@@ -31,7 +26,8 @@ export interface ClaudeConnectionSettingsResolver {
 export class SdkClaudeConnectionSettingsResolver
 implements ClaudeConnectionSettingsResolver {
   public constructor(
-    private readonly loadSettings: ClaudeSettingsLoader = resolveSettings,
+    private readonly settingsSource: ClaudeUserSettingsSource
+      = new SdkClaudeUserSettingsSource(),
   ) {}
 
   public async resolve(cwd: string): Promise<ClaudeConnectionSettings> {
@@ -40,11 +36,8 @@ implements ClaudeConnectionSettingsResolver {
      * 不读取 project/local，防止目标仓库通过环境、认证辅助命令或代理配置影响独立 Reviewer。
      * 每次新会话都重新解析，不做 Apex 侧缓存，因此 CC Switch 后续切换会自然作用于下一会话。
      */
-    const resolved = await this.loadSettings({
-      cwd,
-      settingSources: ["user"],
-    });
-    return selectClaudeConnectionSettings(resolved.effective);
+    const settings = await this.settingsSource.load(cwd);
+    return selectClaudeConnectionSettings(settings);
   }
 }
 

@@ -21,6 +21,7 @@ import { createInitialRunState, transitionTask } from "../src/domain/run-state.j
 import { BeijingTimeFormatter } from "../src/infrastructure/time/beijing-time-formatter.js";
 import {
   FakeClock,
+  FixedAgentModelResolver,
   FixedProjectContextProvider,
   MemoryStateStore,
   RecordingAgent,
@@ -241,7 +242,16 @@ describe("QueueOrchestrator", () => {
   });
 
   it("恢复 executing checkpoint 时复用原 TASK 会话而不创建新会话", async () => {
-    const fixture = createFixture();
+    /*
+     * 旧 attempt 已持久化 claude-sonnet-5，即使 CC Switch 此时切为 glm-5.2，恢复也必须保持原模型。
+     * 恢复完成后的 Reviewer 是全新 attempt，才应读取并使用当前 glm-5.2 配置。
+     */
+    const modelResolver = new FixedAgentModelResolver("glm-5.2");
+    const fixture = createFixture(
+      new RecordingWorkspace(),
+      new RecordingAgent(),
+      modelResolver,
+    );
     const loaded = createLoadedProject([{ id: "TASK-001" }]);
     const initial = createInitialRunState({
       runId: "run-resume",
@@ -283,6 +293,11 @@ describe("QueueOrchestrator", () => {
       "11111111-1111-4111-8111-111111111111",
     );
     expect(fixture.agent.requests[0]?.sessionId).toBeUndefined();
+    expect(fixture.agent.requests.map((request) => request.model)).toEqual([
+      "claude-sonnet-5",
+      "glm-5.2",
+    ]);
+    expect(modelResolver.resolvedDirectories).toEqual(["/project"]);
   });
 
   it("项目内容变化后拒绝恢复旧运行快照", async () => {
@@ -610,7 +625,16 @@ describe("QueueOrchestrator", () => {
             turns: 1,
           }
         : completedBehavior(request));
-    const fixture = createFixture(new RecordingWorkspace(), agent);
+    /*
+     * 这里用 CC Switch 风格的第三方模型名覆盖默认 Fake，验证模型不再来自静态编排策略。
+     * Worker 与 Reviewer 分别创建 attempt，所以两次都应解析并请求同一个当前模型。
+     */
+    const modelResolver = new FixedAgentModelResolver("glm-5.2");
+    const fixture = createFixture(
+      new RecordingWorkspace(),
+      agent,
+      modelResolver,
+    );
     const loaded = createLoadedProject([{ id: "TASK-001" }]);
 
     const result = await fixture.orchestrator.start(loaded);
@@ -622,9 +646,10 @@ describe("QueueOrchestrator", () => {
     ]);
     expect(agent.requests[1]?.access).toBe("read");
     expect(agent.requests.map((request) => [request.model, request.effort])).toEqual([
-      ["claude-sonnet-5", "high"],
-      ["claude-sonnet-5", "high"],
+      ["glm-5.2", "high"],
+      ["glm-5.2", "high"],
     ]);
+    expect(modelResolver.resolvedDirectories).toEqual(["/project", "/project"]);
     expect(agent.requests[1]?.sessionId).not.toBe(agent.requests[0]?.sessionId);
     expect(agent.requests[1]?.prompt).toContain("# 实际变更文件");
     expect(agent.requests[1]?.prompt).not.toContain("# 外部门禁结果");
@@ -670,6 +695,7 @@ class FailOnceCandidateWorkspace extends RecordingWorkspace {
 function createFixture(
   workspace = new RecordingWorkspace(),
   agent = new RecordingAgent(),
+  modelResolver = new FixedAgentModelResolver(),
 ) {
   const clock = new FakeClock();
   const stateStore = new MemoryStateStore();
@@ -685,6 +711,7 @@ function createFixture(
       workspace,
       promptBuilder,
       new FixedProjectContextProvider(),
+      modelResolver,
       clock,
       resourceBudget,
       stageSupport,
@@ -694,6 +721,7 @@ function createFixture(
       workspace,
       promptBuilder,
       new FixedProjectContextProvider(),
+      modelResolver,
       clock,
       resourceBudget,
       stageSupport,
@@ -722,6 +750,7 @@ function createFixture(
   return {
     orchestrator,
     agent,
+    modelResolver,
     workspace,
     stateStore,
     lock,

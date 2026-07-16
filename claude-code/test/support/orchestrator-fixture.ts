@@ -17,6 +17,7 @@ import type {
   AgentExecutor,
   AgentRunRequest,
 } from "../../src/ports/agent-executor.js";
+import type { AgentModelResolver } from "../../src/ports/agent-model-resolver.js";
 import type { Clock } from "../../src/ports/clock.js";
 import type { EventLogger, RunEvent } from "../../src/ports/event-logger.js";
 import type { RunLock, RunLockHandle } from "../../src/ports/run-lock.js";
@@ -107,6 +108,21 @@ export class FixedProjectContextProvider implements ProjectContextProvider {
       truncated: false,
       diagnostics: [],
     };
+  }
+}
+
+export class FixedAgentModelResolver implements AgentModelResolver {
+  public readonly resolvedDirectories: string[] = [];
+
+  public constructor(private readonly model = "claude-sonnet-5") {}
+
+  /*
+   * 应用测试通过显式模型 Fake 模拟 CC Switch 的当前选择，并记录解析边界的调用目录。
+   * Fake 不读取开发机用户设置，因此测试结果不会随本地 Provider 切换而变化。
+   */
+  public async resolveModel(cwd: string): Promise<string> {
+    this.resolvedDirectories.push(cwd);
+    return this.model;
   }
 }
 

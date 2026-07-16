@@ -20,6 +20,9 @@ import { TaskProgressReconciler } from "../application/task-progress-reconciler.
 import { TaskResourceBudget } from "../application/task-resource-budget.js";
 import { WorkerExecutionGuard } from "../application/worker-execution-guard.js";
 import { ClaudeAgentSdkExecutor } from "../infrastructure/claude/claude-agent-sdk-executor.js";
+import { SdkClaudeConnectionSettingsResolver } from "../infrastructure/claude/claude-connection-settings-resolver.js";
+import { SdkClaudeModelResolver } from "../infrastructure/claude/claude-model-resolver.js";
+import { SdkClaudeUserSettingsSource } from "../infrastructure/claude/claude-user-settings-source.js";
 import { ConsoleClaudeMessageObserver } from "../infrastructure/claude/console-claude-message-observer.js";
 import { GitWorkspace } from "../infrastructure/git/git-workspace.js";
 import {
@@ -61,11 +64,21 @@ export async function createOrchestratorRuntime(
     new ConsoleEventLogger(timeFormatter),
     new JsonlEventLogger(stateDirectory),
   ]);
+  /*
+   * 组合根共享同一个无状态 Claude 设置解析器，并分别注入模型选择端口与连接设置边界。
+   * 具体 SDK 类型不会越过基础设施层，应用阶段只依赖可测试的模型字符串契约。
+   */
+  const claudeUserSettings = new SdkClaudeUserSettingsSource();
+  const connectionSettings = new SdkClaudeConnectionSettingsResolver(
+    claudeUserSettings,
+  );
+  const modelResolver = new SdkClaudeModelResolver(claudeUserSettings);
   const agent = new ClaudeAgentSdkExecutor({
     messageObserver: new ConsoleClaudeMessageObserver({
       timestamp: () => timeFormatter.formatTimestamp(clock.now()),
     }),
     executionGuard: new WorkerExecutionGuard(),
+    connectionSettingsResolver: connectionSettings,
   });
   const promptBuilder = new PromptBuilder();
   const resourceBudget = new TaskResourceBudget();
@@ -77,6 +90,7 @@ export async function createOrchestratorRuntime(
       workspace,
       promptBuilder,
       projectContext,
+      modelResolver,
       clock,
       resourceBudget,
       stageSupport,
@@ -86,6 +100,7 @@ export async function createOrchestratorRuntime(
       workspace,
       promptBuilder,
       projectContext,
+      modelResolver,
       clock,
       resourceBudget,
       stageSupport,

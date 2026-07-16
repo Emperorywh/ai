@@ -182,7 +182,7 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
             closeQuery(activeQuery);
             return fail(
               "model_mismatch",
-              `实际模型与固定策略不一致：期望 ${request.expectedResolvedModel}，实际 ${message.model}`,
+              `实际模型与 attempt 请求不一致：期望 ${request.expectedResolvedModel}，实际 ${message.model}`,
               message.session_id,
               0,
               0,

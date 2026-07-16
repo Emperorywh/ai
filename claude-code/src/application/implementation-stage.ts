@@ -16,6 +16,7 @@ import {
   type TaskRunState,
 } from "../domain/run-state.js";
 import type { AgentExecutor } from "../ports/agent-executor.js";
+import type { AgentModelResolver } from "../ports/agent-model-resolver.js";
 import type { Clock } from "../ports/clock.js";
 import type { ProjectContextProvider } from "../ports/project-context-provider.js";
 import type {
@@ -38,6 +39,7 @@ export class ImplementationStage {
     private readonly workspace: CandidateStore & Pick<WorkspaceIdentityStore, "assertClean">,
     private readonly promptBuilder: PromptBuilder,
     private readonly projectContext: ProjectContextProvider,
+    private readonly modelResolver: AgentModelResolver,
     private readonly clock: Clock,
     private readonly resourceBudget: TaskResourceBudget,
     private readonly support: TaskStageSupport,
@@ -87,13 +89,21 @@ export class ImplementationStage {
       throw new Error(`任务 ${input.task.id} 的恢复上下文缺少 sessionId`);
     }
 
+    /*
+     * 只在创建新 attempt 时读取 CC Switch 当前模型，并立即保存为可恢复的执行事实。
+     * 同一 attempt 后续执行或进程恢复都复用该快照，不依赖可变的全局用户配置。
+     */
+    const requestedModel = await this.modelResolver.resolveModel(
+      input.loaded.projectRoot,
+    );
+
     const now = this.support.now();
     const attempt: TaskAttemptState = {
       number: taskState.attempts.length + 1,
       kind,
       sessionId,
       sessionInitialized: kind === "resume",
-      requestedModel: ORCHESTRATOR_POLICY.worker.model,
+      requestedModel,
       startedAt: now,
     };
     return {
@@ -288,6 +298,10 @@ export class ImplementationStage {
     prompt: string,
     sessionCheckpoint: AgentSessionCheckpoint,
   ): Promise<AgentRunOutcome<ImplementationResult>> {
+    /*
+     * 请求值与握手期望都来自持久化 attempt，日志因此展示本次实际选择的 CC Switch 模型。
+     * 精确握手仍能在首次工具调用前阻止 SDK 或 Provider 静默切换到其他模型。
+     */
     return this.agent.run({
       access: "write",
       attemptKind: shouldResume ? "resume" : attempt.kind,
@@ -295,8 +309,8 @@ export class ImplementationStage {
       title: input.task.title,
       prompt,
       cwd: input.loaded.projectRoot,
-      model: ORCHESTRATOR_POLICY.worker.model,
-      expectedResolvedModel: ORCHESTRATOR_POLICY.worker.expectedResolvedModel,
+      model: attempt.requestedModel,
+      expectedResolvedModel: attempt.requestedModel,
       effort: ORCHESTRATOR_POLICY.worker.effort,
       maxTurns: ORCHESTRATOR_POLICY.worker.maxTurns,
       maxBudgetUsd: ORCHESTRATOR_POLICY.worker.maxBudgetUsd,

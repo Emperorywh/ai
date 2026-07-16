@@ -69,7 +69,7 @@ describe("ClaudeAgentSdkExecutor", () => {
     });
   });
 
-  it("实际模型与固定策略不一致时在工具执行前终止", async () => {
+  it("实际模型与 attempt 请求不一致时在工具执行前终止", async () => {
     let closed = false;
     const queryFactory: AgentQueryFactory = () => createFakeQuery(
       messageStream([
