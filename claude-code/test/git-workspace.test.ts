@@ -140,14 +140,15 @@ describe("GitWorkspace", () => {
     );
 
     const workspace = new GitWorkspace(projectRoot);
-    const candidate = await workspace.captureCandidate();
+    const review = await workspace.captureReviewCandidate();
+    const candidate = review.candidate;
 
     expect(candidate.files.map((file) => file.path)).toEqual([
       "package.json",
       "src/feature.ts",
     ]);
-    expect(candidate.diff).toContain("a/package.json");
-    expect(candidate.diff).not.toContain("a/apps/nested-project/package.json");
+    expect(review.diff).toContain("a/package.json");
+    expect(review.diff).not.toContain("a/apps/nested-project/package.json");
   });
 
   it("expected fingerprint 对应的候选发生变化时拒绝提交", async () => {

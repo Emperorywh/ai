@@ -4,12 +4,26 @@
  */
 export const ORCHESTRATOR_POLICY = Object.freeze({
   worker: Object.freeze({
-    model: "sonnet",
+    model: "claude-sonnet-5",
+    expectedResolvedModel: "claude-sonnet-5",
     effort: "high" as const,
+    maxTurns: 80,
+    maxBudgetUsd: 6,
+    timeoutMs: 45 * 60 * 1_000,
   }),
   reviewer: Object.freeze({
-    model: "sonnet",
+    model: "claude-sonnet-5",
+    expectedResolvedModel: "claude-sonnet-5",
     effort: "high" as const,
+    maxTurns: 30,
+    maxBudgetUsd: 2,
+    timeoutMs: 15 * 60 * 1_000,
+  }),
+  taskBudget: Object.freeze({
+    maxWorkerSessions: 8,
+    maxReviewerSessions: 3,
+    maxTotalTurns: 200,
+    maxTotalBudgetUsd: 15,
   }),
   git: Object.freeze({
     commitMessagePrefix: "task",

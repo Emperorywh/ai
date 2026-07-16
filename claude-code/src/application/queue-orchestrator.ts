@@ -7,18 +7,23 @@ import { ConfigurationError } from "../domain/errors.js";
 import type { LoadedProject, TaskDefinition } from "../domain/project.js";
 import {
   createInitialRunState,
-  finishRun,
-  replaceTaskFields,
   type RunState,
 } from "../domain/run-state.js";
 import type { Clock } from "../ports/clock.js";
-import type { EventLogger } from "../ports/event-logger.js";
 import type { RunLock } from "../ports/run-lock.js";
 import type { StateStore } from "../ports/state-store.js";
 import type { TimeFormatter } from "../ports/time-formatter.js";
-import type { Workspace } from "../ports/workspace.js";
+import type {
+  WorkspaceIdentityStore,
+} from "../ports/workspace.js";
 import type { TaskExecutionService } from "./task-execution-service.js";
 import type { TaskProgressReconciler } from "./task-progress-reconciler.js";
+import { aggregateRunMetrics, collectRunModelUsage } from "./run-metrics.js";
+import type { RunArtifactWriter } from "./run-artifact-writer.js";
+import type { RunCheckpointWriter } from "./run-checkpoint-writer.js";
+import type { RunFinalizer } from "./run-finalizer.js";
+import type { RunResumeValidator } from "./run-resume-validator.js";
+import type { TerminalCandidateService } from "./terminal-candidate-service.js";
 
 export interface OrchestratorResult {
   readonly state: RunState;
@@ -34,17 +39,53 @@ export interface StartRunOptions {
   readonly signal?: AbortSignal | undefined;
 }
 
+/*
+ * 依赖对象显式展示队列驱动器的协作者，避免长位置参数在新增职责时发生错装配。
+ * 恢复、收敛、产物和 checkpoint 均由专用服务持有，QueueOrchestrator 只控制线性推进顺序。
+ */
+export interface QueueOrchestratorDependencies {
+  readonly taskExecution: TaskExecutionService;
+  readonly taskProgress: TaskProgressReconciler;
+  readonly stateStore: StateStore;
+  readonly runLock: RunLock;
+  readonly workspace: WorkspaceIdentityStore;
+  readonly checkpoints: RunCheckpointWriter;
+  readonly resumeValidator: RunResumeValidator;
+  readonly finalizer: RunFinalizer;
+  readonly artifacts: RunArtifactWriter;
+  readonly terminalCandidates: TerminalCandidateService;
+  readonly clock: Clock;
+  readonly timeFormatter: TimeFormatter;
+}
+
 export class QueueOrchestrator {
-  public constructor(
-    private readonly taskExecution: TaskExecutionService,
-    private readonly taskProgress: TaskProgressReconciler,
-    private readonly stateStore: StateStore,
-    private readonly runLock: RunLock,
-    private readonly workspace: Workspace,
-    private readonly logger: EventLogger,
-    private readonly clock: Clock,
-    private readonly timeFormatter: TimeFormatter,
-  ) {}
+  private readonly taskExecution: TaskExecutionService;
+  private readonly taskProgress: TaskProgressReconciler;
+  private readonly stateStore: StateStore;
+  private readonly runLock: RunLock;
+  private readonly workspace: WorkspaceIdentityStore;
+  private readonly checkpoints: RunCheckpointWriter;
+  private readonly resumeValidator: RunResumeValidator;
+  private readonly finalizer: RunFinalizer;
+  private readonly artifacts: RunArtifactWriter;
+  private readonly terminalCandidates: TerminalCandidateService;
+  private readonly clock: Clock;
+  private readonly timeFormatter: TimeFormatter;
+
+  public constructor(dependencies: QueueOrchestratorDependencies) {
+    this.taskExecution = dependencies.taskExecution;
+    this.taskProgress = dependencies.taskProgress;
+    this.stateStore = dependencies.stateStore;
+    this.runLock = dependencies.runLock;
+    this.workspace = dependencies.workspace;
+    this.checkpoints = dependencies.checkpoints;
+    this.resumeValidator = dependencies.resumeValidator;
+    this.finalizer = dependencies.finalizer;
+    this.artifacts = dependencies.artifacts;
+    this.terminalCandidates = dependencies.terminalCandidates;
+    this.clock = dependencies.clock;
+    this.timeFormatter = dependencies.timeFormatter;
+  }
 
   public async start(
     loaded: LoadedProject,
@@ -82,6 +123,7 @@ export class QueueOrchestrator {
         .map((decision) => decision.taskId);
       await this.checkpoint(
         state,
+        orderedTasks,
         undefined,
         "run_started",
         `${this.describeTaskQueue("新运行已创建", orderedTasks)}；复用 ${reusedTaskIds.length} 个，待执行 ${pendingTaskIds.length} 个`,
@@ -114,17 +156,18 @@ export class QueueOrchestrator {
     if (existing === undefined) {
       throw new ConfigurationError(`找不到运行 ${runId}`);
     }
-    this.assertResumeProjectCompatible(loaded, existing);
+    this.resumeValidator.validateProjectAndState(loaded, existing);
     if (existing.status !== "running") {
       return { state: existing, artifacts: [] };
     }
 
     const lock = await this.runLock.acquire(runId);
     try {
-      await this.assertResumeWorkspaceCompatible(existing);
+      await this.resumeValidator.validateWorkspace(existing);
       const orderedTasks = loaded.tasks;
       await this.checkpoint(
         existing,
+        orderedTasks,
         undefined,
         "run_resumed",
         this.describeTaskQueue("恢复已有运行", orderedTasks),
@@ -157,6 +200,7 @@ export class QueueOrchestrator {
       if (signal?.aborted === true) {
         await this.checkpoint(
           state,
+          orderedTasks,
           undefined,
           "run_interrupted",
           "收到中止信号，已停在最近 checkpoint",
@@ -164,7 +208,7 @@ export class QueueOrchestrator {
         return { state, artifacts: [] };
       }
 
-      const stateAfterQuarantine = await this.quarantineTerminalCandidate(
+      const stateAfterQuarantine = await this.terminalCandidates.archiveIfNecessary(
         state,
         orderedTasks,
       );
@@ -178,12 +222,6 @@ export class QueueOrchestrator {
         return this.finishLinearRun(loaded, state, orderedTasks);
       }
 
-      const taskState = state.tasks[currentTask.id];
-      if (taskState === undefined) {
-        throw new ConfigurationError(`运行状态缺少任务 ${currentTask.id}`);
-      }
-      this.assertPreviousTasksCompleted(state, orderedTasks, currentTask);
-
       const result = await this.taskExecution.step({
         loaded,
         state,
@@ -194,6 +232,7 @@ export class QueueOrchestrator {
           state = checkpointState;
           await this.checkpoint(
             checkpointState,
+            orderedTasks,
             currentTask.id,
             "task_progress",
             message,
@@ -204,6 +243,7 @@ export class QueueOrchestrator {
       state = result.state;
       await this.checkpoint(
         state,
+        orderedTasks,
         currentTask.id,
         "task_progress",
         result.message,
@@ -214,59 +254,6 @@ export class QueueOrchestrator {
     }
 
     return { state, artifacts: [] };
-  }
-
-  /*
-   * 当前终态候选归档是结束线性 Run 的前置条件；每轮只处理一个任务并立即 checkpoint。
-   * 崩溃恢复会通过确定性 Git ref 找回已归档候选，不会重复覆盖或丢失文件树。
-   */
-  private async quarantineTerminalCandidate(
-    state: RunState,
-    orderedTasks: readonly TaskDefinition[],
-  ): Promise<RunState | undefined> {
-    const task = orderedTasks.find(
-      (candidate) => state.tasks[candidate.id]?.status !== "completed",
-    );
-    const taskState = task === undefined ? undefined : state.tasks[task.id];
-    if (
-      taskState?.status !== "blocked"
-      && taskState?.status !== "failed"
-    ) {
-      return undefined;
-    }
-    if (taskState.candidateArchive !== undefined) {
-      return undefined;
-    }
-    if (task === undefined) {
-      return undefined;
-    }
-
-    const archive = await this.workspace.quarantineCandidate({
-      runId: state.runId,
-      taskId: task.id,
-    });
-    const nextState = replaceTaskFields(
-      state,
-      task.id,
-      {
-        candidateArchive: {
-          ...(archive.reference === undefined ? {} : { reference: archive.reference }),
-          changedFiles: archive.changedFiles,
-          archivedAt: this.now(),
-        },
-      },
-      this.now(),
-    );
-    await this.checkpoint(
-      nextState,
-      task.id,
-      "task_candidate_quarantined",
-      archive.reference === undefined
-        ? "终态任务没有未提交候选，工作区保持干净"
-        : `终态任务候选已隔离到 ${archive.reference}`,
-      { changedFiles: archive.changedFiles },
-    );
-    return nextState;
   }
 
   /*
@@ -299,174 +286,43 @@ export class QueueOrchestrator {
     state: RunState,
     orderedTasks: readonly TaskDefinition[],
   ): Promise<OrchestratorResult> {
-    const allCompleted = orderedTasks.every(
-      (task) => state.tasks[task.id]?.status === "completed",
-    );
-    const terminalTask = orderedTasks
-      .map((task) => state.tasks[task.id])
-      .find((taskState) =>
-        taskState?.status === "blocked" || taskState?.status === "failed");
-    if (!allCompleted && terminalTask === undefined) {
-      throw new ConfigurationError("线性队列没有可执行任务，也没有可解释的终态任务");
-    }
-    const terminalStatus = allCompleted
-      ? "completed" as const
-      : terminalTask?.status === "failed"
-        ? "failed" as const
-        : "blocked" as const;
-    const failureReason = allCompleted
-      ? undefined
-      : `${terminalTask?.taskId ?? "unknown"}: ${terminalTask?.failureReason ?? terminalStatus}`;
-    const completedState = finishRun(
+    const finalization = this.finalizer.finalize(
       state,
-      terminalStatus,
+      orderedTasks,
       this.now(),
-      failureReason,
     );
-    const artifacts = await this.writeRunArtifacts(loaded, completedState);
+    const artifacts = await this.artifacts.write(loaded, finalization.state);
+    const runMetrics = aggregateRunMetrics(finalization.state);
     await this.checkpoint(
-      completedState,
+      finalization.state,
+      orderedTasks,
       undefined,
-      `run_${terminalStatus}`,
-      terminalStatus === "completed" ? "全部任务完成" : failureReason ?? terminalStatus,
+      `run_${finalization.terminalStatus}`,
+      finalization.message,
+      {
+        metrics: runMetrics,
+        models: collectRunModelUsage(finalization.state),
+      },
     );
-    return { state: completedState, artifacts };
-  }
-
-  private assertResumeProjectCompatible(
-    loaded: LoadedProject,
-    state: RunState,
-  ): void {
-    if (state.projectHash !== loaded.projectHash) {
-      throw new ConfigurationError(
-        "orchestration/SPEC.md 或 TASK 已变化，不能混用旧运行状态。请创建新运行。",
-      );
-    }
-    if (state.projectRoot !== loaded.projectRoot) {
-      throw new ConfigurationError("运行状态所属项目与当前项目不一致");
-    }
-  }
-
-  private async assertResumeWorkspaceCompatible(state: RunState): Promise<void> {
-    const current = await this.workspace.getIdentity();
-    if (current.repositoryRoot !== state.workspace.repositoryRoot) {
-      throw new ConfigurationError("Git 仓库身份与运行快照不一致");
-    }
-    if (current.branch !== state.workspace.branch) {
-      throw new ConfigurationError(
-        `Git 分支已变化：期望 ${state.workspace.branch}，实际 ${current.branch}`,
-      );
-    }
-    if (current.head === state.workspace.expectedHead) {
-      return;
-    }
-
-    const committingTask = Object.values(state.tasks).find(
-      (task) => task.status === "committing",
-    );
-    if (committingTask?.candidateFingerprint !== undefined) {
-      const recoveredCommit = await this.workspace.findTaskCommit({
-        runId: state.runId,
-        taskId: committingTask.taskId,
-        expectedParent: state.workspace.expectedHead,
-        candidateFingerprint: committingTask.candidateFingerprint,
-      });
-      if (recoveredCommit === current.head) {
-        return;
-      }
-    }
-
-    throw new ConfigurationError(
-      `Git HEAD 已变化：期望 ${state.workspace.expectedHead}，实际 ${current.head}`,
-    );
-  }
-
-  /*
-   * 线性队列要求当前位置之前的所有 TASK 都已完成，直接前驱完成只是该不变量的最小表现。
-   * 完整检查可以在损坏或人工构造的恢复状态进入 Agent 前立即暴露顺序缺口。
-   */
-  private assertPreviousTasksCompleted(
-    state: RunState,
-    orderedTasks: readonly TaskDefinition[],
-    task: TaskDefinition,
-  ): void {
-    const taskIndex = orderedTasks.findIndex((candidate) => candidate.id === task.id);
-    if (taskIndex < 0) {
-      throw new ConfigurationError(`线性任务序列中不存在任务：${task.id}`);
-    }
-    const incomplete = orderedTasks.slice(0, taskIndex).filter(
-      (previousTask) => state.tasks[previousTask.id]?.status !== "completed",
-    );
-    if (incomplete.length > 0) {
-      throw new ConfigurationError(
-        `任务 ${task.id} 之前仍有任务未完成：${incomplete
-          .map((previousTask) => previousTask.id)
-          .join(", ")}`,
-      );
-    }
+    return { state: finalization.state, artifacts };
   }
 
   private async checkpoint(
     state: RunState,
+    orderedTasks: readonly TaskDefinition[],
     taskId: string | undefined,
     type: string,
     message: string,
     details?: Readonly<Record<string, unknown>>,
   ): Promise<void> {
-    await this.stateStore.save(state);
-    await this.logger.log({
-      timestamp: this.now(),
-      runId: state.runId,
+    await this.checkpoints.write({
+      state,
+      orderedTasks,
       ...(taskId === undefined ? {} : { taskId }),
       type,
       message,
       ...(details === undefined ? {} : { details }),
     });
-  }
-
-  private async writeRunArtifacts(
-    loaded: LoadedProject,
-    state: RunState,
-  ): Promise<readonly string[]> {
-    const acceptanceChecklist = [
-      `# 人工验收清单`,
-      "",
-      `Run ID：${state.runId}`,
-      "",
-      ...loaded.tasks
-        .filter((task) => state.tasks[task.id]?.status === "completed")
-        .flatMap((task) => [
-        `## ${task.id} ${task.title}`,
-        "",
-        "- [ ] 按该 TASK 的任务描述完成人工验收",
-        "",
-      ]),
-      "> 编排器没有启动浏览器或执行 UI 自动化；以上项目必须由人工验收。",
-      "",
-    ].join("\n");
-    const summary = [
-      "# 运行摘要",
-      "",
-      `- Run ID：${state.runId}`,
-      `- 状态：${state.status}`,
-      `- 创建时间：${this.timeFormatter.formatTimestamp(state.createdAt)}`,
-      `- 完成时间：${this.timeFormatter.formatTimestamp(state.updatedAt)}`,
-      "",
-      ...loaded.tasks.map((task) => {
-        const taskState = state.tasks[task.id];
-        return `- ${task.id}: ${taskState?.status ?? "missing"} (${taskState?.commitSha ?? "no commit"})`;
-      }),
-      "",
-    ].join("\n");
-
-    return Promise.all([
-      this.stateStore.writeArtifact(
-        state.runId,
-        "manual-acceptance.md",
-        acceptanceChecklist,
-      ),
-      this.stateStore.writeArtifact(state.runId, "summary.md", summary),
-    ]);
   }
 
   private createRunId(): string {

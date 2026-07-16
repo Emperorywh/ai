@@ -84,18 +84,30 @@ describe("FileStateStore", () => {
     ).rejects.toThrow("非法产物名称");
   });
 
-  it("拒绝没有版本 4 标记的旧状态快照", async () => {
+  it("拒绝 RunState v5 旧状态快照", async () => {
     const directory = await createTemporaryDirectory();
     const store = new FileStateStore(directory);
     const runDirectory = join(directory, "runs", "run-old-state");
     await mkdir(runDirectory, { recursive: true });
     /*
-     * 旧状态不能被隐式补默认值，否则候选归档、依赖阻塞和审核语义会变得不可推导。
+     * v5 即使其他字段完整，也缺少 v6 冻结阶段、审核历史与验证证据语义。
      * 明确拒绝后，操作者只能创建符合当前契约的新运行。
      */
+    const current = createInitialRunState({
+      runId: "run-old-state",
+      projectHash: "project-hash",
+      projectRoot: "/project",
+      workspace: {
+        repositoryRoot: "/project",
+        branch: "main",
+        expectedHead: "base",
+      },
+      tasks: [{ taskId: "TASK-001" }],
+      now: "2026-07-13T00:00:00.000Z",
+    });
     await writeFile(
       join(runDirectory, "state.json"),
-      JSON.stringify({ runId: "run-old-state", status: "running" }),
+      JSON.stringify({ ...current, version: 5 }),
       "utf8",
     );
 

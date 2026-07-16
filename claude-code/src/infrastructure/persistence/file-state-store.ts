@@ -20,14 +20,29 @@ export class FileStateStore implements StateStore {
   public constructor(private readonly baseDirectory: string) {}
 
   public async save(state: RunState): Promise<void> {
-    const runDirectory = this.getRunDirectory(state.runId);
+    /*
+     * 文件状态库作为持久化完整性边界再次校验字段 Schema，防止独立端口使用者绕过应用 checkpoint。
+     * 跨 TASK 线性语义仍由应用层校验，基础设施不解释队列规则。
+     */
+    const parsed = runStateSchema.safeParse(state);
+    if (!parsed.success) {
+      throw new InfrastructureError(
+        `拒绝保存损坏运行状态：${parsed.error.issues
+          .map((issue) => issue.message)
+          .join("；")}`,
+      );
+    }
+    const runDirectory = this.getRunDirectory(parsed.data.runId);
     await mkdir(runDirectory, { recursive: true });
     await this.atomicWrite(
       join(runDirectory, "state.json"),
-      `${JSON.stringify(state, null, 2)}\n`,
+      `${JSON.stringify(parsed.data, null, 2)}\n`,
     );
     await mkdir(this.baseDirectory, { recursive: true });
-    await this.atomicWrite(join(this.baseDirectory, "latest"), `${state.runId}\n`);
+    await this.atomicWrite(
+      join(this.baseDirectory, "latest"),
+      `${parsed.data.runId}\n`,
+    );
   }
 
   public async load(runId: string): Promise<RunState | undefined> {

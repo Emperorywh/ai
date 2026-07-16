@@ -1,24 +1,24 @@
 /*
- * AgentSessionCheckpoint 显式拥有单次 SDK 调用期间的会话初始化状态，并负责把 init 事件原子落盘。
- * Task 阶段不再通过闭包隐式修改 RunState；调用结束后只能从该控制器读取唯一的最新快照。
+ * ReviewSessionCheckpoint 持有单次 Reviewer SDK 调用期间的唯一状态快照。
+ * Reviewer init 的实际模型和 session 在继续读取候选前落盘，恢复时不会依赖控制台日志猜测。
  */
 import { ConfigurationError } from "../domain/errors.js";
 import {
-  replaceCurrentAttempt,
+  replaceCurrentReviewAttempt,
+  type ReviewAttemptState,
   type RunState,
-  type TaskAttemptState,
 } from "../domain/run-state.js";
-import type { Clock } from "../ports/clock.js";
 import type { AgentSessionInfo } from "../ports/agent-executor.js";
+import type { Clock } from "../ports/clock.js";
 import type { TaskCheckpointWriter } from "./task-execution-contract.js";
 
-export class AgentSessionCheckpoint {
+export class ReviewSessionCheckpoint {
   private state: RunState;
 
   public constructor(
     initialState: RunState,
     private readonly taskId: string,
-    private readonly attempt: TaskAttemptState,
+    private readonly attempt: ReviewAttemptState,
     private readonly clock: Clock,
     private readonly writer?: TaskCheckpointWriter,
   ) {
@@ -32,28 +32,27 @@ export class AgentSessionCheckpoint {
   public async initialize(session: AgentSessionInfo): Promise<void> {
     if (session.sessionId !== this.attempt.sessionId) {
       throw new ConfigurationError(
-        `Agent 初始化 sessionId 与预期不一致：${session.sessionId}`,
+        `Reviewer 初始化 sessionId 与预期不一致：${session.sessionId}`,
       );
     }
-    const currentAttempt = this.state.tasks[this.taskId]?.attempts.at(-1);
-    if (currentAttempt?.sessionInitialized === true) {
+    const current = this.state.tasks[this.taskId]?.reviewAttempts.at(-1);
+    if (current?.sessionInitialized === true) {
       return;
     }
-
-    const initializedAttempt: TaskAttemptState = {
+    const initialized: ReviewAttemptState = {
       ...this.attempt,
       sessionInitialized: true,
       resolvedModel: session.resolvedModel,
     };
-    this.state = replaceCurrentAttempt(
+    this.state = replaceCurrentReviewAttempt(
       this.state,
       this.taskId,
-      initializedAttempt,
+      initialized,
       this.clock.now().toISOString(),
     );
     await this.writer?.(
       this.state,
-      "Agent 会话已初始化",
+      "Reviewer 会话已初始化",
       {
         sessionId: session.sessionId,
         requestedModel: this.attempt.requestedModel,

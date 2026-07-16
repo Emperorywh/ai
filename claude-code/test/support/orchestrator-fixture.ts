@@ -10,6 +10,7 @@ import {
   type TaskDefinition,
 } from "../../src/domain/project.js";
 import type { RunState } from "../../src/domain/run-state.js";
+import type { ProjectContextProvider } from "../../src/ports/project-context-provider.js";
 import { createTaskContractHash } from "../../src/domain/task-completion.js";
 import { createLinearTaskSequence } from "../../src/domain/task-sequence.js";
 import type {
@@ -91,6 +92,24 @@ export class RecordingLogger implements EventLogger {
   }
 }
 
+/*
+ * 应用测试使用固定项目清单，确保阶段测试不依赖真实文件系统，也能验证上下文已进入提示词。
+ * 生产编译器的排序、截断和脚本发现由独立基础设施测试覆盖。
+ */
+export class FixedProjectContextProvider implements ProjectContextProvider {
+  public async compile() {
+    return {
+      fingerprint: "test-project-context",
+      packageManager: "pnpm" as const,
+      scripts: [{ name: "test", command: "vitest run" }],
+      scriptsTruncated: false,
+      entries: ["src/", "src/index.ts"],
+      truncated: false,
+      diagnostics: [],
+    };
+  }
+}
+
 export class RecordingWorkspace implements Workspace {
   public readonly commits: string[] = [];
   public cleanChecks = 0;
@@ -116,6 +135,13 @@ export class RecordingWorkspace implements Workspace {
 
   public async captureCandidate(): Promise<CandidateSnapshot> {
     return createCandidate("stable-candidate");
+  }
+
+  public async captureReviewCandidate() {
+    return {
+      candidate: createCandidate("stable-candidate"),
+      diff: "diff --git a/file b/file",
+    };
   }
 
   public async quarantineCandidate() {
@@ -157,9 +183,13 @@ export class RecordingWorkspace implements Workspace {
   }
 }
 
+type TestAgentOutcome =
+  | Omit<Extract<AgentRunOutcome<unknown>, { ok: true }>, "telemetry">
+  | Omit<Extract<AgentRunOutcome<unknown>, { ok: false }>, "telemetry">;
+
 export type AgentBehavior = (
   request: AgentRunRequest<unknown>,
-) => AgentRunOutcome<unknown>;
+) => TestAgentOutcome;
 
 export class RecordingAgent implements AgentExecutor {
   public active = 0;
@@ -174,18 +204,31 @@ export class RecordingAgent implements AgentExecutor {
     this.requests.push(request);
     const sessionId = request.sessionId ?? request.resumeSessionId;
     if (sessionId !== undefined) {
-      await request.onSessionInitialized?.(sessionId);
+      await request.onSessionInitialized?.({
+        sessionId,
+        resolvedModel: request.expectedResolvedModel,
+      });
     }
     await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 2));
     const outcome = this.behavior(request);
     this.active -= 1;
-    return outcome as AgentRunOutcome<T>;
+    return {
+      ...outcome,
+      telemetry: {
+        requestedModel: request.model,
+        resolvedModel: request.expectedResolvedModel,
+        durationMs: 2,
+        apiRetryCount: 0,
+        apiRetryDelayMs: 0,
+        toolCalls: 1,
+      },
+    } as AgentRunOutcome<T>;
   }
 }
 
 export function completedBehavior(
   request: AgentRunRequest<unknown>,
-): AgentRunOutcome<unknown> {
+): TestAgentOutcome {
   /*
    * 系统固定执行独立审核，因此默认 Fake 同时覆盖 Worker 完成和 Reviewer 通过两类协议。
    * 测试若关心拒绝、阻塞或重试，会在用例中显式替换对应行为。
@@ -212,6 +255,12 @@ export function completedBehavior(
       summary: `${request.taskId} complete`,
       blockingQuestions: [],
       notes: [],
+      verifications: [{
+        scope: "full",
+        command: "pnpm test",
+        status: "passed",
+        summary: "测试通过",
+      }],
     },
     costUsd: 0.01,
     turns: 2,
@@ -282,7 +331,6 @@ export function createLoadedProject(
 export function createCandidate(fingerprint: string): CandidateSnapshot {
   return {
     fingerprint,
-    diff: "diff --git a/file b/file",
     files: [{
       path: "src/candidate.ts",
       kind: "file",

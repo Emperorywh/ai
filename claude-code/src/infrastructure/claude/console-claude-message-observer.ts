@@ -10,22 +10,33 @@ import type {
 
 type ConsoleWriter = (content: string) => void;
 
+export interface ConsoleClaudeMessageObserverOptions {
+  readonly stdout?: ConsoleWriter;
+  readonly stderr?: ConsoleWriter;
+  readonly timestamp?: () => string;
+}
+
 const MAX_INLINE_DETAIL_CHARACTERS = 400;
 
 export class ConsoleClaudeMessageObserver implements ClaudeMessageObserver {
   private assistantTextOpen = false;
   private streamedAssistantText = false;
   private thinkingStarted = false;
+  private lastStatus: string | undefined;
   private readonly toolNames = new Map<string, string>();
+  private readonly stdout: ConsoleWriter;
+  private readonly stderr: ConsoleWriter;
+  private readonly timestamp: (() => string) | undefined;
 
-  public constructor(
-    private readonly stdout: ConsoleWriter = (content) => {
+  public constructor(options: ConsoleClaudeMessageObserverOptions = {}) {
+    this.stdout = options.stdout ?? ((content) => {
       process.stdout.write(content);
-    },
-    private readonly stderr: ConsoleWriter = (content) => {
+    });
+    this.stderr = options.stderr ?? ((content) => {
       process.stderr.write(content);
-    },
-  ) {}
+    });
+    this.timestamp = options.timestamp;
+  }
 
   public onMessage(context: ClaudeMessageContext, message: SDKMessage): void {
     if (message.type === "stream_event") {
@@ -81,7 +92,7 @@ export class ConsoleClaudeMessageObserver implements ClaudeMessageObserver {
       return;
     }
     this.closeAssistantText();
-    const prefix = `${formatContext(context)} Claude stderr：`;
+    const prefix = `${formatContext(context, this.timestamp)} Claude stderr：`;
     const normalized = data.replaceAll("\r\n", "\n").trimEnd();
     this.stderr(`${prefix}${normalized.replaceAll("\n", `\n${prefix}`)}\n`);
   }
@@ -104,7 +115,7 @@ export class ConsoleClaudeMessageObserver implements ClaudeMessageObserver {
     }
 
     if (!this.assistantTextOpen) {
-      this.stdout(`${formatContext(context)} Claude：`);
+      this.stdout(`${formatContext(context, this.timestamp)} Claude：`);
       this.assistantTextOpen = true;
     }
     this.stdout(delta.text);
@@ -177,6 +188,7 @@ export class ConsoleClaudeMessageObserver implements ClaudeMessageObserver {
      * 确保同一个观察器被后续 TASK 复用时仍会输出一次新的“开始推理”。
      */
     this.thinkingStarted = false;
+    this.lastStatus = undefined;
     const metrics = `${message.num_turns} 轮，$${message.total_cost_usd.toFixed(4)}`;
     if (message.subtype === "success") {
       this.writeLine(context, `Claude 会话成功（${metrics}）`);
@@ -203,6 +215,7 @@ export class ConsoleClaudeMessageObserver implements ClaudeMessageObserver {
          * 展示状态在此重新初始化，避免跨 TASK 或重试会话泄漏隐式状态。
          */
         this.thinkingStarted = false;
+        this.lastStatus = undefined;
         this.toolNames.clear();
         this.writeLine(
           context,
@@ -210,6 +223,10 @@ export class ConsoleClaudeMessageObserver implements ClaudeMessageObserver {
         );
         return;
       case "status":
+        if (this.lastStatus === String(message.status)) {
+          return;
+        }
+        this.lastStatus = String(message.status);
         this.writeLine(context, `Claude 状态：${message.status ?? "空闲"}`);
         return;
       case "thinking_tokens":
@@ -243,6 +260,24 @@ export class ConsoleClaudeMessageObserver implements ClaudeMessageObserver {
       case "notification":
         this.writeLine(context, `Claude 通知：${message.text}`);
         return;
+      case "task_started":
+        this.writeLine(
+          context,
+          `后台任务已启动：${message.description}（${message.task_id}）`,
+        );
+        return;
+      case "task_progress":
+        this.writeLine(
+          context,
+          `后台任务进行中：${message.description}（${message.usage.duration_ms}ms，${message.usage.tool_uses} 个工具）`,
+        );
+        return;
+      case "task_notification":
+        this.writeLine(
+          context,
+          `后台任务${message.status === "completed" ? "完成" : "结束"}：${message.summary || message.task_id}`,
+        );
+        return;
       case "permission_denied":
         this.writeLine(
           context,
@@ -259,7 +294,7 @@ export class ConsoleClaudeMessageObserver implements ClaudeMessageObserver {
 
   private writeLine(context: ClaudeMessageContext, content: string): void {
     this.closeAssistantText();
-    this.stdout(`${formatContext(context)} ${content}\n`);
+    this.stdout(`${formatContext(context, this.timestamp)} ${content}\n`);
   }
 
   private closeAssistantText(): void {
@@ -271,8 +306,12 @@ export class ConsoleClaudeMessageObserver implements ClaudeMessageObserver {
   }
 }
 
-function formatContext(context: ClaudeMessageContext): string {
-  return `[${context.taskId}/${context.attemptKind}]`;
+function formatContext(
+  context: ClaudeMessageContext,
+  timestamp: (() => string) | undefined,
+): string {
+  const time = timestamp?.();
+  return `${time === undefined ? "" : `${time} `}[${context.taskId}/${context.attemptKind}]`;
 }
 
 function summarizeToolInput(input: unknown): string {

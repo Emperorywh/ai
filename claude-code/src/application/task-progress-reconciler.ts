@@ -8,7 +8,7 @@ import type { InitialTaskRunState } from "../domain/run-state.js";
 import { createPredecessorCompletionFingerprint } from "../domain/task-completion.js";
 import type {
   TaskCompletionEvidence,
-  Workspace,
+  TaskCompletionLedger,
 } from "../ports/workspace.js";
 
 export type TaskReuseReason =
@@ -31,7 +31,7 @@ export interface TaskProgressPlan {
 }
 
 export class TaskProgressReconciler {
-  public constructor(private readonly workspace: Workspace) {}
+  public constructor(private readonly workspace: TaskCompletionLedger) {}
 
   /*
    * fresh 明确绕过历史读取；默认模式只复用契约、前驱指纹均匹配且位于当前 HEAD 祖先链的提交。

@@ -29,3 +29,14 @@ export class RunLockedError extends Error {
     this.name = "RunLockedError";
   }
 }
+
+/*
+ * CandidateChangedError 表达冻结候选与当前文件树不一致的稳定业务语义。
+ * 应用层可将其收敛为 blocked，其他 Git 或文件系统故障仍按基础设施错误传播。
+ */
+export class CandidateChangedError extends Error {
+  public constructor(message: string) {
+    super(message);
+    this.name = "CandidateChangedError";
+  }
+}

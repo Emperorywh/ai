@@ -3,11 +3,16 @@
  * 状态使用可读枚举而不是隐式布尔组合，使崩溃恢复路径可以由当前阶段直接推导。
  */
 import { StateTransitionError } from "./errors.js";
+import {
+  verificationEvidenceSchema,
+  type VerificationEvidence,
+} from "./agent-result.js";
 import { z } from "zod";
 
 export const taskStatuses = [
   "pending",
   "executing",
+  "candidate_pending",
   "reviewing",
   "committing",
   "retry_pending",
@@ -26,12 +31,41 @@ export interface TaskAttemptState {
   readonly kind: AttemptKind;
   readonly sessionId: string;
   readonly sessionInitialized: boolean;
+  readonly requestedModel: string;
+  readonly resolvedModel?: string | undefined;
   readonly startedAt: string;
   readonly finishedAt?: string | undefined;
-  readonly outcome?: "completed" | "blocked" | "failed" | undefined;
+  readonly outcome?: "completed" | "blocked" | "failed" | "interrupted" | undefined;
   readonly summary?: string | undefined;
   readonly costUsd?: number | undefined;
   readonly turns?: number | undefined;
+  readonly durationMs?: number | undefined;
+  readonly apiRetryCount?: number | undefined;
+  readonly apiRetryDelayMs?: number | undefined;
+  readonly toolCalls?: number | undefined;
+  readonly verifications?: readonly VerificationEvidence[] | undefined;
+}
+
+/*
+ * Reviewer 与 Worker 使用同一组资源事实，但拥有独立的生命周期和终态协议。
+ * 完整尝试历史替代单一计数器，保证成本、限流和模型漂移都能从状态快照审计。
+ */
+export interface ReviewAttemptState {
+  readonly number: number;
+  readonly sessionId: string;
+  readonly sessionInitialized: boolean;
+  readonly requestedModel: string;
+  readonly resolvedModel?: string | undefined;
+  readonly startedAt: string;
+  readonly finishedAt?: string | undefined;
+  readonly outcome?: "approved" | "rejected" | "blocked" | "failed" | "interrupted" | undefined;
+  readonly summary?: string | undefined;
+  readonly costUsd?: number | undefined;
+  readonly turns?: number | undefined;
+  readonly durationMs?: number | undefined;
+  readonly apiRetryCount?: number | undefined;
+  readonly apiRetryDelayMs?: number | undefined;
+  readonly toolCalls?: number | undefined;
 }
 
 export interface RetryContext {
@@ -63,10 +97,8 @@ export interface TaskRunState {
   readonly status: TaskStatus;
   readonly attempts: readonly TaskAttemptState[];
   readonly retry?: RetryContext | undefined;
-  readonly reviewAttempts: number;
+  readonly reviewAttempts: readonly ReviewAttemptState[];
   readonly candidateFingerprint?: string | undefined;
-  readonly reviewSessionId?: string | undefined;
-  readonly reviewSummary?: string | undefined;
   readonly commitSha?: string | undefined;
   readonly completion?: TaskCompletionState | undefined;
   readonly failureReason?: string | undefined;
@@ -81,7 +113,7 @@ export interface RunWorkspaceState {
 }
 
 export interface RunState {
-  readonly version: 5;
+  readonly version: 6;
   readonly runId: string;
   readonly status: RunStatus;
   readonly projectHash: string;
@@ -98,12 +130,43 @@ const taskAttemptStateSchema = z.object({
   kind: z.enum(["implementation", "repair", "resume"]),
   sessionId: z.uuid(),
   sessionInitialized: z.boolean(),
+  requestedModel: z.string().min(1),
+  resolvedModel: z.string().min(1).optional(),
   startedAt: z.string(),
   finishedAt: z.string().optional(),
-  outcome: z.enum(["completed", "blocked", "failed"]).optional(),
+  outcome: z.enum(["completed", "blocked", "failed", "interrupted"]).optional(),
   summary: z.string().optional(),
   costUsd: z.number().nonnegative().optional(),
   turns: z.number().int().nonnegative().optional(),
+  durationMs: z.number().int().nonnegative().optional(),
+  apiRetryCount: z.number().int().nonnegative().optional(),
+  apiRetryDelayMs: z.number().int().nonnegative().optional(),
+  toolCalls: z.number().int().nonnegative().optional(),
+  verifications: z.array(verificationEvidenceSchema).optional(),
+}).strict();
+
+const reviewAttemptStateSchema = z.object({
+  number: z.number().int().positive(),
+  sessionId: z.uuid(),
+  sessionInitialized: z.boolean(),
+  requestedModel: z.string().min(1),
+  resolvedModel: z.string().min(1).optional(),
+  startedAt: z.string(),
+  finishedAt: z.string().optional(),
+  outcome: z.enum([
+    "approved",
+    "rejected",
+    "blocked",
+    "failed",
+    "interrupted",
+  ]).optional(),
+  summary: z.string().optional(),
+  costUsd: z.number().nonnegative().optional(),
+  turns: z.number().int().nonnegative().optional(),
+  durationMs: z.number().int().nonnegative().optional(),
+  apiRetryCount: z.number().int().nonnegative().optional(),
+  apiRetryDelayMs: z.number().int().nonnegative().optional(),
+  toolCalls: z.number().int().nonnegative().optional(),
 }).strict();
 
 const retryContextSchema = z.object({
@@ -131,10 +194,8 @@ const taskRunStateSchema = z.object({
   status: z.enum(taskStatuses),
   attempts: z.array(taskAttemptStateSchema),
   retry: retryContextSchema.optional(),
-  reviewAttempts: z.number().int().nonnegative(),
+  reviewAttempts: z.array(reviewAttemptStateSchema),
   candidateFingerprint: z.string().optional(),
-  reviewSessionId: z.uuid().optional(),
-  reviewSummary: z.string().optional(),
   commitSha: z.string().optional(),
   completion: taskCompletionStateSchema.optional(),
   failureReason: z.string().optional(),
@@ -144,10 +205,10 @@ const taskRunStateSchema = z.object({
 
 export const runStateSchema: z.ZodType<RunState> = z.object({
   /*
-   * 第五版状态删除 DAG 依赖终态，并把完成关系收敛为唯一前驱指纹。
+   * 第六版状态增加冻结候选、Reviewer 完整尝试历史和结构化验证证据。
    * 旧状态不补字段也不迁移，恢复路径始终面对当前线性状态图。
    */
-  version: z.literal(5),
+  version: z.literal(6),
   runId: z.string(),
   status: z.enum(["running", "completed", "blocked", "failed"]),
   projectHash: z.string(),
@@ -165,7 +226,8 @@ export const runStateSchema: z.ZodType<RunState> = z.object({
 
 const allowedTransitions: Readonly<Record<TaskStatus, readonly TaskStatus[]>> = {
   pending: ["executing", "blocked", "failed"],
-  executing: ["reviewing", "committing", "retry_pending", "blocked", "failed"],
+  executing: ["candidate_pending", "retry_pending", "blocked", "failed"],
+  candidate_pending: ["reviewing", "blocked", "failed"],
   reviewing: ["reviewing", "committing", "retry_pending", "blocked", "failed"],
   committing: ["completed", "blocked", "failed"],
   retry_pending: ["executing", "blocked", "failed"],
@@ -191,7 +253,7 @@ export function createInitialRunState(input: {
     const shared = {
       taskId: task.taskId,
       attempts: [],
-      reviewAttempts: 0,
+      reviewAttempts: [],
       updatedAt: input.now,
     };
     tasks[task.taskId] = task.reusedCompletion === undefined
@@ -210,7 +272,7 @@ export function createInitialRunState(input: {
   }
 
   return {
-    version: 5,
+    version: 6,
     runId: input.runId,
     status: "running",
     projectHash: input.projectHash,
@@ -305,6 +367,38 @@ export function replaceCurrentAttempt(
       [taskId]: {
         ...current,
         attempts,
+        updatedAt: now,
+      },
+    },
+  };
+}
+
+/*
+ * Reviewer 尝试与 Worker 尝试分别维护，二者都通过“只替换最后一次”避免会话回调覆盖历史事实。
+ * 调用方必须先追加尝试并 checkpoint，随后才能接受 SDK init 或终态更新。
+ */
+export function replaceCurrentReviewAttempt(
+  state: RunState,
+  taskId: string,
+  attempt: ReviewAttemptState,
+  now: string,
+): RunState {
+  const current = state.tasks[taskId];
+  if (current === undefined || current.reviewAttempts.length === 0) {
+    throw new StateTransitionError(`任务 ${taskId} 没有可更新的审核尝试`);
+  }
+  const reviewAttempts = [
+    ...current.reviewAttempts.slice(0, -1),
+    attempt,
+  ];
+  return {
+    ...state,
+    updatedAt: now,
+    tasks: {
+      ...state.tasks,
+      [taskId]: {
+        ...current,
+        reviewAttempts,
         updatedAt: now,
       },
     },

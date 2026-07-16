@@ -14,6 +14,7 @@ import {
   ClaudeAgentSdkExecutor,
   type AgentQueryFactory,
 } from "../src/infrastructure/claude/claude-agent-sdk-executor.js";
+import { WorkerExecutionGuard } from "../src/application/worker-execution-guard.js";
 import type { ClaudeMessageObserver } from "../src/infrastructure/claude/claude-message-observer.js";
 import type { AgentRunRequest } from "../src/ports/agent-executor.js";
 
@@ -54,8 +55,8 @@ describe("ClaudeAgentSdkExecutor", () => {
     const executor = new ClaudeAgentSdkExecutor({ queryFactory });
 
     const outcome = await executor.run(createRequest({
-      onSessionInitialized: async (sessionId) => {
-        initializedSessions.push(sessionId);
+      onSessionInitialized: async (session) => {
+        initializedSessions.push(session.sessionId);
       },
     }));
 
@@ -65,6 +66,34 @@ describe("ClaudeAgentSdkExecutor", () => {
       sessionId: SESSION_ID,
       data: { status: "completed" },
     });
+  });
+
+  it("实际模型与固定策略不一致时在工具执行前终止", async () => {
+    let closed = false;
+    const queryFactory: AgentQueryFactory = () => createFakeQuery(
+      messageStream([
+        createInitMessage(SESSION_ID, "unexpected-model"),
+        createSuccessResult(SESSION_ID),
+      ]),
+      () => {
+        closed = true;
+      },
+    );
+    const executor = new ClaudeAgentSdkExecutor({ queryFactory });
+
+    const outcome = await executor.run(createRequest());
+
+    expect(outcome).toMatchObject({
+      ok: false,
+      kind: "model_mismatch",
+      retryable: false,
+      telemetry: {
+        requestedModel: "sonnet",
+        resolvedModel: "unexpected-model",
+        toolCalls: 0,
+      },
+    });
+    expect(closed).toBe(true);
   });
 
   it("本地中止后即使 SDK 返回错误 result 仍映射为 aborted", async () => {
@@ -137,6 +166,25 @@ describe("ClaudeAgentSdkExecutor", () => {
       createInitMessage(SESSION_ID),
     ]));
     const executor = new ClaudeAgentSdkExecutor({ queryFactory });
+
+    const outcome = await executor.run(createRequest());
+
+    expect(outcome).toMatchObject({
+      ok: false,
+      kind: "protocol",
+      sessionId: SESSION_ID,
+      retryable: true,
+    });
+  });
+
+  it("拒绝与 init 不同 session 的终态结果", async () => {
+    const otherSession = "22222222-2222-4222-8222-222222222222";
+    const executor = new ClaudeAgentSdkExecutor({
+      queryFactory: () => createFakeQuery(messageStream([
+        createInitMessage(SESSION_ID),
+        createSuccessResult(otherSession),
+      ])),
+    });
 
     const outcome = await executor.run(createRequest());
 
@@ -245,6 +293,70 @@ describe("ClaudeAgentSdkExecutor", () => {
     expect(capturedOptions?.hooks).toBeUndefined();
   });
 
+  it("通过 PreToolUse Hook 拒绝系统策略禁止的命令", async () => {
+    let capturedOptions: Options | undefined;
+    const executor = new ClaudeAgentSdkExecutor({
+      executionGuard: new WorkerExecutionGuard(),
+      queryFactory: ({ options }) => {
+        capturedOptions = options;
+        return createFakeQuery(messageStream([
+          createInitMessage(SESSION_ID),
+          createSuccessResult(SESSION_ID),
+        ]));
+      },
+    });
+
+    const outcome = await executor.run(createRequest());
+    const hook = capturedOptions?.hooks?.PreToolUse?.[0]?.hooks[0];
+    if (hook === undefined) {
+      throw new Error("测试期望 Worker 安装 PreToolUse Hook");
+    }
+    const hookOutcome = await hook({
+      hook_event_name: "PreToolUse",
+      session_id: SESSION_ID,
+      transcript_path: "/tmp/transcript",
+      cwd: process.cwd(),
+      tool_name: "Bash",
+      tool_input: { command: "git commit -m forbidden" },
+      tool_use_id: "tool-guard",
+    }, "tool-guard", { signal: new AbortController().signal });
+
+    expect(outcome.ok).toBe(true);
+    expect(hookOutcome).toMatchObject({
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+      },
+    });
+  });
+
+  it("聚合 API 重试等待与去重后的工具调用遥测", async () => {
+    const repeatedAssistant = createAssistantToolMessage("tool-1");
+    const executor = new ClaudeAgentSdkExecutor({
+      queryFactory: () => createFakeQuery(messageStream([
+        createInitMessage(SESSION_ID),
+        createApiRetryMessage(250),
+        repeatedAssistant,
+        repeatedAssistant,
+        createAssistantToolMessage("tool-2"),
+        createSuccessResult(SESSION_ID),
+      ])),
+    });
+
+    const outcome = await executor.run(createRequest());
+
+    expect(outcome).toMatchObject({
+      ok: true,
+      telemetry: {
+        requestedModel: "sonnet",
+        resolvedModel: "sonnet",
+        apiRetryCount: 1,
+        apiRetryDelayMs: 250,
+        toolCalls: 2,
+      },
+    });
+  });
+
   /*
    * 未显式声明资源上限时，执行器不能向 SDK 注入轮数、预算或本地计时器。
    * Fake 消息流立即完成，因此测试只观察选项，不依赖真实时间或真实 Claude 进程。
@@ -304,6 +416,7 @@ function createRequest(
     prompt: "执行测试任务",
     cwd: process.cwd(),
     model: "sonnet",
+    expectedResolvedModel: "sonnet",
     effort: "high",
     maxTurns: 10,
     timeoutMs: 10_000,
@@ -375,11 +488,37 @@ function waitForAbort(signal: AbortSignal): Promise<void> {
   });
 }
 
-function createInitMessage(sessionId: string): SDKMessage {
+function createInitMessage(
+  sessionId: string,
+  model = "sonnet",
+): SDKMessage {
   return {
     type: "system",
     subtype: "init",
     session_id: sessionId,
+    model,
+  } as SDKMessage;
+}
+
+function createApiRetryMessage(retryDelayMs: number): SDKMessage {
+  return {
+    type: "system",
+    subtype: "api_retry",
+    retry_delay_ms: retryDelayMs,
+  } as SDKMessage;
+}
+
+function createAssistantToolMessage(toolUseId: string): SDKMessage {
+  return {
+    type: "assistant",
+    message: {
+      content: [{
+        type: "tool_use",
+        id: toolUseId,
+        name: "Read",
+        input: { file_path: "src/index.ts" },
+      }],
+    },
   } as SDKMessage;
 }
 

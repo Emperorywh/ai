@@ -9,18 +9,22 @@
   + TASK 目录（唯一任务事实源）
   → 严格元数据校验与数字线性序列
   → 核验当前 HEAD 中的任务完成证据
+  → 编译确定性轻量项目清单
   → 写入 Worker
-  → 冻结完整项目候选
-  → 只读 Reviewer
+  → 持久化结构化验证证据
+  → 冻结候选身份并按需生成紧凑 diff
+  → 全新只读 Reviewer
   → 原子 Git 提交
   → 前一 TASK 完成后开启下一 TASK
 ```
 
 - 任务目录中的每个 `.md` 文件都会进入目录校验，不存在“文件已创建但未登记”的静默遗漏。
 - TASK 的 YAML 前置元数据只包含 ID 和标题，完整需求与任务特有验收事实统一写入任务描述。
-- Worker 可以修改项目内任意文件，系统不注入路径 Hook，也不执行预声明的外部命令门禁。
-- 实现失败和审核意见默认持续进入新一轮 repair，不设置尝试次数、会话时长、轮数或预算上限；只有明确的人工作业阻塞或外部中断才停止当前循环。
+- Worker 可以修改项目内任意文件；系统不注入路径白名单，但通过 `PreToolUse` 守卫拒绝 Git 历史改写、发布部署、浏览器和常驻服务。
+- 实现失败和审核意见在固定资源预算内进入 repair；会话级轮数、费用、时长以及 TASK 级累计会话、轮数和费用都有明确上限，耗尽后转为人工阻塞。
 - 写入 Worker 可自主使用完整 Claude Code 工具、终端、技能、项目 MCP 和子 Agent，并自行完成非浏览器验证。
+- Worker 按“定向检查 → 稳定后一次全量检查”执行验证，并把实际命令、范围和结果保存为结构化证据；Reviewer 会独立评估证据覆盖度。
+- SDK `system/init` 返回的实际模型必须与固定模型完全一致，否则在工具执行前以不可重试错误终止，避免别名或环境配置造成模型漂移。
 - Agent 需要人工决策等真正阻塞会终止当前 TASK 和本次 Run，后续 TASK 保持 `pending`。
 - 阻塞或失败 TASK 的候选会保存到持久 Git 引用并清理主工作区，不会越过当前任务继续执行。
 - 每次状态转换、SDK 会话初始化、审核结果和候选归档都会落盘，进程中断后可精确恢复。
@@ -86,7 +90,7 @@ apex-coding-agent init .
       <task-id>.md
 ```
 
-系统固定使用 `sonnet/high` Worker、`sonnet/high` 只读 Reviewer 和 `task` Git 提交前缀。实现失败与审核意见持续进入 repair，直到通过、真正阻塞或收到外部中断；TASK 不能覆盖执行策略。
+系统固定使用 `claude-sonnet-5/high` Worker、`claude-sonnet-5/high` 只读 Reviewer 和 `task` Git 提交前缀。Worker 单会话最多 80 轮、$6、45 分钟，Reviewer 单会话最多 30 轮、$2、15 分钟；每个 TASK 最多 8 个 Worker 会话、3 个 Reviewer 会话、累计 200 轮和 $15。实现失败与审核意见只在该预算内进入 repair；TASK 不能覆盖执行策略。
 
 ## TASK 文档
 
@@ -157,6 +161,8 @@ apex-coding-agent status <run-id>
 
 Worker 返回 `completed` 后，编排器捕获完整项目候选并保存稳定指纹。Reviewer 和提交阶段都必须看到同一候选；中途变化会显式阻塞，不能把未经当前审核的内容混入提交。
 
+候选身份快照只保存路径、类型、模式和内容哈希；大体积 diff 只在 Reviewer 启动前按需生成一次，并使用紧凑上下文。普通 checkpoint、恢复判断和提交前校验不会反复拼接完整 diff。
+
 每个成功 TASK 产生独立提交，并包含：
 
 - `Apex-Coding-Agent-Run`
@@ -170,7 +176,9 @@ Worker 返回 `completed` 后，编排器捕获完整项目候选并保存稳定
 
 若现有代码已经满足 TASK，Worker 可以不产生 diff；编排器仍会执行独立审核，并以空提交保存新的完成证据。`--fresh` 不删除历史，只明确禁止本次 Run 复用它们。
 
-阻塞/失败候选保存在 `refs/apex-coding-agent/quarantine/*`，归档后本次 Run 立即终止，所有后继保持 `pending`。Worker 虽拥有自主开发工具，但系统工作流仍明确禁止 push、merge、rebase、部署或浏览器测试；Reviewer 始终只读。
+阻塞/失败候选保存在 `refs/apex-coding-agent/quarantine/*`，归档后本次 Run 立即终止，所有后继保持 `pending`。Git 基础设施按项目边界、候选存储、完成账本和隔离区拆分；Worker 的系统 Hook 明确禁止 push、commit、reset、checkout、merge、rebase、部署、浏览器测试及常驻服务，Reviewer 始终只读。
+
+RunState v6 保存 Worker/Reviewer 每次尝试的请求模型、实际模型、耗时、轮数、费用、API 重试次数与等待时间、工具调用数和验证证据。`summary.md` 与终态事件只从这些持久化事实聚合，不解析可能被拼接或截断的控制台日志。
 
 ## 开发验证
 

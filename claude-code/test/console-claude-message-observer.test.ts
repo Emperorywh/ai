@@ -16,14 +16,14 @@ describe("ConsoleClaudeMessageObserver", () => {
   it("连续展示 Claude 文本、工具执行、状态与错误输出", () => {
     let stdout = "";
     let stderr = "";
-    const observer = new ConsoleClaudeMessageObserver(
-      (content) => {
+    const observer = new ConsoleClaudeMessageObserver({
+      stdout: (content) => {
         stdout += content;
       },
-      (content) => {
+      stderr: (content) => {
         stderr += content;
       },
-    );
+    });
 
     observer.onMessage(context, createTextDelta("正在分析项目"));
     observer.onMessage(context, createAssistantToolUse());
@@ -48,6 +48,28 @@ describe("ConsoleClaudeMessageObserver", () => {
     expect(stdout).toContain("Claude 会话成功（3 轮，$0.2500）");
     expect(stderr).toContain("Claude stderr：diagnostic line");
     expect(stderr).toContain("Claude stderr：second line");
+  });
+
+  it("为实时消息添加时间并折叠相同状态，同时展示后台任务生命周期", () => {
+    let stdout = "";
+    const observer = new ConsoleClaudeMessageObserver({
+      stdout: (content) => {
+        stdout += content;
+      },
+      timestamp: () => "2026-07-16T13:00:00.000+08:00",
+    });
+
+    observer.onMessage(context, createStatus("compacting"));
+    observer.onMessage(context, createStatus("compacting"));
+    observer.onMessage(context, createTaskStarted());
+    observer.onMessage(context, createTaskProgress());
+    observer.onMessage(context, createTaskNotification());
+
+    expect(stdout.match(/Claude 状态：compacting/gu)).toHaveLength(1);
+    expect(stdout).toContain("2026-07-16T13:00:00.000+08:00 [TASK-001/implementation]");
+    expect(stdout).toContain("后台任务已启动：检查依赖（task-1）");
+    expect(stdout).toContain("后台任务进行中：检查依赖（250ms，2 个工具）");
+    expect(stdout).toContain("后台任务完成：检查完成");
   });
 });
 
@@ -113,5 +135,42 @@ function createSuccessResult(): SDKMessage {
     subtype: "success",
     num_turns: 3,
     total_cost_usd: 0.25,
+  } as SDKMessage;
+}
+
+function createStatus(status: string): SDKMessage {
+  return {
+    type: "system",
+    subtype: "status",
+    status,
+  } as SDKMessage;
+}
+
+function createTaskStarted(): SDKMessage {
+  return {
+    type: "system",
+    subtype: "task_started",
+    task_id: "task-1",
+    description: "检查依赖",
+  } as SDKMessage;
+}
+
+function createTaskProgress(): SDKMessage {
+  return {
+    type: "system",
+    subtype: "task_progress",
+    task_id: "task-1",
+    description: "检查依赖",
+    usage: { duration_ms: 250, tool_uses: 2 },
+  } as SDKMessage;
+}
+
+function createTaskNotification(): SDKMessage {
+  return {
+    type: "system",
+    subtype: "task_notification",
+    task_id: "task-1",
+    status: "completed",
+    summary: "检查完成",
   } as SDKMessage;
 }

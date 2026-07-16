@@ -26,10 +26,10 @@ export interface PredecessorCompletion {
 export function createTaskContractHash(input: TaskContractHashInput): string {
   const contract = {
     /*
-     * 第五版完成契约只接受 id、title 与正文，并切换到严格线性任务模型。
-     * 显式换代确保旧 DAG 提交证据不会在新执行模型下被错误复用。
+     * 第六版完成契约绑定线性任务、强制独立审核和结构化验证证据流程。
+     * 显式换代确保旧执行模型产生的提交证据不会被当前系统复用。
      */
-    version: 5,
+    version: 6,
     task: {
       id: input.task.id,
       title: input.task.title,

@@ -76,7 +76,7 @@ describe("北京时间人类可读输出", () => {
 
 function createRunState(): RunState {
   return {
-    version: 5,
+    version: 6,
     runId: "run-1",
     status: "failed",
     projectHash: "hash",
@@ -97,11 +97,13 @@ function createRunState(): RunState {
           kind: "repair",
           sessionId: "11111111-1111-4111-8111-111111111111",
           sessionInitialized: true,
+          requestedModel: "claude-sonnet-5",
+          resolvedModel: "claude-sonnet-5",
           startedAt: "2026-07-14T19:28:41.710Z",
           finishedAt: "2026-07-14T19:28:42.710Z",
           outcome: "failed",
         }],
-        reviewAttempts: 0,
+        reviewAttempts: [],
         candidateArchive: {
           reference: "refs/quarantine/1",
           changedFiles: ["src/file.ts"],

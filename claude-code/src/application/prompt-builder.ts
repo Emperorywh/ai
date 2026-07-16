@@ -7,11 +7,13 @@ import type {
   TaskDefinition,
   TextDocument,
 } from "../domain/project.js";
+import type { VerificationEvidence } from "../domain/agent-result.js";
+import type { ProjectContextManifest } from "../domain/project-context.js";
 const writeSafetyRules = `
 你只负责当前一个 TASK。严格遵守以下边界：
 - 可以自主调用子 Agent、终端、技能和 MCP 完成当前 TASK；不要询问用户，优先依据现有规格和代码自行作出可逆决策。
 - 只有缺少无法从项目推导的外部信息、凭据或不可逆产品决策时，才返回 blocked 和 blockingQuestions。
-- 不执行 Git commit、push、reset、checkout、clean、rebase 或 merge。
+- Git 只用于 status、diff、log、show 等读取；不执行任何会改变工作区、索引、引用、历史或远端的 Git 操作。
 - 不部署，不启动浏览器、UI 自动化、开发服务器或 watch 进程。
 - 优先长期架构正确性，禁止临时 patch、重复逻辑、隐式状态和跨层耦合。
 `;
@@ -26,14 +28,17 @@ export class PromptBuilder {
   public buildImplementation(
     loaded: LoadedProject,
     task: TaskDefinition,
+    projectContext: ProjectContextManifest,
   ): string {
     return [
       "# 执行目标",
       `实现 TASK ${task.id}：${task.title}`,
       writeSafetyRules,
       this.renderSpecification(loaded.specificationDocument),
+      this.renderProjectContext(projectContext),
       this.renderTaskContext(loaded, task),
-      "完成修改后返回结构化结果。若存在无法从现有文档推导的关键决策，返回 blocked。",
+      this.renderVerificationProtocol(),
+      "完成修改后只返回结构化结果；verifications 只填写实际执行过的命令及真实结果。若存在无法从现有文档推导的关键决策，返回 blocked。",
     ].join("\n\n");
   }
 
@@ -41,22 +46,27 @@ export class PromptBuilder {
     loaded: LoadedProject,
     task: TaskDefinition,
     feedback: string,
+    projectContext: ProjectContextManifest,
   ): string {
     return [
       "# 修复目标",
       `修复 TASK ${task.id} 当前工作区中的未完成实现：${task.title}`,
       writeSafetyRules,
       this.renderSpecification(loaded.specificationDocument),
+      this.renderProjectContext(projectContext),
       this.renderTaskContext(loaded, task),
       "# 上一轮客观反馈",
       feedback,
-      "先检查当前 diff 和代码状态，只修复根因，随后返回结构化结果。",
+      this.renderVerificationProtocol(),
+      "先检查当前 diff 和代码状态，只修复根因，随后只返回结构化结果。",
     ].join("\n\n");
   }
 
   public buildResume(
     loaded: LoadedProject,
     task: TaskDefinition,
+    feedback: string,
+    projectContext: ProjectContextManifest,
   ): string {
     return [
       "# 恢复目标",
@@ -64,7 +74,11 @@ export class PromptBuilder {
       writeSafetyRules,
       "原始需求和先前推理已经存在于当前会话，不要重新从头实现。先检查当前 Git diff、未完成的工具操作与代码状态，只继续尚未完成的部分；若工作已经完成，直接返回结构化终态。",
       "若当前落盘状态与会话记忆冲突，以实际文件和 TASK 边界为准。",
+      "# 恢复原因与客观反馈",
+      feedback,
+      this.renderProjectContext(projectContext),
       this.renderTaskContext(loaded, task),
+      this.renderVerificationProtocol(),
     ].join("\n\n");
   }
 
@@ -73,18 +87,23 @@ export class PromptBuilder {
     task: TaskDefinition,
     changedFiles: readonly string[],
     diff: string,
+    verifications: readonly VerificationEvidence[],
+    projectContext: ProjectContextManifest,
   ): string {
     return [
       "# 审核目标",
       `审核 TASK ${task.id}：${task.title}`,
       reviewSafetyRules,
       this.renderSpecification(loaded.specificationDocument),
+      this.renderProjectContext(projectContext),
       this.renderTaskContext(loaded, task),
       "# 实际变更文件",
       changedFiles.map((file) => `- ${file}`).join("\n"),
       "# Git diff",
       diff || "<diff 为空；请直接读取新增文件>",
-      "请读取所有实际变更文件及相关代码。只有没有 critical/high/medium 正确性问题时才返回 approved。",
+      "# 实现者验证证据",
+      this.renderVerificationEvidence(verifications),
+      "先依据紧凑 diff 定位风险，再按需读取变更文件及直接依赖；不要机械重复读取已经足够明确的内容。只有没有 critical/high/medium 正确性问题时才返回 approved。",
     ].join("\n\n");
   }
 
@@ -114,6 +133,61 @@ export class PromptBuilder {
       `来源：${taskDocument.path}`,
       taskDocument.content,
     ].join("\n\n");
+  }
+
+  /*
+   * 项目清单只提供导航入口和可用脚本，源码事实仍由 Agent 按需读取。
+   * 指纹便于日志与会话关联同一份上下文，截断标记则阻止 Agent 把有限清单误当成完整仓库。
+   */
+  private renderProjectContext(context: ProjectContextManifest): string {
+    const scripts = context.scripts.length === 0
+      ? "- <未发现 package.json scripts>"
+      : context.scripts
+        .map((script) => `- ${script.name}: ${script.command}`)
+        .join("\n");
+    const entries = context.entries.length === 0
+      ? "- <项目根目录为空>"
+      : context.entries.map((entry) => `- ${entry}`).join("\n");
+    const diagnostics = context.diagnostics.length === 0
+      ? "- <无>"
+      : context.diagnostics.map((diagnostic) => `- ${diagnostic}`).join("\n");
+    return [
+      "# 确定性项目清单",
+      `上下文指纹：${context.fingerprint}`,
+      `包管理器：${context.packageManager ?? "未识别"}`,
+      `## 可用脚本${context.scriptsTruncated ? "（已截断）" : ""}`,
+      scripts,
+      `## 文件树（共展示 ${context.entries.length} 项${context.truncated ? "，已截断" : ""}）`,
+      entries,
+      "## 上下文诊断",
+      diagnostics,
+      "该清单仅用于导航；实现与审核必须按需读取相关源码和直接依赖。",
+    ].join("\n");
+  }
+
+  /*
+   * 验证协议将“何时执行什么范围的检查”固定为可复用策略，避免 Agent 在代码未变化时反复跑全量套件。
+   * UI 与浏览器验收仍由人工负责，Worker 只执行与当前 TASK 相关的非交互命令。
+   */
+  private renderVerificationProtocol(): string {
+    return [
+      "# 验证协议",
+      "- 仅在确有必要时执行一次基线检查；修改过程中优先运行受影响模块的定向检查。",
+      "- 实现稳定后执行一次适用的全量非交互检查；代码未变化时不得机械重复同一全量命令。",
+      "- 不启动浏览器、UI 自动化、开发服务器或 watch 进程；这些验收明确留给人工。",
+      "- 结构化 verifications 只记录实际执行的命令、范围、通过/失败状态和简短事实摘要。",
+    ].join("\n");
+  }
+
+  private renderVerificationEvidence(
+    verifications: readonly VerificationEvidence[],
+  ): string {
+    if (verifications.length === 0) {
+      return "<实现者未报告可审计的命令验证；请将其作为测试覆盖风险纳入审核>";
+    }
+    return verifications.map((verification) =>
+      `- [${verification.status}] [${verification.scope}] ${verification.command}：${verification.summary}`
+    ).join("\n");
   }
 
 }

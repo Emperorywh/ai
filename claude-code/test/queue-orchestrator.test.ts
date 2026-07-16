@@ -3,14 +3,25 @@
  * 重点证明任务严格线性、任意时刻单并发，并且崩溃后的 executing 状态只恢复原会话。
  */
 import { describe, expect, it } from "vitest";
+import { CommitStage } from "../src/application/commit-stage.js";
+import { ImplementationStage } from "../src/application/implementation-stage.js";
 import { PromptBuilder } from "../src/application/prompt-builder.js";
 import { QueueOrchestrator } from "../src/application/queue-orchestrator.js";
+import { RunArtifactWriter } from "../src/application/run-artifact-writer.js";
+import { RunCheckpointWriter } from "../src/application/run-checkpoint-writer.js";
+import { RunFinalizer } from "../src/application/run-finalizer.js";
+import { RunResumeValidator } from "../src/application/run-resume-validator.js";
+import { ReviewStage } from "../src/application/review-stage.js";
 import { TaskExecutionService } from "../src/application/task-execution-service.js";
 import { TaskProgressReconciler } from "../src/application/task-progress-reconciler.js";
+import { TaskResourceBudget } from "../src/application/task-resource-budget.js";
+import { TaskStageSupport } from "../src/application/task-stage-support.js";
+import { TerminalCandidateService } from "../src/application/terminal-candidate-service.js";
 import { createInitialRunState, transitionTask } from "../src/domain/run-state.js";
 import { BeijingTimeFormatter } from "../src/infrastructure/time/beijing-time-formatter.js";
 import {
   FakeClock,
+  FixedProjectContextProvider,
   MemoryStateStore,
   RecordingAgent,
   RecordingLogger,
@@ -53,6 +64,10 @@ describe("QueueOrchestrator", () => {
      */
     expect(fixture.agent.requests[0]?.prompt).not.toContain("# 路径边界");
     expect(fixture.agent.requests[0]?.prompt).not.toContain("# 外部验收门禁");
+    expect(fixture.agent.requests[0]?.prompt).toContain("# 确定性项目清单");
+    expect(fixture.agent.requests[0]?.prompt).toContain("# 验证协议");
+    expect(fixture.agent.requests[1]?.prompt).toContain("# 实现者验证证据");
+    expect(fixture.agent.requests[1]?.prompt).toContain("pnpm test");
     expect(result.artifacts).toHaveLength(2);
     expect(fixture.stateStore.snapshots.length).toBeGreaterThan(10);
     expect(result.state.runId).toMatch(
@@ -63,6 +78,17 @@ describe("QueueOrchestrator", () => {
       .find(([path]) => path.endsWith("/summary.md"))?.[1];
     expect(summary).toContain("创建时间：2026-07-13T08:00:01.000+08:00");
     expect(summary).not.toContain("创建时间：2026-07-13T00:00:01.000Z");
+    expect(summary).toContain("Agent 累计耗时：12ms");
+    expect(summary).toContain(
+      "模型握手：claude-sonnet-5 → claude-sonnet-5",
+    );
+    expect(result.state.tasks["TASK-001"]?.attempts[0]?.verifications)
+      .toEqual([{
+        scope: "full",
+        command: "pnpm test",
+        status: "passed",
+        summary: "测试通过",
+      }]);
     /*
      * 启动事件展示的是项目仓储经线性序列校验后的真实队列，而不是未校验的目录枚举结果。
      * 用户因此能在 Agent 启动前确认本次运行是否真的包含全部后续任务。
@@ -74,6 +100,17 @@ describe("QueueOrchestrator", () => {
     expect(fixture.logger.events[0]?.message).toContain(
       "TASK-001 → TASK-002 → TASK-003",
     );
+    expect(fixture.logger.events.at(-1)).toMatchObject({
+      type: "run_completed",
+      details: {
+        metrics: {
+          workerSessions: 3,
+          reviewerSessions: 3,
+          turns: 9,
+          toolCalls: 6,
+        },
+      },
+    });
   });
 
   it("新 run 核验并复用全部有效任务完成证据", async () => {
@@ -229,6 +266,8 @@ describe("QueueOrchestrator", () => {
           kind: "implementation",
           sessionId: "11111111-1111-4111-8111-111111111111",
           sessionInitialized: true,
+          requestedModel: "claude-sonnet-5",
+          resolvedModel: "claude-sonnet-5",
           startedAt: "2026-07-13T00:00:01.000Z",
         }],
       },
@@ -286,6 +325,7 @@ describe("QueueOrchestrator", () => {
             summary: `第 ${implementationRuns} 轮仍需修复`,
             blockingQuestions: [],
             notes: [],
+            verifications: [],
           },
           costUsd: 0.01,
           turns: 1,
@@ -310,7 +350,111 @@ describe("QueueOrchestrator", () => {
       "review",
     ]);
     expect(agent.requests.every((request) =>
-      request.maxTurns === undefined && request.timeoutMs === undefined)).toBe(true);
+      request.maxTurns !== undefined
+      && request.maxBudgetUsd !== undefined
+      && request.timeoutMs !== undefined)).toBe(true);
+  });
+
+  it("Worker 报告 completed 但存在失败验证时仍进入 repair", async () => {
+    let workerRuns = 0;
+    const agent = new RecordingAgent((request) => {
+      if (request.attemptKind === "review") {
+        return completedBehavior(request);
+      }
+      workerRuns += 1;
+      if (workerRuns > 1) {
+        return completedBehavior(request);
+      }
+      return {
+        ok: true,
+        sessionId: request.sessionId ?? "missing-session",
+        data: {
+          status: "completed",
+          summary: "实现完成但测试失败",
+          blockingQuestions: [],
+          notes: [],
+          verifications: [{
+            scope: "full",
+            command: "pnpm test",
+            status: "failed",
+            summary: "1 项失败",
+          }],
+        },
+        costUsd: 0.01,
+        turns: 1,
+      };
+    });
+    const fixture = createFixture(new RecordingWorkspace(), agent);
+
+    const result = await fixture.orchestrator.start(
+      createLoadedProject([{ id: "TASK-001" }]),
+    );
+
+    expect(result.state.status).toBe("completed");
+    expect(result.state.tasks["TASK-001"]?.attempts.map((attempt) => attempt.kind))
+      .toEqual(["implementation", "repair"]);
+  });
+
+  it("达到 TASK Worker 会话预算后停止 repair 并转为可解释阻塞", async () => {
+    const agent = new RecordingAgent((request) => ({
+      ok: true,
+      sessionId: request.sessionId ?? "missing-session",
+      data: {
+        status: "failed",
+        summary: "仍未完成",
+        blockingQuestions: [],
+        notes: [],
+        verifications: [],
+      },
+      costUsd: 0.01,
+      turns: 1,
+    }));
+    const fixture = createFixture(new RecordingWorkspace(), agent);
+
+    const result = await fixture.orchestrator.start(
+      createLoadedProject([{ id: "TASK-001" }]),
+    );
+
+    expect(result.state.status).toBe("blocked");
+    expect(result.state.tasks["TASK-001"]?.attempts).toHaveLength(8);
+    expect(result.state.tasks["TASK-001"]?.failureReason).toContain(
+      "Worker 会话数已达到系统上限 8",
+    );
+    expect(agent.requests).toHaveLength(8);
+    expect(fixture.workspace.quarantines).toBe(1);
+  });
+
+  it("达到 Reviewer 会话预算后不再创建第四个审核会话", async () => {
+    const agent = new RecordingAgent((request) => {
+      if (request.attemptKind !== "review") {
+        return completedBehavior(request);
+      }
+      return {
+        ok: true,
+        sessionId: request.sessionId ?? "missing-review-session",
+        data: {
+          status: "rejected",
+          summary: "仍有中等级别问题",
+          findings: [{ severity: "medium", message: "需要继续修复" }],
+          blockingQuestions: [],
+        },
+        costUsd: 0.01,
+        turns: 1,
+      };
+    });
+    const fixture = createFixture(new RecordingWorkspace(), agent);
+
+    const result = await fixture.orchestrator.start(
+      createLoadedProject([{ id: "TASK-001" }]),
+    );
+
+    expect(result.state.status).toBe("blocked");
+    expect(result.state.tasks["TASK-001"]?.reviewAttempts).toHaveLength(3);
+    expect(result.state.tasks["TASK-001"]?.failureReason).toContain(
+      "Reviewer 会话数已达到系统上限 3",
+    );
+    expect(agent.requests.filter((request) => request.attemptKind === "review"))
+      .toHaveLength(3);
   });
 
   it("恢复尚未初始化的 executing checkpoint 时创建全新会话", async () => {
@@ -339,6 +483,7 @@ describe("QueueOrchestrator", () => {
           kind: "implementation",
           sessionId: "22222222-2222-4222-8222-222222222222",
           sessionInitialized: false,
+          requestedModel: "claude-sonnet-5",
           startedAt: "2026-07-13T00:00:01.000Z",
         }],
       },
@@ -354,6 +499,29 @@ describe("QueueOrchestrator", () => {
     );
   });
 
+  it("在 Worker 终态与候选捕获之间崩溃时不重复运行实现会话", async () => {
+    const workspace = new FailOnceCandidateWorkspace();
+    const fixture = createFixture(workspace);
+    const loaded = createLoadedProject([{ id: "TASK-001" }]);
+
+    await expect(fixture.orchestrator.start(loaded)).rejects.toThrow(
+      "candidate capture interrupted",
+    );
+    const interrupted = await fixture.orchestrator.getState();
+    expect(interrupted?.tasks["TASK-001"]?.status).toBe("candidate_pending");
+    if (interrupted === undefined) {
+      throw new Error("测试期望保留 candidate_pending checkpoint");
+    }
+
+    const result = await fixture.orchestrator.resume(loaded, interrupted.runId);
+
+    expect(result.state.status).toBe("completed");
+    expect(fixture.agent.requests.map((request) => request.attemptKind)).toEqual([
+      "implementation",
+      "review",
+    ]);
+  });
+
   it("任务阻塞后隔离候选并立即终止线性队列", async () => {
     const agent = new RecordingAgent((request) =>
       request.taskId === "TASK-001"
@@ -365,6 +533,7 @@ describe("QueueOrchestrator", () => {
               summary: "缺少产品决策",
               blockingQuestions: ["请选择唯一交互规则"],
               notes: [],
+              verifications: [],
             },
             costUsd: 0.01,
             turns: 1,
@@ -421,8 +590,8 @@ describe("QueueOrchestrator", () => {
     ]);
     expect(agent.requests[1]?.access).toBe("read");
     expect(agent.requests.map((request) => [request.model, request.effort])).toEqual([
-      ["sonnet", "high"],
-      ["sonnet", "high"],
+      ["claude-sonnet-5", "high"],
+      ["claude-sonnet-5", "high"],
     ]);
     expect(agent.requests[1]?.sessionId).not.toBe(agent.requests[0]?.sessionId);
     expect(agent.requests[1]?.prompt).toContain("# 实际变更文件");
@@ -438,9 +607,31 @@ class NoChangeWorkspace extends RecordingWorkspace {
   public override async captureCandidate(): Promise<CandidateSnapshot> {
     return {
       fingerprint: "empty-candidate",
-      diff: "",
       files: [],
     };
+  }
+
+  public override async captureReviewCandidate() {
+    return {
+      candidate: await this.captureCandidate(),
+      diff: "",
+    };
+  }
+}
+
+class FailOnceCandidateWorkspace extends RecordingWorkspace {
+  private shouldFail = true;
+
+  /*
+   * Fake 只在首次候选身份捕获时模拟进程边界故障；恢复后返回稳定候选。
+   * 这证明 candidate_pending 是独立 checkpoint，而不是依赖内存标志跳过 Worker。
+   */
+  public override async captureCandidate(): Promise<CandidateSnapshot> {
+    if (this.shouldFail) {
+      this.shouldFail = false;
+      throw new Error("candidate capture interrupted");
+    }
+    return super.captureCandidate();
   }
 }
 
@@ -453,22 +644,49 @@ function createFixture(
   const lock = new RecordingRunLock();
   const logger = new RecordingLogger();
   const timeFormatter = new BeijingTimeFormatter();
+  const promptBuilder = new PromptBuilder();
+  const resourceBudget = new TaskResourceBudget();
+  const stageSupport = new TaskStageSupport(clock);
   const taskExecution = new TaskExecutionService(
-    agent,
-    workspace,
-    new PromptBuilder(),
-    clock,
+    new ImplementationStage(
+      agent,
+      workspace,
+      promptBuilder,
+      new FixedProjectContextProvider(),
+      clock,
+      resourceBudget,
+      stageSupport,
+    ),
+    new ReviewStage(
+      agent,
+      workspace,
+      promptBuilder,
+      new FixedProjectContextProvider(),
+      clock,
+      resourceBudget,
+      stageSupport,
+    ),
+    new CommitStage(workspace, stageSupport),
   );
-  const orchestrator = new QueueOrchestrator(
+  const checkpoints = new RunCheckpointWriter(stateStore, logger, clock);
+  const orchestrator = new QueueOrchestrator({
     taskExecution,
-    new TaskProgressReconciler(workspace),
+    taskProgress: new TaskProgressReconciler(workspace),
     stateStore,
-    lock,
+    runLock: lock,
     workspace,
-    logger,
+    checkpoints,
+    resumeValidator: new RunResumeValidator(workspace),
+    finalizer: new RunFinalizer(),
+    artifacts: new RunArtifactWriter(stateStore, timeFormatter),
+    terminalCandidates: new TerminalCandidateService(
+      workspace,
+      checkpoints,
+      clock,
+    ),
     clock,
     timeFormatter,
-  );
+  });
   return {
     orchestrator,
     agent,

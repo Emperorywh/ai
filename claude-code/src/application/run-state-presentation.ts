@@ -36,8 +36,15 @@ function presentTaskState(
         ? {}
         : { finishedAt: timeFormatter.formatTimestamp(attempt.finishedAt) }),
     })),
+    reviewAttempts: task.reviewAttempts.map((attempt) => ({
+      ...attempt,
+      startedAt: timeFormatter.formatTimestamp(attempt.startedAt),
+      ...(attempt.finishedAt === undefined
+        ? {}
+        : { finishedAt: timeFormatter.formatTimestamp(attempt.finishedAt) }),
+    })),
     /*
-     * TASK 状态第三版只投影会话与候选归档时间；外部门禁时间轴已从领域模型删除。
+     * RunState v6 显式投影 Worker、Reviewer 与候选归档时间；验证证据本身不含时间字段。
      * 显式字段映射继续保证展示层不会递归猜测任意字符串的时间语义。
      */
     ...(task.candidateArchive === undefined

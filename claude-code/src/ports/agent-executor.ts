@@ -8,6 +8,15 @@ import type { AgentRunOutcome } from "../domain/agent-result.js";
 export type AgentAccessMode = "write" | "read";
 export type AgentAttemptKind = "implementation" | "repair" | "review" | "resume";
 
+/*
+ * 初始化事实来自 Claude Code 的 system/init 消息，而不是请求参数的回显。
+ * 应用层据此持久化实际模型，执行器同时负责核验固定模型契约。
+ */
+export interface AgentSessionInfo {
+  readonly sessionId: string;
+  readonly resolvedModel: string;
+}
+
 export interface AgentRunRequest<T> {
   readonly access: AgentAccessMode;
   readonly attemptKind: AgentAttemptKind;
@@ -16,10 +25,11 @@ export interface AgentRunRequest<T> {
   readonly prompt: string;
   readonly cwd: string;
   readonly model: string;
+  readonly expectedResolvedModel: string;
   readonly effort: "low" | "medium" | "high" | "xhigh" | "max";
   /*
    * 可选字段只透传应用层已经决定的资源熔断；适配器不得自行补默认限制。
-   * 当前固定策略仅使用 TASK 超时，其他字段保留为端口能力供独立装配者明确调用。
+   * 默认组合根显式传入轮数、费用和时长上限，独立装配者也必须自行决定是否省略。
    */
   readonly maxTurns?: number;
   readonly maxBudgetUsd?: number;
@@ -27,7 +37,7 @@ export interface AgentRunRequest<T> {
   readonly signal?: AbortSignal;
   readonly sessionId?: string;
   readonly resumeSessionId?: string;
-  readonly onSessionInitialized?: (sessionId: string) => Promise<void>;
+  readonly onSessionInitialized?: (session: AgentSessionInfo) => Promise<void>;
   readonly resultSchema: z.ZodType<T>;
 }
 

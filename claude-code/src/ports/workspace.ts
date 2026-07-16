@@ -12,8 +12,16 @@ export interface WorkspaceIdentity {
 
 export interface CandidateSnapshot {
   readonly fingerprint: string;
-  readonly diff: string;
   readonly files: readonly CandidateFileSnapshot[];
+}
+
+/*
+ * ReviewCandidateBundle 只在 Reviewer 启动前构造，避免普通指纹校验反复生成大体积 diff。
+ * candidate 仍是唯一身份事实，diff 只是面向审核会话的只读投影。
+ */
+export interface ReviewCandidateBundle {
+  readonly candidate: CandidateSnapshot;
+  readonly diff: string;
 }
 
 export interface CandidateFileSnapshot {
@@ -40,15 +48,29 @@ export interface TaskCompletionEvidence {
   readonly predecessorFingerprint: string;
 }
 
-export interface Workspace {
+/*
+ * Git 能力按业务职责拆分，应用服务只依赖自己真正使用的最小端口。
+ * Workspace 仅作为默认组合根的聚合门面，不再迫使阶段之间共享巨型基础设施接口。
+ */
+export interface WorkspaceIdentityStore {
   getStateDirectory(): Promise<string>;
   getIdentity(): Promise<WorkspaceIdentity>;
   assertClean(): Promise<void>;
+}
+
+export interface CandidateStore {
   captureCandidate(): Promise<CandidateSnapshot>;
+  captureReviewCandidate(): Promise<ReviewCandidateBundle>;
+}
+
+export interface CandidateQuarantine {
   quarantineCandidate(input: {
     runId: string;
     taskId: string;
   }): Promise<CandidateArchive>;
+}
+
+export interface TaskCommitter {
   commitTask(input: {
     runId: string;
     task: TaskDefinition;
@@ -58,13 +80,27 @@ export interface Workspace {
     taskContractHash: string;
     predecessorFingerprint: string;
   }): Promise<string>;
+}
+
+export interface TaskCommitRecovery {
   findTaskCommit(input: {
     runId: string;
     taskId: string;
     expectedParent: string;
     candidateFingerprint: string;
   }): Promise<string | undefined>;
+}
+
+export interface TaskCompletionLedger {
   readTaskCompletionHistory(
     head: string,
   ): Promise<readonly TaskCompletionEvidence[]>;
 }
+
+export interface Workspace
+  extends WorkspaceIdentityStore,
+    CandidateStore,
+    CandidateQuarantine,
+    TaskCommitter,
+    TaskCommitRecovery,
+    TaskCompletionLedger {}

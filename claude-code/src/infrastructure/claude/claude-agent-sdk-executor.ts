@@ -4,27 +4,27 @@
  */
 import {
   query,
-  type Options,
   type Query,
   type SDKMessage,
   type SDKResultMessage,
 } from "@anthropic-ai/claude-agent-sdk";
-import { z } from "zod";
 import type {
   AgentFailureKind,
   AgentRunOutcome,
+  AgentRunTelemetry,
 } from "../../domain/agent-result.js";
 import { ConfigurationError } from "../../domain/errors.js";
 import type {
   AgentExecutor,
   AgentRunRequest,
 } from "../../ports/agent-executor.js";
+import type { ExecutionGuard } from "../../ports/execution-guard.js";
 import type {
   ClaudeMessageContext,
   ClaudeMessageObserver,
 } from "./claude-message-observer.js";
+import { ClaudeAgentOptionsBuilder } from "./claude-agent-options-builder.js";
 
-const READ_TOOLS = ["Read", "Glob", "Grep"] as const;
 const FORCE_CLOSE_GRACE_MS = 2_000;
 const MAX_STDERR_CHARACTERS = 20_000;
 
@@ -33,11 +33,13 @@ export type AgentQueryFactory = (input: Parameters<typeof query>[0]) => Query;
 export interface ClaudeAgentSdkExecutorOptions {
   readonly queryFactory?: AgentQueryFactory;
   readonly messageObserver?: ClaudeMessageObserver;
+  readonly executionGuard?: ExecutionGuard;
 }
 
 export class ClaudeAgentSdkExecutor implements AgentExecutor {
   private readonly queryFactory: AgentQueryFactory;
   private readonly messageObserver: ClaudeMessageObserver | undefined;
+  private readonly optionsBuilder: ClaudeAgentOptionsBuilder;
 
   /*
    * 依赖通过具名选项装配，避免测试 Query Factory 与生产终端观察器依赖位置参数顺序。
@@ -46,13 +48,44 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
   public constructor(options: ClaudeAgentSdkExecutorOptions = {}) {
     this.queryFactory = options.queryFactory ?? query;
     this.messageObserver = options.messageObserver;
+    this.optionsBuilder = new ClaudeAgentOptionsBuilder(options.executionGuard);
   }
 
   public async run<T>(
     request: AgentRunRequest<T>,
   ): Promise<AgentRunOutcome<T>> {
+    const startedAt = performance.now();
+    let resolvedModel: string | undefined;
+    let apiRetryCount = 0;
+    let apiRetryDelayMs = 0;
+    const toolUseIds = new Set<string>();
+    const createTelemetry = (): AgentRunTelemetry => ({
+      requestedModel: request.model,
+      ...(resolvedModel === undefined ? {} : { resolvedModel }),
+      durationMs: Math.max(0, Math.round(performance.now() - startedAt)),
+      apiRetryCount,
+      apiRetryDelayMs,
+      toolCalls: toolUseIds.size,
+    });
+    const fail = (
+      kind: AgentFailureKind,
+      message: string,
+      sessionId: string | undefined,
+      costUsd: number,
+      turns: number,
+      retryable: boolean,
+    ): AgentRunOutcome<T> => this.failure(
+      kind,
+      message,
+      sessionId,
+      costUsd,
+      turns,
+      retryable,
+      createTelemetry(),
+    );
+
     if (isSignalAborted(request.signal)) {
-      return this.failure("aborted", "Agent 在启动前被外部中止", undefined, 0, 0, false);
+      return fail("aborted", "Agent 在启动前被外部中止", undefined, 0, 0, false);
     }
 
     const controller = new AbortController();
@@ -61,7 +94,7 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
     let activeQuery: Query | undefined;
     let streamCompleted = false;
     let initializedSessionId: string | undefined;
-    let observerError: unknown;
+    let checkpointError: unknown;
     let capturedStderr = "";
     const messageContext: ClaudeMessageContext = {
       taskId: request.taskId,
@@ -90,7 +123,7 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
     }
 
     try {
-      const options = this.buildOptions(
+      const options = this.optionsBuilder.build(
         request,
         controller,
         (data) => {
@@ -99,7 +132,7 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
         },
       );
       if (readAbortReason(abortState) === "external") {
-        return this.failure("aborted", "Agent 在启动前被外部中止", undefined, 0, 0, false);
+        return fail("aborted", "Agent 在启动前被外部中止", undefined, 0, 0, false);
       }
 
       activeQuery = this.queryFactory({ prompt: request.prompt, options });
@@ -107,13 +140,33 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
 
       for await (const message of activeQuery) {
         this.observeMessage(messageContext, message);
+        collectToolUseIds(message, toolUseIds);
+        if (message.type === "system" && message.subtype === "api_retry") {
+          apiRetryCount += 1;
+          apiRetryDelayMs += message.retry_delay_ms;
+        }
         if (message.type === "system" && message.subtype === "init") {
           initializedSessionId = message.session_id;
+          resolvedModel = message.model;
           try {
-            await request.onSessionInitialized?.(message.session_id);
+            await request.onSessionInitialized?.({
+              sessionId: message.session_id,
+              resolvedModel: message.model,
+            });
           } catch (error) {
-            observerError = error;
+            checkpointError = error;
             throw error;
+          }
+          if (message.model !== request.expectedResolvedModel) {
+            closeQuery(activeQuery);
+            return fail(
+              "model_mismatch",
+              `实际模型与固定策略不一致：期望 ${request.expectedResolvedModel}，实际 ${message.model}`,
+              message.session_id,
+              0,
+              0,
+              false,
+            );
           }
         }
         if (message.type === "result") {
@@ -124,7 +177,7 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
 
       const terminalAbortReason = readAbortReason(abortState);
       if (terminalAbortReason !== undefined) {
-        return this.failure(
+        return fail(
           terminalAbortReason === "external" ? "aborted" : "timeout",
           terminalAbortReason === "external" ? "Agent 被外部中止" : "Agent 执行超时",
           terminalResult?.session_id ?? initializedSessionId,
@@ -135,7 +188,7 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
       }
 
       if (terminalResult === undefined) {
-        return this.failure(
+        return fail(
           "protocol",
           "Agent 消息流结束但没有 result 终态",
           initializedSessionId,
@@ -145,22 +198,33 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
         );
       }
 
-      if (initializedSessionId === undefined) {
-        initializedSessionId = terminalResult.session_id;
-        try {
-          await request.onSessionInitialized?.(terminalResult.session_id);
-        } catch (error) {
-          observerError = error;
-          throw error;
-        }
+      if (initializedSessionId === undefined || resolvedModel === undefined) {
+        return fail(
+          "protocol",
+          "Agent 返回 result 前没有可信的 system/init 模型握手",
+          terminalResult.session_id,
+          terminalResult.total_cost_usd,
+          terminalResult.num_turns,
+          true,
+        );
+      }
+      if (terminalResult.session_id !== initializedSessionId) {
+        return fail(
+          "protocol",
+          `Agent result sessionId 与 init 不一致：init ${initializedSessionId}，result ${terminalResult.session_id}`,
+          initializedSessionId,
+          terminalResult.total_cost_usd,
+          terminalResult.num_turns,
+          true,
+        );
       }
       if (terminalResult.subtype !== "success") {
-        return this.mapSdkFailure(terminalResult);
+        return this.mapSdkFailure(terminalResult, createTelemetry());
       }
 
       const parsed = request.resultSchema.safeParse(terminalResult.structured_output);
       if (!parsed.success) {
-        return this.failure(
+        return fail(
           "structured_output",
           `Agent 结构化输出无效：${parsed.error.issues.map((issue) => issue.message).join("；")}`,
           terminalResult.session_id,
@@ -176,10 +240,11 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
         data: parsed.data,
         costUsd: terminalResult.total_cost_usd,
         turns: terminalResult.num_turns,
+        telemetry: createTelemetry(),
       };
     } catch (error) {
-      if (observerError !== undefined) {
-        throw toError(observerError);
+      if (checkpointError !== undefined) {
+        throw toError(checkpointError);
       }
       if (error instanceof ConfigurationError) {
         throw error;
@@ -190,7 +255,7 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
         : failureAbortReason === "external"
           ? "aborted"
           : "execution";
-      return this.failure(
+      return fail(
         kind,
         describeExecutionError(error, capturedStderr),
         initializedSessionId,
@@ -212,98 +277,9 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
     }
   }
 
-  private buildOptions<T>(
-    request: AgentRunRequest<T>,
-    abortController: AbortController,
-    onStderr: (data: string) => void,
-  ): Options {
-    if (
-      request.sessionId !== undefined
-      && request.resumeSessionId !== undefined
-    ) {
-      throw new ConfigurationError("新 sessionId 与 resumeSessionId 不能同时提供");
-    }
-    /*
-     * Claude Code 当前使用 Draft-07 校验 --json-schema；Zod 4 默认生成 Draft 2020-12，
-     * 会让子进程在 session init 前因无法解析元 schema 而退出。方言转换属于 SDK 适配职责，
-     * 领域层仍只维护唯一的 Zod 输出契约，不复制第二套 JSON Schema。
-     */
-    const outputSchema = z.toJSONSchema(request.resultSchema, {
-      target: "draft-07",
-    });
-    const systemRules = request.access === "write"
-      ? "你是单 TASK 自主 Worker。只执行当前任务；可以自主使用终端、技能、MCP 和子 Agent 完成分析、编码与非浏览器验证。不要启动浏览器，不要 push 或部署。"
-      : "你是独立只读 Reviewer。不得编辑文件、创建子 Agent、启动浏览器或执行部署。";
-
-    /*
-     * 写入 Worker 使用 Claude Code 的完整工具面与本机/项目扩展，并明确绕过交互式授权，
-     * 让它可以自行运行命令、调用技能和组织子 Agent。系统不再注入路径 Hook 或命令门禁；
-     * Reviewer 继续保持最小只读能力，以独立判断候选而不削减 Worker 的实现空间。
-     */
-    const accessOptions: Pick<
-      Options,
-      | "tools"
-      | "allowedTools"
-      | "permissionMode"
-      | "allowDangerouslySkipPermissions"
-      | "strictMcpConfig"
-      | "mcpServers"
-      | "skills"
-      | "settingSources"
-    > = request.access === "write"
-      ? {
-          tools: { type: "preset", preset: "claude_code" },
-          permissionMode: "bypassPermissions",
-          allowDangerouslySkipPermissions: true,
-          strictMcpConfig: false,
-          skills: "all",
-          settingSources: ["user", "project", "local"],
-        }
-      : {
-          tools: [...READ_TOOLS],
-          allowedTools: [...READ_TOOLS],
-          permissionMode: "dontAsk",
-          strictMcpConfig: true,
-          mcpServers: {},
-          skills: [],
-          settingSources: ["user"],
-        };
-
-    return {
-      abortController,
-      cwd: request.cwd,
-      ...accessOptions,
-      stderr: onStderr,
-      persistSession: true,
-      ...(request.maxTurns === undefined
-        ? {}
-        : { maxTurns: request.maxTurns }),
-      ...(request.maxBudgetUsd === undefined
-        ? {}
-        : { maxBudgetUsd: request.maxBudgetUsd }),
-      model: request.model,
-      effort: request.effort,
-      includePartialMessages: true,
-      outputFormat: {
-        type: "json_schema",
-        schema: outputSchema,
-      },
-      systemPrompt: {
-        type: "preset",
-        preset: "claude_code",
-        append: systemRules,
-      },
-      title: `${request.taskId}-${request.attemptKind}`,
-      ...(request.resumeSessionId !== undefined
-        ? { resume: request.resumeSessionId }
-        : request.sessionId !== undefined
-          ? { sessionId: request.sessionId }
-          : {}),
-    };
-  }
-
   private mapSdkFailure<T>(
     result: Exclude<SDKResultMessage, { subtype: "success" }>,
+    telemetry: AgentRunTelemetry,
   ): AgentRunOutcome<T> {
     const mapping: Record<typeof result.subtype, AgentFailureKind> = {
       error_during_execution: "execution",
@@ -318,6 +294,7 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
       result.total_cost_usd,
       result.num_turns,
       result.subtype !== "error_max_budget_usd",
+      telemetry,
     );
   }
 
@@ -328,6 +305,7 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
     costUsd: number,
     turns: number,
     retryable: boolean,
+    telemetry: AgentRunTelemetry,
   ): AgentRunOutcome<T> {
     return {
       ok: false,
@@ -337,6 +315,7 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
       costUsd,
       turns,
       retryable,
+      telemetry,
     };
   }
 
@@ -366,6 +345,24 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
 
 function isSignalAborted(signal: AbortSignal | undefined): boolean {
   return signal?.aborted === true;
+}
+
+/*
+ * 工具计数按稳定 tool_use id 去重，SDK 重放完整 assistant 消息时不会放大指标。
+ * 这里只收集遥测，不改变观察器是否展示对应消息。
+ */
+function collectToolUseIds(
+  message: SDKMessage,
+  toolUseIds: Set<string>,
+): void {
+  if (message.type !== "assistant") {
+    return;
+  }
+  for (const block of message.message.content) {
+    if (block.type === "tool_use") {
+      toolUseIds.add(block.id);
+    }
+  }
 }
 
 function readAbortReason(
