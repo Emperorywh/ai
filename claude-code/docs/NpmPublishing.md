@@ -1,5 +1,8 @@
 # npm 包发布手册
 
+npm version patch --no-git-tag-version
+npm publish --access public
+
 本文档用于维护者将 `apex-coding-agent` 发布到 npm 官方 Registry，覆盖首次发布、后续版本发布、Security Key 认证、发布后验证和常见错误处理。
 
 最后核对日期：2026-07-16。
