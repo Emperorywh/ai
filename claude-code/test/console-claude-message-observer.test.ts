@@ -71,6 +71,26 @@ describe("ConsoleClaudeMessageObserver", () => {
     expect(stdout).toContain("后台任务进行中：检查依赖（250ms，2 个工具）");
     expect(stdout).toContain("后台任务完成：检查完成");
   });
+
+  it("认证错误后的 success result 不再显示为会话成功", () => {
+    let stdout = "";
+    const observer = new ConsoleClaudeMessageObserver({
+      stdout: (content) => {
+        stdout += content;
+      },
+    });
+
+    /*
+     * Claude Code 当前可能先发送 authentication_failed assistant 帧，
+     * 再发送 success result；观察器必须以错误协议事实覆盖表面终态。
+     */
+    observer.onMessage(context, createAssistantAuthenticationError());
+    observer.onMessage(context, createSuccessResult());
+
+    expect(stdout).toContain("Claude 消息错误：authentication_failed");
+    expect(stdout).toContain("Claude 会话异常结束");
+    expect(stdout).not.toContain("Claude 会话成功");
+  });
 });
 
 function createTextDelta(text: string): SDKMessage {
@@ -94,6 +114,16 @@ function createAssistantToolUse(): SDKMessage {
         input: { file_path: "src/index.ts" },
       }],
     },
+  } as SDKMessage;
+}
+
+function createAssistantAuthenticationError(): SDKMessage {
+  return {
+    type: "assistant",
+    message: {
+      content: [{ type: "text", text: "Not logged in · Please run /login" }],
+    },
+    error: "authentication_failed",
   } as SDKMessage;
 }
 

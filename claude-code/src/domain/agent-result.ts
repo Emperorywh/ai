@@ -45,6 +45,7 @@ export type ReviewResult = z.infer<typeof reviewResultSchema>;
 export type VerificationEvidence = z.infer<typeof verificationEvidenceSchema>;
 
 export type AgentFailureKind =
+  | "authentication"
   | "execution"
   | "max_turns"
   | "max_budget"

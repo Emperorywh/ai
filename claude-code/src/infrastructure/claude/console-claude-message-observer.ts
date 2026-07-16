@@ -2,7 +2,10 @@
  * ConsoleClaudeMessageObserver 把 Claude 的增量文本、工具调用、工具结果与系统状态实时投影到终端。
  * 协议帧解析和终端排版集中在这里，执行器只负责转发消息，应用层不感知 SDK 展示细节。
  */
-import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import type {
+  SDKAssistantMessageError,
+  SDKMessage,
+} from "@anthropic-ai/claude-agent-sdk";
 import type {
   ClaudeMessageContext,
   ClaudeMessageObserver,
@@ -23,6 +26,7 @@ export class ConsoleClaudeMessageObserver implements ClaudeMessageObserver {
   private streamedAssistantText = false;
   private thinkingStarted = false;
   private lastStatus: string | undefined;
+  private lastAssistantError: SDKAssistantMessageError | undefined;
   private readonly toolNames = new Map<string, string>();
   private readonly stdout: ConsoleWriter;
   private readonly stderr: ConsoleWriter;
@@ -127,6 +131,7 @@ export class ConsoleClaudeMessageObserver implements ClaudeMessageObserver {
     message: Extract<SDKMessage, { type: "assistant" }>,
   ): void {
     this.closeAssistantText();
+    this.lastAssistantError = message.error;
     const content = message.message.content;
     if (!this.streamedAssistantText) {
       for (const block of content) {
@@ -189,9 +194,22 @@ export class ConsoleClaudeMessageObserver implements ClaudeMessageObserver {
      */
     this.thinkingStarted = false;
     this.lastStatus = undefined;
+    const assistantError = this.lastAssistantError;
+    this.lastAssistantError = undefined;
     const metrics = `${message.num_turns} 轮，$${message.total_cost_usd.toFixed(4)}`;
-    if (message.subtype === "success") {
+    if (message.subtype === "success" && assistantError === undefined) {
       this.writeLine(context, `Claude 会话成功（${metrics}）`);
+      return;
+    }
+    if (message.subtype === "success") {
+      /*
+       * Claude Code 可能在认证错误后仍发送 success result；此时展示层必须保留协议错误事实，
+       * 不能用“会话成功”掩盖执行器随后返回的认证失败。
+       */
+      this.writeLine(
+        context,
+        `Claude 会话异常结束（${metrics}）：${assistantError}`,
+      );
       return;
     }
     this.writeLine(
@@ -216,6 +234,7 @@ export class ConsoleClaudeMessageObserver implements ClaudeMessageObserver {
          */
         this.thinkingStarted = false;
         this.lastStatus = undefined;
+        this.lastAssistantError = undefined;
         this.toolNames.clear();
         this.writeLine(
           context,

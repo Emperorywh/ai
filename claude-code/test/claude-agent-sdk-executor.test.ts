@@ -16,6 +16,7 @@ import {
 } from "../src/infrastructure/claude/claude-agent-sdk-executor.js";
 import { WorkerExecutionGuard } from "../src/application/worker-execution-guard.js";
 import type { ClaudeMessageObserver } from "../src/infrastructure/claude/claude-message-observer.js";
+import type { ClaudeConnectionSettingsResolver } from "../src/infrastructure/claude/claude-connection-settings-resolver.js";
 import type { AgentRunRequest } from "../src/ports/agent-executor.js";
 
 const SESSION_ID = "11111111-1111-4111-8111-111111111111";
@@ -293,6 +294,67 @@ describe("ClaudeAgentSdkExecutor", () => {
     expect(capturedOptions?.hooks).toBeUndefined();
   });
 
+  it("只读 Reviewer 复用 CC Switch 生效配置并保持权限隔离", async () => {
+    let capturedOptions: Options | undefined;
+    const resolvedDirectories: string[] = [];
+    const connectionSettingsResolver: ClaudeConnectionSettingsResolver = {
+      resolve: async (cwd) => {
+        resolvedDirectories.push(cwd);
+        return {
+          apiKeyHelper: "trusted-api-key-helper",
+          env: {
+            ANTHROPIC_AUTH_TOKEN: "secret-token",
+            ANTHROPIC_BASE_URL: "https://gateway.example.test",
+          },
+        };
+      },
+    };
+    /*
+     * Claude Code 规定 settings.json 的 env 覆盖启动 shell 中的同名变量。
+     * 注入一组过期宿主值，验证 CC Switch 当前配置拥有相同优先级且 PATH 等宿主变量仍被保留。
+     */
+    const executor = new ClaudeAgentSdkExecutor({
+      connectionSettingsResolver,
+      processEnvironment: {
+        PATH: "C:\\host-bin",
+        ANTHROPIC_AUTH_TOKEN: "stale-shell-token",
+        ANTHROPIC_BASE_URL: "https://stale-shell.example.test",
+      },
+      queryFactory: ({ options }) => {
+        capturedOptions = options;
+        return createFakeQuery(messageStream([
+          createInitMessage(SESSION_ID),
+          createSuccessResult(SESSION_ID),
+        ]));
+      },
+    });
+
+    const outcome = await executor.run(createRequest({
+      access: "read",
+      attemptKind: "review",
+    }));
+
+    expect(outcome.ok).toBe(true);
+    expect(resolvedDirectories).toEqual([process.cwd()]);
+    expect(capturedOptions?.tools).toEqual(["Read", "Glob", "Grep"]);
+    expect(capturedOptions?.allowedTools).toEqual(["Read", "Glob", "Grep"]);
+    expect(capturedOptions?.permissionMode).toBe("dontAsk");
+    expect(capturedOptions?.strictMcpConfig).toBe(true);
+    expect(capturedOptions?.mcpServers).toEqual({});
+    expect(capturedOptions?.skills).toEqual([]);
+    expect(capturedOptions?.settingSources).toEqual([]);
+    expect(capturedOptions?.settings).toEqual({
+      apiKeyHelper: "trusted-api-key-helper",
+    });
+    expect(capturedOptions?.settings).not.toHaveProperty("env");
+    expect(capturedOptions?.env).toMatchObject({
+      PATH: "C:\\host-bin",
+      ANTHROPIC_AUTH_TOKEN: "secret-token",
+      ANTHROPIC_BASE_URL: "https://gateway.example.test",
+    });
+    expect(capturedOptions?.hooks).toBeUndefined();
+  });
+
   it("通过 PreToolUse Hook 拒绝系统策略禁止的命令", async () => {
     let capturedOptions: Options | undefined;
     const executor = new ClaudeAgentSdkExecutor({
@@ -395,13 +457,33 @@ describe("ClaudeAgentSdkExecutor", () => {
 
     expect(outcome).toMatchObject({
       ok: false,
-      kind: "execution",
+      kind: "authentication",
+      retryable: false,
     });
     if (outcome.ok) {
       throw new Error("测试期望执行器返回失败结果");
     }
     expect(outcome.message).toContain("process exited with code 1");
     expect(outcome.message).toContain("Not logged in");
+  });
+
+  it("assistant 报告认证失败时不接受表面的 success result", async () => {
+    const executor = new ClaudeAgentSdkExecutor({
+      queryFactory: () => createFakeQuery(messageStream([
+        createInitMessage(SESSION_ID),
+        createAssistantErrorMessage("authentication_failed"),
+        createSuccessResult(SESSION_ID),
+      ])),
+    });
+
+    const outcome = await executor.run(createRequest());
+
+    expect(outcome).toMatchObject({
+      ok: false,
+      kind: "authentication",
+      sessionId: SESSION_ID,
+      retryable: false,
+    });
   });
 });
 
@@ -519,6 +601,19 @@ function createAssistantToolMessage(toolUseId: string): SDKMessage {
         input: { file_path: "src/index.ts" },
       }],
     },
+  } as SDKMessage;
+}
+
+function createAssistantErrorMessage(
+  error: "authentication_failed",
+): SDKMessage {
+  return {
+    type: "assistant",
+    message: {
+      content: [{ type: "text", text: "Not logged in · Please run /login" }],
+    },
+    error,
+    session_id: SESSION_ID,
   } as SDKMessage;
 }
 

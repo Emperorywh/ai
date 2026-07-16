@@ -5,6 +5,7 @@
 import {
   query,
   type Query,
+  type SDKAssistantMessageError,
   type SDKMessage,
   type SDKResultMessage,
 } from "@anthropic-ai/claude-agent-sdk";
@@ -24,6 +25,7 @@ import type {
   ClaudeMessageObserver,
 } from "./claude-message-observer.js";
 import { ClaudeAgentOptionsBuilder } from "./claude-agent-options-builder.js";
+import type { ClaudeConnectionSettingsResolver } from "./claude-connection-settings-resolver.js";
 
 const FORCE_CLOSE_GRACE_MS = 2_000;
 const MAX_STDERR_CHARACTERS = 20_000;
@@ -34,6 +36,8 @@ export interface ClaudeAgentSdkExecutorOptions {
   readonly queryFactory?: AgentQueryFactory;
   readonly messageObserver?: ClaudeMessageObserver;
   readonly executionGuard?: ExecutionGuard;
+  readonly connectionSettingsResolver?: ClaudeConnectionSettingsResolver;
+  readonly processEnvironment?: NodeJS.ProcessEnv;
 }
 
 export class ClaudeAgentSdkExecutor implements AgentExecutor {
@@ -48,7 +52,17 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
   public constructor(options: ClaudeAgentSdkExecutorOptions = {}) {
     this.queryFactory = options.queryFactory ?? query;
     this.messageObserver = options.messageObserver;
-    this.optionsBuilder = new ClaudeAgentOptionsBuilder(options.executionGuard);
+    this.optionsBuilder = new ClaudeAgentOptionsBuilder({
+      ...(options.executionGuard === undefined
+        ? {}
+        : { executionGuard: options.executionGuard }),
+      ...(options.connectionSettingsResolver === undefined
+        ? {}
+        : { connectionSettingsResolver: options.connectionSettingsResolver }),
+      ...(options.processEnvironment === undefined
+        ? {}
+        : { processEnvironment: options.processEnvironment }),
+    });
   }
 
   public async run<T>(
@@ -94,6 +108,7 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
     let activeQuery: Query | undefined;
     let streamCompleted = false;
     let initializedSessionId: string | undefined;
+    let assistantMessageError: SDKAssistantMessageError | undefined;
     let checkpointError: unknown;
     let capturedStderr = "";
     const messageContext: ClaudeMessageContext = {
@@ -123,7 +138,7 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
     }
 
     try {
-      const options = this.optionsBuilder.build(
+      const optionsResult = this.optionsBuilder.build(
         request,
         controller,
         (data) => {
@@ -131,6 +146,9 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
           this.observeStderr(messageContext, data);
         },
       );
+      const options = optionsResult instanceof Promise
+        ? await optionsResult
+        : optionsResult;
       if (readAbortReason(abortState) === "external") {
         return fail("aborted", "Agent 在启动前被外部中止", undefined, 0, 0, false);
       }
@@ -141,6 +159,9 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
       for await (const message of activeQuery) {
         this.observeMessage(messageContext, message);
         collectToolUseIds(message, toolUseIds);
+        if (message.type === "assistant") {
+          assistantMessageError = message.error;
+        }
         if (message.type === "system" && message.subtype === "api_retry") {
           apiRetryCount += 1;
           apiRetryDelayMs += message.retry_delay_ms;
@@ -218,6 +239,29 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
           true,
         );
       }
+      /*
+       * Claude Code 可能在 assistant 帧报告 authentication_failed，随后仍发送 success result，
+       * 甚至在迭代器收尾时再抛异常。认证事实必须优先于表面的 result subtype，避免误判成功或重试。
+       */
+      const terminalDiagnostic = terminalResult.subtype === "success"
+        ? capturedStderr
+        : [
+            ...terminalResult.errors,
+            terminalResult.terminal_reason ?? "",
+            capturedStderr,
+          ].filter(Boolean).join("\n");
+      if (isAuthenticationFailure(assistantMessageError, terminalDiagnostic)) {
+        return fail(
+          "authentication",
+          describeAuthenticationFailure(
+            terminalDiagnostic || assistantMessageError || "",
+          ),
+          terminalResult.session_id,
+          terminalResult.total_cost_usd,
+          terminalResult.num_turns,
+          false,
+        );
+      }
       if (terminalResult.subtype !== "success") {
         return this.mapSdkFailure(terminalResult, createTelemetry());
       }
@@ -250,18 +294,25 @@ export class ClaudeAgentSdkExecutor implements AgentExecutor {
         throw error;
       }
       const failureAbortReason = readAbortReason(abortState);
-      const kind: AgentFailureKind = failureAbortReason === "timeout"
+      const executionMessage = describeExecutionError(error, capturedStderr);
+      const authenticationFailed = failureAbortReason === undefined
+        && isAuthenticationFailure(assistantMessageError, executionMessage);
+      const kind: AgentFailureKind = authenticationFailed
+        ? "authentication"
+        : failureAbortReason === "timeout"
         ? "timeout"
         : failureAbortReason === "external"
           ? "aborted"
           : "execution";
       return fail(
         kind,
-        describeExecutionError(error, capturedStderr),
+        authenticationFailed
+          ? describeAuthenticationFailure(executionMessage)
+          : executionMessage,
         initializedSessionId,
         0,
         0,
-        kind !== "aborted",
+        kind !== "aborted" && kind !== "authentication",
       );
     } finally {
       if (timeout !== undefined) {
@@ -414,4 +465,33 @@ function describeExecutionError(error: unknown, capturedStderr: string): string 
     return message;
   }
   return `${message}\nClaude Code stderr:\n${stderr}`;
+}
+
+/*
+ * assistant.error 是首选的稳定协议事实；文本匹配只覆盖 init 前退出、尚未产生 assistant 帧的场景。
+ * 认证失败依赖用户重新配置凭据，重复创建相同会话不会恢复，因此必须明确标记为不可重试。
+ */
+function isAuthenticationFailure(
+  assistantError: SDKAssistantMessageError | undefined,
+  diagnostic: string,
+): boolean {
+  if (
+    assistantError === "authentication_failed"
+    || assistantError === "oauth_org_not_allowed"
+  ) {
+    return true;
+  }
+  return /authentication_failed|oauth_org_not_allowed|not logged in|please run \/login/iu
+    .test(diagnostic);
+}
+
+/*
+ * 统一认证失败摘要，确保状态文件和终端事件都能给出直接可操作的根因。
+ * 原始诊断保留在摘要中，便于区分未登录、组织限制和认证辅助命令故障。
+ */
+function describeAuthenticationFailure(diagnostic: string): string {
+  const detail = diagnostic.trim();
+  return detail.length === 0
+    ? "Claude Code 认证失败，请检查用户级认证配置或重新登录"
+    : `Claude Code 认证失败：${detail}`;
 }

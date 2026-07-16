@@ -10,17 +10,51 @@ import { z } from "zod";
 import { ConfigurationError } from "../../domain/errors.js";
 import type { AgentRunRequest } from "../../ports/agent-executor.js";
 import type { ExecutionGuard } from "../../ports/execution-guard.js";
+import {
+  SdkClaudeConnectionSettingsResolver,
+  type ClaudeConnectionSettingsResolver,
+} from "./claude-connection-settings-resolver.js";
 
 const READ_TOOLS = ["Read", "Glob", "Grep"] as const;
 
+type ClaudeAccessOptions = Pick<
+  Options,
+  | "tools"
+  | "allowedTools"
+  | "permissionMode"
+  | "allowDangerouslySkipPermissions"
+  | "strictMcpConfig"
+  | "mcpServers"
+  | "skills"
+  | "settingSources"
+  | "settings"
+  | "env"
+  | "hooks"
+>;
+
+export interface ClaudeAgentOptionsBuilderOptions {
+  readonly executionGuard?: ExecutionGuard;
+  readonly connectionSettingsResolver?: ClaudeConnectionSettingsResolver;
+  readonly processEnvironment?: NodeJS.ProcessEnv;
+}
+
 export class ClaudeAgentOptionsBuilder {
-  public constructor(private readonly executionGuard?: ExecutionGuard) {}
+  private readonly executionGuard: ExecutionGuard | undefined;
+  private readonly connectionSettingsResolver: ClaudeConnectionSettingsResolver;
+  private readonly processEnvironment: NodeJS.ProcessEnv;
+
+  public constructor(options: ClaudeAgentOptionsBuilderOptions = {}) {
+    this.executionGuard = options.executionGuard;
+    this.connectionSettingsResolver = options.connectionSettingsResolver
+      ?? new SdkClaudeConnectionSettingsResolver();
+    this.processEnvironment = options.processEnvironment ?? process.env;
+  }
 
   public build<T>(
     request: AgentRunRequest<T>,
     abortController: AbortController,
     onStderr: (data: string) => void,
-  ): Options {
+  ): Options | Promise<Options> {
     if (
       request.sessionId !== undefined
       && request.resumeSessionId !== undefined
@@ -37,12 +71,14 @@ export class ClaudeAgentOptionsBuilder {
     const systemRules = request.access === "write"
       ? "你是单 TASK 自主 Worker。只执行当前任务；可以自主使用终端、技能、MCP 和子 Agent 完成分析、编码与非浏览器验证。不要执行 Git 写操作，不要启动浏览器或部署。"
       : "你是独立只读 Reviewer。不得编辑文件、创建子 Agent、启动浏览器或执行部署。";
-    const accessOptions = this.createAccessOptions(request.access);
-
-    return {
+    const accessOptions = this.createAccessOptions(
+      request.access,
+      request.cwd,
+    );
+    const completeOptions = (resolvedAccess: ClaudeAccessOptions): Options => ({
       abortController,
       cwd: request.cwd,
-      ...accessOptions,
+      ...resolvedAccess,
       stderr: onStderr,
       persistSession: true,
       ...(request.maxTurns === undefined ? {} : { maxTurns: request.maxTurns }),
@@ -64,40 +100,47 @@ export class ClaudeAgentOptionsBuilder {
         : request.sessionId !== undefined
           ? { sessionId: request.sessionId }
           : {}),
-    };
+    });
+    /*
+     * Worker 不需要额外解析连接配置，保持同步构建即可立即创建 Query；只有隔离 Reviewer
+     * 才等待可信设置投影。这样新增的认证边界不会改变 Worker 的中止与会话初始化时序。
+     */
+    return accessOptions instanceof Promise
+      ? accessOptions.then(completeOptions)
+      : completeOptions(accessOptions);
   }
 
   private createAccessOptions(
     access: AgentRunRequest<unknown>["access"],
-  ): Pick<
-    Options,
-    | "tools"
-    | "allowedTools"
-    | "permissionMode"
-    | "allowDangerouslySkipPermissions"
-    | "strictMcpConfig"
-    | "mcpServers"
-    | "skills"
-    | "settingSources"
-    | "hooks"
-  > {
+    cwd: string,
+  ): ClaudeAccessOptions | Promise<ClaudeAccessOptions> {
     /*
-     * Worker 拥有完整开发能力但受系统级 PreToolUse 守卫约束；Reviewer 使用空设置源与纯读取工具。
-     * 两种能力面在单一工厂中互斥构造，不存在后续字段覆盖造成的权限混合。
+     * Worker 拥有完整开发能力并受系统级 PreToolUse 守卫约束；Reviewer 保持纯读取工具，
+     * 同时只注入可信用户设置中的连接字段。认证配置与权限配置由此成为两个独立边界。
      */
-    return access === "write"
-      ? {
-          tools: { type: "preset", preset: "claude_code" },
-          permissionMode: "bypassPermissions",
-          allowDangerouslySkipPermissions: true,
-          strictMcpConfig: false,
-          skills: "all",
-          settingSources: ["user", "project", "local"],
-          ...(this.executionGuard === undefined
-            ? {}
-            : { hooks: createExecutionGuardHooks(this.executionGuard) }),
-        }
-      : {
+    if (access === "write") {
+      return {
+        tools: { type: "preset", preset: "claude_code" },
+        permissionMode: "bypassPermissions",
+        allowDangerouslySkipPermissions: true,
+        strictMcpConfig: false,
+        skills: "all",
+        settingSources: ["user", "project", "local"],
+        ...(this.executionGuard === undefined
+          ? {}
+          : { hooks: createExecutionGuardHooks(this.executionGuard) }),
+      };
+    }
+
+    return this.connectionSettingsResolver.resolve(cwd).then(
+      (connectionSettings) => {
+        const { env: connectionEnvironment, ...authenticationHelpers }
+          = connectionSettings;
+        /*
+         * 令牌和网关值通过子进程环境传递，不能序列化进 --settings 命令行参数；
+         * Options.env 会替换整个环境，因此必须显式合并宿主环境以保留 PATH、HOME 和配置目录。
+         */
+        return {
           tools: [...READ_TOOLS],
           allowedTools: [...READ_TOOLS],
           permissionMode: "dontAsk",
@@ -105,7 +148,13 @@ export class ClaudeAgentOptionsBuilder {
           mcpServers: {},
           skills: [],
           settingSources: [],
+          settings: authenticationHelpers,
+          ...(connectionEnvironment === undefined
+            ? {}
+            : { env: { ...this.processEnvironment, ...connectionEnvironment } }),
         };
+      },
+    );
   }
 }
 

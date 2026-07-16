@@ -36,13 +36,21 @@
 - Node.js 20+
 - pnpm
 - Git，目标项目至少有一个提交
-- Anthropic API 凭据
+- 已能正常工作的 Claude Code 当前认证配置
 
 ```powershell
-$env:ANTHROPIC_API_KEY = "你的 API Key"
+# 先用 CC Switch 选择 Claude Provider，再核验 Claude Code 当前状态
+claude auth status
+apex-coding-agent run
 ```
 
-不要把密钥写入 TASK、`.env` 或仓库。
+Apex 不提供独立登录、不读取 `cc-switch.db`、不保存 Token。CC Switch 切换后写入的 Claude Code
+用户配置（默认 `~/.claude/settings.json`）是唯一认证入口；Apex 通过 Claude Agent SDK 的设置解析器
+读取同一份认证环境、网关和模型映射。用户配置中的 `env` 与 Claude Code 一样覆盖启动终端的同名变量。
+
+Reviewer 不加载项目/本地权限设置，只投影当前 Claude 用户配置中的连接字段，因此 CC Switch 认证可用性
+不会破坏只读隔离。每个新 Agent 会话都会重新解析当前配置；切换 Provider 后，已运行的会话不变，
+下一次 Worker/Reviewer 会话自动使用新 Provider。不要把密钥写入 TASK、项目 `.env` 或仓库。
 
 ## 安装全局命令
 

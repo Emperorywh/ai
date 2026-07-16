@@ -63,8 +63,9 @@
 
 ### 2.4 基础设施层
 
-- `claude-agent-options-builder.ts`：工具能力、Reviewer 隔离、Draft-07 输出和 Hook 选项翻译。
-- `claude-agent-sdk-executor.ts`：SDK 消息流、模型握手、结构化输出、遥测与中止映射。
+- `claude-connection-settings-resolver.ts`：通过 Claude SDK 读取 Claude Code 当前用户级/托管级设置，并投影认证、代理和模型连接环境；CC Switch 是该用户配置的上游写入者，系统不读取其内部数据库。
+- `claude-agent-options-builder.ts`：工具能力、Reviewer 连接配置注入与权限隔离、Draft-07 输出和 Hook 选项翻译。
+- `claude-agent-sdk-executor.ts`：SDK 消息流、模型握手、结构化输出、认证失败分类、遥测与中止映射。
 - `console-claude-message-observer.ts`：带北京时间的实时消息、后台任务状态与重复状态折叠。
 - `git-command-runner.ts`：唯一 Git 子进程入口。
 - `git-project-boundary.ts`：子项目 pathspec、仓库身份、清洁度与安全清理。
@@ -229,9 +230,9 @@ Reviewer 启动前才组合：
 - 有界的 untracked 文件预览；
 - Worker 结构化验证证据。
 
-Reviewer 使用 `Read/Glob/Grep`、`dontAsk`、空 MCP、空 skills、空 setting sources。每次审核都创建全新 session，不继承 Worker 或用户设置。
+Reviewer 使用 `Read/Glob/Grep`、`dontAsk`、空 MCP、空 skills、空 setting sources。每次审核都创建全新 session，不继承 Worker、项目设置或用户权限设置；基础设施通过 Claude SDK 重新解析当前用户级/托管级配置，并投影连接环境与认证辅助命令。该读取路径与 CC Switch 切换后 Claude Code 使用的实时配置一致，不访问 `cc-switch.db`，也不在 Apex 中维护凭据副本。令牌通过合并后的子进程环境传递，不进入命令行参数；用户设置环境覆盖宿主终端同名变量，认证/网关连接和工具权限保持解耦。
 
-审核通过且没有 critical/high/medium finding 才进入提交；拒绝或实质 finding 进入 repair；人工决策进入 blocked；基础设施错误在 Reviewer 预算内新建会话重试。
+审核通过且没有 critical/high/medium finding 才进入提交；拒绝或实质 finding 进入 repair；人工决策进入 blocked；可恢复基础设施错误在 Reviewer 预算内新建会话重试，认证失败属于需要修复外部配置的不可重试错误并立即终止。
 
 ## 10. Git 候选、账本与隔离区
 

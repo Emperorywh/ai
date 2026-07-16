@@ -457,6 +457,38 @@ describe("QueueOrchestrator", () => {
       .toHaveLength(3);
   });
 
+  it("Reviewer 认证失败时立即终止且不消耗全部重试预算", async () => {
+    const agent = new RecordingAgent((request) => {
+      if (request.attemptKind !== "review") {
+        return completedBehavior(request);
+      }
+      return {
+        ok: false,
+        sessionId: request.sessionId ?? "missing-review-session",
+        kind: "authentication",
+        message: "Claude Code 认证失败：Not logged in",
+        costUsd: 0,
+        turns: 1,
+        retryable: false,
+      };
+    });
+    const fixture = createFixture(new RecordingWorkspace(), agent);
+
+    /*
+     * 认证配置需要用户修复，原样创建第二、第三个 Reviewer 不可能改变结果。
+     * 状态机应保留一次失败事实并立即结束，避免把基础设施配置问题伪装成资源耗尽。
+     */
+    const result = await fixture.orchestrator.start(
+      createLoadedProject([{ id: "TASK-001" }]),
+    );
+
+    expect(result.state.status).toBe("failed");
+    expect(result.state.tasks["TASK-001"]?.reviewAttempts).toHaveLength(1);
+    expect(result.state.tasks["TASK-001"]?.failureReason).toContain("认证失败");
+    expect(agent.requests.filter((request) => request.attemptKind === "review"))
+      .toHaveLength(1);
+  });
+
   it("恢复尚未初始化的 executing checkpoint 时创建全新会话", async () => {
     const fixture = createFixture();
     const loaded = createLoadedProject([{ id: "TASK-001" }]);
