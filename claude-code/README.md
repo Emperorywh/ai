@@ -63,6 +63,8 @@ apex-coding-agent --help
 npm install --global apex-coding-agent
 ```
 
+维护者首次发布、后续版本发布、Security Key 2FA 配置和错误排查流程见 [npm 包发布手册](docs/NpmPublishing.md)。
+
 ## 初始化
 
 在目标项目根目录执行：
