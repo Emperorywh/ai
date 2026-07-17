@@ -9,6 +9,7 @@ import type {
   ReviewCandidateBundle,
   TaskCompletionEvidence,
   Workspace,
+  WorkspaceHeadAdvance,
   WorkspaceIdentity,
 } from "../../ports/workspace.js";
 import { GitCandidateQuarantine } from "./git-candidate-quarantine.js";
@@ -35,12 +36,23 @@ export class GitWorkspace implements Workspace {
     return this.boundary.getStateDirectory();
   }
 
+  public getLockDirectory(): Promise<string> {
+    return this.boundary.getLockDirectory();
+  }
+
   public getIdentity(): Promise<WorkspaceIdentity> {
     return this.boundary.getIdentity();
   }
 
   public assertClean(): Promise<void> {
     return this.boundary.assertClean();
+  }
+
+  public inspectHeadAdvance(input: {
+    expectedHead: string;
+    currentHead: string;
+  }): Promise<WorkspaceHeadAdvance> {
+    return this.boundary.inspectHeadAdvance(input);
   }
 
   public captureCandidate(): Promise<CandidateSnapshot> {

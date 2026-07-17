@@ -26,6 +26,7 @@ import type {
   CandidateSnapshot,
   TaskCompletionEvidence,
   Workspace,
+  WorkspaceHeadAdvance,
 } from "../../src/ports/workspace.js";
 
 export class FakeClock implements Clock {
@@ -128,13 +129,19 @@ export class FixedAgentModelResolver implements AgentModelResolver {
 
 export class RecordingWorkspace implements Workspace {
   public readonly commits: string[] = [];
+  public readonly commitExpectedHeads: string[] = [];
   public cleanChecks = 0;
   public quarantines = 0;
   private currentHead = "base-sha";
   private readonly completionHistory: TaskCompletionEvidence[] = [];
+  private readonly headAdvances = new Map<string, WorkspaceHeadAdvance>();
 
   public async getStateDirectory(): Promise<string> {
     return "/state";
+  }
+
+  public async getLockDirectory(): Promise<string> {
+    return "/worktree-lock";
   }
 
   public async getIdentity() {
@@ -147,6 +154,30 @@ export class RecordingWorkspace implements Workspace {
 
   public async assertClean(): Promise<void> {
     this.cleanChecks += 1;
+  }
+
+  public async inspectHeadAdvance(input: {
+    expectedHead: string;
+    currentHead: string;
+  }): Promise<WorkspaceHeadAdvance> {
+    return this.headAdvances.get(
+      `${input.expectedHead}\0${input.currentHead}`,
+    ) ?? { kind: "diverged" };
+  }
+
+  public advanceHead(
+    head: string,
+    changedProjectFiles: readonly string[] = [],
+  ): void {
+    /*
+     * Fake 显式记录 HEAD 图关系，避免测试根据 SHA 文本猜测祖先关系。
+     * changedProjectFiles 为空表示与故障现场一致的兄弟项目提交。
+     */
+    this.headAdvances.set(`${this.currentHead}\0${head}`, {
+      kind: "descendant",
+      changedProjectFiles,
+    });
+    this.currentHead = head;
   }
 
   public async captureCandidate(): Promise<CandidateSnapshot> {
@@ -177,9 +208,28 @@ export class RecordingWorkspace implements Workspace {
     taskContractHash: string;
     predecessorFingerprint: string;
   }): Promise<string> {
+    /*
+     * Fake 与生产提交器共享严格 expectedHead 前置条件，防止应用测试在错误基线上假成功。
+     * 这样只有显式协调并 checkpoint 的 HEAD 才能进入提交记录。
+     */
+    if (input.expectedHead !== this.currentHead) {
+      throw new Error(
+        `Fake 提交基线不一致：期望 ${input.expectedHead}，实际 ${this.currentHead}`,
+      );
+    }
+    this.commitExpectedHeads.push(input.expectedHead);
     this.commits.push(input.task.id);
+    const parentHead = this.currentHead;
     const commitSha = `${input.task.id.toLowerCase()}-${this.commits.length}-sha`;
     this.currentHead = commitSha;
+    /*
+     * 任务提交会改变当前项目树；恢复校验必须先走精确 trailer 证据，不能误当作安全项目外快进。
+     * 该事实让应用测试同时覆盖提交成功但 checkpoint 尚未落盘的既有恢复窗口。
+     */
+    this.headAdvances.set(`${parentHead}\0${commitSha}`, {
+      kind: "descendant",
+      changedProjectFiles: ["src/candidate.ts"],
+    });
     this.completionHistory.unshift({
       taskId: input.task.id,
       commitSha,

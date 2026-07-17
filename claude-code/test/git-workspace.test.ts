@@ -100,6 +100,29 @@ describe("GitWorkspace", () => {
     );
   });
 
+  it("兄弟项目隔离状态目录但共享同一 worktree 锁目录", async () => {
+    const fixture = await createGitFixture();
+    const firstRoot = join(fixture.root, "apps", "first");
+    const secondRoot = join(fixture.root, "apps", "second");
+    await Promise.all([
+      mkdir(firstRoot, { recursive: true }),
+      mkdir(secondRoot, { recursive: true }),
+    ]);
+    const first = new GitWorkspace(firstRoot);
+    const second = new GitWorkspace(secondRoot);
+
+    /*
+     * RunState 仍按规范化项目根分区，兄弟项目不会覆盖彼此 checkpoint。
+     * 两者共享 HEAD、索引和文件树，所以必须解析到同一 worktree 锁目录。
+     */
+    await expect(first.getStateDirectory()).resolves.not.toBe(
+      await second.getStateDirectory(),
+    );
+    await expect(first.getLockDirectory()).resolves.toBe(
+      await second.getLockDirectory(),
+    );
+  });
+
   it("候选内容在加入暂存区前后保持相同 fingerprint", async () => {
     const fixture = await createGitFixture();
     await writeFile(
@@ -149,6 +172,95 @@ describe("GitWorkspace", () => {
     ]);
     expect(review.diff).toContain("a/package.json");
     expect(review.diff).not.toContain("a/apps/nested-project/package.json");
+  });
+
+  it("识别不改变当前项目树的外部 HEAD 快进", async () => {
+    const fixture = await createGitFixture();
+    const projectRoot = join(fixture.root, "agv-3d");
+    const siblingRoot = join(fixture.root, "china-map-3d");
+    await Promise.all([
+      mkdir(projectRoot, { recursive: true }),
+      mkdir(siblingRoot, { recursive: true }),
+    ]);
+    await writeFile(join(projectRoot, "package.json"), "{\"version\":1}\n", "utf8");
+    await runGit(fixture.root, ["add", "--all", "--", "."]);
+    await runGit(fixture.root, [
+      "commit",
+      "--quiet",
+      "--no-verify",
+      "-m",
+      "添加子项目",
+    ]);
+    const expectedHead = (await runGit(fixture.root, ["rev-parse", "HEAD"])).trim();
+    const workspace = new GitWorkspace(projectRoot);
+    await writeFile(join(projectRoot, "package.json"), "{\"version\":2}\n", "utf8");
+    const candidateBefore = await workspace.captureCandidate();
+
+    await writeFile(
+      join(siblingRoot, "package.json"),
+      "{\"name\":\"china-map-3d\"}\n",
+      "utf8",
+    );
+    await runGit(fixture.root, ["add", "--", "china-map-3d"]);
+    await runGit(fixture.root, [
+      "commit",
+      "--quiet",
+      "--no-verify",
+      "--only",
+      "-m",
+      "init: china-map-3d",
+      "--",
+      "china-map-3d",
+    ]);
+    const currentHead = (await runGit(fixture.root, ["rev-parse", "HEAD"])).trim();
+
+    /*
+     * 故障现场的兄弟项目提交只推进祖先链，不改变 agv-3d 端点树或冻结候选。
+     * 基础设施返回可验证事实，是否接受该前移仍由应用层统一决定。
+     */
+    await expect(workspace.inspectHeadAdvance({
+      expectedHead,
+      currentHead,
+    })).resolves.toEqual({
+      kind: "descendant",
+      changedProjectFiles: [],
+    });
+    await expect(workspace.captureCandidate()).resolves.toEqual(candidateBefore);
+  });
+
+  it("报告外部 HEAD 快进引入的当前项目文件变化", async () => {
+    const fixture = await createGitFixture();
+    const projectRoot = join(fixture.root, "agv-3d");
+    await mkdir(projectRoot, { recursive: true });
+    await writeFile(join(projectRoot, "package.json"), "{\"version\":1}\n", "utf8");
+    await runGit(fixture.root, ["add", "--all", "--", "."]);
+    await runGit(fixture.root, [
+      "commit",
+      "--quiet",
+      "--no-verify",
+      "-m",
+      "添加子项目",
+    ]);
+    const expectedHead = (await runGit(fixture.root, ["rev-parse", "HEAD"])).trim();
+    await writeFile(join(projectRoot, "package.json"), "{\"version\":2}\n", "utf8");
+    await runGit(fixture.root, ["add", "--all", "--", "."]);
+    await runGit(fixture.root, [
+      "commit",
+      "--quiet",
+      "--no-verify",
+      "-m",
+      "修改当前项目",
+    ]);
+    const currentHead = (await runGit(fixture.root, ["rev-parse", "HEAD"])).trim();
+    const workspace = new GitWorkspace(projectRoot);
+
+    await expect(workspace.inspectHeadAdvance({
+      expectedHead,
+      currentHead,
+    })).resolves.toEqual({
+      kind: "descendant",
+      changedProjectFiles: ["package.json"],
+    });
   });
 
   it("expected fingerprint 对应的候选发生变化时拒绝提交", async () => {

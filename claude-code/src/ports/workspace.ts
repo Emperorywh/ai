@@ -10,6 +10,13 @@ export interface WorkspaceIdentity {
   readonly head: string;
 }
 
+export type WorkspaceHeadAdvance =
+  | {
+      readonly kind: "descendant";
+      readonly changedProjectFiles: readonly string[];
+    }
+  | { readonly kind: "diverged" };
+
 export interface CandidateSnapshot {
   readonly fingerprint: string;
   readonly files: readonly CandidateFileSnapshot[];
@@ -53,9 +60,28 @@ export interface TaskCompletionEvidence {
  * Workspace 仅作为默认组合根的聚合门面，不再迫使阶段之间共享巨型基础设施接口。
  */
 export interface WorkspaceIdentityStore {
-  getStateDirectory(): Promise<string>;
   getIdentity(): Promise<WorkspaceIdentity>;
   assertClean(): Promise<void>;
+}
+
+/*
+ * Run 状态按项目隔离，进程锁则按共享 HEAD、索引和工作树的 Git worktree 隔离。
+ * 两类目录具有不同所有权，不能继续用同一个项目状态目录隐式承担两种职责。
+ */
+export interface WorkspaceControlPaths {
+  getStateDirectory(): Promise<string>;
+  getLockDirectory(): Promise<string>;
+}
+
+/*
+ * 历史检查只返回可验证的 Git 事实，不在基础设施层决定编排器是否接受 HEAD 前移。
+ * changedProjectFiles 比布尔值保留更多诊断信息，应用层可以给出可推导的拒绝原因。
+ */
+export interface WorkspaceHistoryInspector {
+  inspectHeadAdvance(input: {
+    expectedHead: string;
+    currentHead: string;
+  }): Promise<WorkspaceHeadAdvance>;
 }
 
 export interface CandidateStore {
@@ -99,6 +125,8 @@ export interface TaskCompletionLedger {
 
 export interface Workspace
   extends WorkspaceIdentityStore,
+    WorkspaceControlPaths,
+    WorkspaceHistoryInspector,
     CandidateStore,
     CandidateQuarantine,
     TaskCommitter,

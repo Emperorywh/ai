@@ -20,6 +20,7 @@ export * from "./application/task-resource-budget.js";
 export * from "./application/task-stage-support.js";
 export * from "./application/terminal-candidate-service.js";
 export * from "./application/worker-execution-guard.js";
+export * from "./application/workspace-baseline-resolver.js";
 export * from "./application/orchestrator-policy.js";
 export * from "./domain/agent-result.js";
 export * from "./domain/errors.js";

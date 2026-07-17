@@ -19,6 +19,7 @@ import { TerminalCandidateService } from "../application/terminal-candidate-serv
 import { TaskProgressReconciler } from "../application/task-progress-reconciler.js";
 import { TaskResourceBudget } from "../application/task-resource-budget.js";
 import { WorkerExecutionGuard } from "../application/worker-execution-guard.js";
+import { WorkspaceBaselineResolver } from "../application/workspace-baseline-resolver.js";
 import { ClaudeAgentSdkExecutor } from "../infrastructure/claude/claude-agent-sdk-executor.js";
 import { SdkClaudeConnectionSettingsResolver } from "../infrastructure/claude/claude-connection-settings-resolver.js";
 import { SdkClaudeModelResolver } from "../infrastructure/claude/claude-model-resolver.js";
@@ -57,6 +58,11 @@ export async function createOrchestratorRuntime(
   const loaded = await loadProject(projectRoot);
   const workspace = new GitWorkspace(loaded.projectRoot);
   const stateDirectory = await workspace.getStateDirectory();
+  const lockDirectory = await workspace.getLockDirectory();
+  /*
+   * 状态目录保持项目级隔离，锁目录则覆盖共享 HEAD、索引和文件树的整个 Git worktree。
+   * 组合根显式装配两种作用域，持久化实现不再猜测 Git 资源所有权。
+   */
   const stateStore = new FileStateStore(stateDirectory);
   const clock = new SystemClock();
   const timeFormatter = new BeijingTimeFormatter();
@@ -83,6 +89,7 @@ export async function createOrchestratorRuntime(
   const promptBuilder = new PromptBuilder();
   const resourceBudget = new TaskResourceBudget();
   const stageSupport = new TaskStageSupport(clock);
+  const baselineResolver = new WorkspaceBaselineResolver(workspace);
   const projectContext = new FileProjectContextProvider();
   const taskExecution = new TaskExecutionService(
     new ImplementationStage(
@@ -105,7 +112,7 @@ export async function createOrchestratorRuntime(
       resourceBudget,
       stageSupport,
     ),
-    new CommitStage(workspace, stageSupport),
+    new CommitStage(workspace, stageSupport, baselineResolver),
   );
   const checkpoints = new RunCheckpointWriter(stateStore, logger, clock);
 
@@ -117,10 +124,10 @@ export async function createOrchestratorRuntime(
       taskExecution,
       taskProgress: new TaskProgressReconciler(workspace),
       stateStore,
-      runLock: new FileRunLock(stateDirectory),
+      runLock: new FileRunLock(lockDirectory),
       workspace,
       checkpoints,
-      resumeValidator: new RunResumeValidator(workspace),
+      resumeValidator: new RunResumeValidator(workspace, baselineResolver),
       finalizer: new RunFinalizer(),
       artifacts: new RunArtifactWriter(stateStore, timeFormatter),
       terminalCandidates: new TerminalCandidateService(

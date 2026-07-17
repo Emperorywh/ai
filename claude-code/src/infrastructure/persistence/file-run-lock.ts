@@ -1,5 +1,5 @@
 /*
- * 锁文件用独占创建保证同一规范化项目同时只有一个编排器进程，解析不完整的锁一律按占用处理。
+ * 锁文件用独占创建保证同一 Git worktree 同时只有一个编排器进程，解析不完整的锁一律按占用处理。
  * 只有确认记录合法且 PID 已不存在时才回收旧锁，避免创建与写入窗口被另一个进程误删。
  */
 import { randomUUID } from "node:crypto";
@@ -48,7 +48,7 @@ export class FileRunLock implements RunLock {
         }
         if (this.isProcessAlive(existing.pid)) {
           throw new RunLockedError(
-            `项目已有运行中的编排器：runId=${existing.runId}，pid=${existing.pid}`,
+            `当前 Git worktree 已有运行中的编排器：runId=${existing.runId}，pid=${existing.pid}`,
           );
         }
         await unlink(this.lockPath).catch((unlinkError: unknown) => {

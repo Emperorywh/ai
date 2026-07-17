@@ -10,6 +10,7 @@ import {
 import type { LoadedProject, TaskDefinition } from "../domain/project.js";
 import {
   createInitialRunState,
+  replaceExpectedHead,
   type RunState,
 } from "../domain/run-state.js";
 import type { Clock } from "../ports/clock.js";
@@ -169,17 +170,43 @@ export class QueueOrchestrator {
 
     const lock = await this.runLock.acquire(runId);
     try {
-      await this.resumeValidator.validateWorkspace(existing);
       const orderedTasks = loaded.tasks;
-      await this.checkpoint(
+      const workspaceResolution = await this.resumeValidator.validateWorkspace(
         existing,
+      );
+      /*
+       * 恢复校验只返回可接受的新 HEAD，驱动器负责先把它写入 run_resumed checkpoint。
+       * 后续 CommitStage 因而始终从持久化基线继续，不依赖本进程内的临时协调结果。
+       */
+      const resumedState = workspaceResolution.reconciledHead === undefined
+        ? existing
+        : replaceExpectedHead(
+            existing,
+            workspaceResolution.reconciledHead,
+            this.now(),
+          );
+      await this.checkpoint(
+        resumedState,
         orderedTasks,
         undefined,
         "run_resumed",
-        this.describeTaskQueue("恢复已有运行", orderedTasks),
-        { taskOrder: orderedTasks.map((task) => task.id) },
+        this.describeTaskQueue(
+          workspaceResolution.reconciledHead === undefined
+            ? "恢复已有运行"
+            : `恢复已有运行，项目外 HEAD 快进已协调至 ${workspaceResolution.reconciledHead}`,
+          orderedTasks,
+        ),
+        {
+          taskOrder: orderedTasks.map((task) => task.id),
+          ...(workspaceResolution.reconciledHead === undefined
+            ? {}
+            : {
+                previousExpectedHead: existing.workspace.expectedHead,
+                reconciledExpectedHead: workspaceResolution.reconciledHead,
+              }),
+        },
       );
-      return await this.drive(loaded, orderedTasks, existing, true, signal);
+      return await this.drive(loaded, orderedTasks, resumedState, true, signal);
     } finally {
       await lock.release();
     }

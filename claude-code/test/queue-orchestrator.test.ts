@@ -17,9 +17,14 @@ import { TaskProgressReconciler } from "../src/application/task-progress-reconci
 import { TaskResourceBudget } from "../src/application/task-resource-budget.js";
 import { TaskStageSupport } from "../src/application/task-stage-support.js";
 import { TerminalCandidateService } from "../src/application/terminal-candidate-service.js";
+import { WorkspaceBaselineResolver } from "../src/application/workspace-baseline-resolver.js";
 import type { AgentRunOutcome } from "../src/domain/agent-result.js";
 import { InfrastructureError } from "../src/domain/errors.js";
-import { createInitialRunState, transitionTask } from "../src/domain/run-state.js";
+import {
+  createInitialRunState,
+  transitionTask,
+  type RunState,
+} from "../src/domain/run-state.js";
 import { BeijingTimeFormatter } from "../src/infrastructure/time/beijing-time-formatter.js";
 import type { AgentRunRequest } from "../src/ports/agent-executor.js";
 import {
@@ -648,6 +653,73 @@ describe("QueueOrchestrator", () => {
     ]);
   });
 
+  it("提交前自动协调仅影响兄弟项目的 HEAD 快进", async () => {
+    const workspace = new AdvanceHeadDuringReviewWorkspace();
+    const fixture = createFixture(workspace);
+    const loaded = createLoadedProject([{ id: "TASK-001" }]);
+
+    const result = await fixture.orchestrator.start(loaded);
+
+    /*
+     * Reviewer 材料冻结后模拟兄弟项目提交，CommitStage 必须先 checkpoint 新基线再提交。
+     * 最终提交父级因此是 sibling-head，不能先报基础设施故障再依赖人工 resume。
+     */
+    expect(result.state.status).toBe("completed");
+    expect(workspace.commitExpectedHeads).toEqual(["sibling-head"]);
+    expect(fixture.stateStore.snapshots.some(
+      (snapshot) => snapshot.workspace.expectedHead === "sibling-head",
+    )).toBe(true);
+    expect(fixture.logger.events).toContainEqual(
+      expect.objectContaining({
+        type: "task_progress",
+        details: {
+          previousExpectedHead: "base-sha",
+          reconciledExpectedHead: "sibling-head",
+        },
+      }),
+    );
+  });
+
+  it("恢复 committing 快照时协调既有的项目外 HEAD 快进", async () => {
+    const workspace = new RecordingWorkspace();
+    workspace.advanceHead("sibling-head");
+    const fixture = createFixture(workspace);
+    const loaded = createLoadedProject([{ id: "TASK-001" }]);
+    const committing = createCommittingState(loaded);
+    await fixture.stateStore.save(committing);
+
+    const result = await fixture.orchestrator.resume(loaded, committing.runId);
+
+    /*
+     * 该状态形状复现故障现场：审核已通过、候选仍在、expectedHead 落后一个兄弟项目提交。
+     * resume 必须先持久化 sibling-head，再直接完成提交且不重新运行 Worker 或 Reviewer。
+     */
+    expect(result.state.status).toBe("completed");
+    expect(workspace.commitExpectedHeads).toEqual(["sibling-head"]);
+    expect(fixture.agent.requests).toEqual([]);
+    expect(fixture.logger.events[0]).toMatchObject({
+      type: "run_resumed",
+      details: {
+        previousExpectedHead: "base-sha",
+        reconciledExpectedHead: "sibling-head",
+      },
+    });
+  });
+
+  it("恢复时继续拒绝改变当前项目树的 HEAD 前移", async () => {
+    const workspace = new RecordingWorkspace();
+    workspace.advanceHead("project-changed-head", ["src/app.ts"]);
+    const fixture = createFixture(workspace);
+    const loaded = createLoadedProject([{ id: "TASK-001" }]);
+    const committing = createCommittingState(loaded);
+    await fixture.stateStore.save(committing);
+
+    await expect(
+      fixture.orchestrator.resume(loaded, committing.runId),
+    ).rejects.toThrow("当前项目已变化：src/app.ts");
+    expect(workspace.commits).toEqual([]);
+  });
+
   it("任务阻塞后隔离候选并立即终止线性队列", async () => {
     const agent = new RecordingAgent((request) =>
       request.taskId === "TASK-001"
@@ -755,6 +827,19 @@ class NoChangeWorkspace extends RecordingWorkspace {
   }
 }
 
+class AdvanceHeadDuringReviewWorkspace extends RecordingWorkspace {
+  private advanced = false;
+
+  public override async captureReviewCandidate() {
+    const review = await super.captureReviewCandidate();
+    if (!this.advanced) {
+      this.advanced = true;
+      this.advanceHead("sibling-head");
+    }
+    return review;
+  }
+}
+
 class FailOnceCandidateWorkspace extends RecordingWorkspace {
   private shouldFail = true;
 
@@ -809,6 +894,70 @@ class FailOnceReviewLaunchAgent extends RecordingAgent {
   }
 }
 
+function createCommittingState(
+  loaded: ReturnType<typeof createLoadedProject>,
+): RunState {
+  const initial = createInitialRunState({
+    runId: "run-commit-head-advance",
+    projectHash: loaded.projectHash,
+    projectRoot: loaded.projectRoot,
+    workspace: {
+      repositoryRoot: "/project",
+      branch: "main",
+      expectedHead: "base-sha",
+    },
+    tasks: [{ taskId: "TASK-001" }],
+    now: "2026-07-13T00:00:00.000Z",
+  });
+  const task = initial.tasks["TASK-001"];
+  if (task === undefined) {
+    throw new Error("测试状态缺少 TASK-001");
+  }
+  /*
+   * 直接构造审核完成后的合法 checkpoint，聚焦恢复入口而不重复执行前置 Agent 阶段。
+   * 字段满足 RunState v6 的尝试时间线、候选指纹与 Reviewer 通过证据不变量。
+   */
+  return {
+    ...initial,
+    updatedAt: "2026-07-13T00:00:04.000Z",
+    tasks: {
+      "TASK-001": {
+        ...task,
+        status: "committing",
+        candidateFingerprint: "stable-candidate",
+        attempts: [{
+          number: 1,
+          kind: "implementation",
+          sessionId: "11111111-1111-4111-8111-111111111111",
+          sessionInitialized: true,
+          requestedModel: "claude-sonnet-5",
+          resolvedModel: "claude-sonnet-5",
+          startedAt: "2026-07-13T00:00:01.000Z",
+          finishedAt: "2026-07-13T00:00:02.000Z",
+          outcome: "completed",
+          verifications: [{
+            scope: "full",
+            command: "pnpm test",
+            status: "passed",
+            summary: "测试通过",
+          }],
+        }],
+        reviewAttempts: [{
+          number: 1,
+          sessionId: "22222222-2222-4222-8222-222222222222",
+          sessionInitialized: true,
+          requestedModel: "claude-sonnet-5",
+          resolvedModel: "claude-sonnet-5",
+          startedAt: "2026-07-13T00:00:02.000Z",
+          finishedAt: "2026-07-13T00:00:03.000Z",
+          outcome: "approved",
+        }],
+        updatedAt: "2026-07-13T00:00:04.000Z",
+      },
+    },
+  };
+}
+
 function createFixture(
   workspace = new RecordingWorkspace(),
   agent = new RecordingAgent(),
@@ -822,6 +971,7 @@ function createFixture(
   const promptBuilder = new PromptBuilder();
   const resourceBudget = new TaskResourceBudget();
   const stageSupport = new TaskStageSupport(clock);
+  const baselineResolver = new WorkspaceBaselineResolver(workspace);
   const taskExecution = new TaskExecutionService(
     new ImplementationStage(
       agent,
@@ -843,7 +993,7 @@ function createFixture(
       resourceBudget,
       stageSupport,
     ),
-    new CommitStage(workspace, stageSupport),
+    new CommitStage(workspace, stageSupport, baselineResolver),
   );
   const checkpoints = new RunCheckpointWriter(stateStore, logger, clock);
   const orchestrator = new QueueOrchestrator({
@@ -853,7 +1003,7 @@ function createFixture(
     runLock: lock,
     workspace,
     checkpoints,
-    resumeValidator: new RunResumeValidator(workspace),
+    resumeValidator: new RunResumeValidator(workspace, baselineResolver),
     finalizer: new RunFinalizer(),
     artifacts: new RunArtifactWriter(stateStore, timeFormatter),
     terminalCandidates: new TerminalCandidateService(

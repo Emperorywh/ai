@@ -10,7 +10,10 @@ import {
   InfrastructureError,
 } from "../../domain/errors.js";
 import { PRODUCT_IDENTITY } from "../../product-identity.js";
-import type { WorkspaceIdentity } from "../../ports/workspace.js";
+import type {
+  WorkspaceHeadAdvance,
+  WorkspaceIdentity,
+} from "../../ports/workspace.js";
 import { normalizeGitPath } from "./git-command-runner.js";
 import type { GitCommandRunner } from "./git-command-runner.js";
 
@@ -36,6 +39,18 @@ export class GitProjectBoundary {
     return resolve(absoluteCommonDirectory, PRODUCT_IDENTITY.slug, projectKey);
   }
 
+  public async getLockDirectory(): Promise<string> {
+    /*
+     * 兄弟子项目共享同一 worktree 的 HEAD、索引与文件树，因此必须竞争同一把锁。
+     * linked worktree 拥有独立 git-dir，可在不共享这些可变资源时保持并行能力。
+     */
+    const gitDirectory = await this.git.run(["rev-parse", "--git-dir"]);
+    const absoluteGitDirectory = await realpath(
+      resolve(this.projectRoot, gitDirectory.trim()),
+    );
+    return resolve(absoluteGitDirectory, PRODUCT_IDENTITY.slug);
+  }
+
   public async getIdentity(): Promise<WorkspaceIdentity> {
     const [repositoryRoot, branch, head] = await Promise.all([
       this.git.run(["rev-parse", "--show-toplevel"]),
@@ -46,6 +61,44 @@ export class GitProjectBoundary {
       repositoryRoot: normalizeGitPath(await realpath(repositoryRoot.trim())),
       branch: branch.trim(),
       head: head.trim(),
+    };
+  }
+
+  public async inspectHeadAdvance(input: {
+    expectedHead: string;
+    currentHead: string;
+  }): Promise<WorkspaceHeadAdvance> {
+    /*
+     * merge-base 精确区分快进与分叉/回退；只有快进关系才继续比较项目树。
+     * 端点树无差异即可证明已审核候选仍以相同项目内容为基线，不依赖中间提交标题或作者。
+     */
+    const mergeBase = (
+      await this.git.run([
+        "merge-base",
+        input.expectedHead,
+        input.currentHead,
+      ])
+    ).trim();
+    if (mergeBase !== input.expectedHead) {
+      return { kind: "diverged" };
+    }
+    const changedProjectFiles = await this.git.nullList([
+      "diff",
+      input.expectedHead,
+      input.currentHead,
+      "--name-only",
+      "--no-renames",
+      "--relative",
+      "-z",
+      "--",
+      ".",
+    ]);
+    return {
+      kind: "descendant",
+      changedProjectFiles: [...changedProjectFiles]
+        .map(normalizeGitPath)
+        .filter(Boolean)
+        .sort(),
     };
   }
 

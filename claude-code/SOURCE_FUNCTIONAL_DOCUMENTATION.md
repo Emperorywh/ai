@@ -39,6 +39,7 @@
 - `implementation-stage.ts`：Worker 新建、恢复、repair、资源收敛与候选冻结。
 - `review-stage.ts`：全新只读 Reviewer、审核尝试历史和修复反馈。
 - `commit-stage.ts`：候选、契约、前驱与 Git 完成证据的原子提交。
+- `workspace-baseline-resolver.ts`：仓库身份、分支和项目树不变快进的统一基线判定。
 - `task-resource-budget.ts`：从持久化尝试历史计算 TASK 累计资源上限。
 - `worker-execution-guard.ts`：不可逆工具与命令策略。
 - `terminal-candidate-service.ts`：blocked/failed 队首候选的唯一归档入口。
@@ -58,7 +59,7 @@
 - `agent-model-resolver.ts`：应用层读取当前 Claude 用户模型的最小端口，不暴露 Provider 设置与凭据。
 - `execution-guard.ts`：SDK 无关的工具调用允许/拒绝协议。
 - `project-context-provider.ts`：确定性项目导航清单编译边界。
-- `workspace.ts`：拆分为仓库身份、候选存储、隔离区、提交器、提交恢复和完成账本端口；`Workspace` 只是默认聚合门面。
+- `workspace.ts`：拆分为仓库身份、控制路径、历史检查、候选存储、隔离区、提交器、提交恢复和完成账本端口；`Workspace` 只是默认聚合门面。
 - `state-store.ts`、`project-repository.ts`、`run-lock.ts`：状态、静态项目输入与单实例锁。
 - `event-logger.ts`、`clock.ts`、`time-formatter.ts`：观察与时间边界。
 
@@ -126,7 +127,7 @@ title: 实现用户列表
 
 `QueueOrchestrator.start()`：
 
-1. 创建北京时间 Run ID并取得项目锁；
+1. 创建北京时间 Run ID并取得 Git worktree 共享锁；
 2. 要求整个仓库干净并记录仓库根、分支与 HEAD；
 3. 核验当前 HEAD 的连续任务完成证据；
 4. 创建 RunState v6并写启动 checkpoint；
@@ -247,7 +248,7 @@ Git 基础设施分为：
 - `GitCandidateQuarantine`：阻塞/失败候选归档；
 - `GitCommandRunner`：统一进程超时和错误映射。
 
-提交前验证 HEAD、项目外改动和冻结指纹。每个完成 TASK 创建独立提交并写入：
+提交前验证 HEAD、项目外改动和冻结指纹。同一 worktree 的兄弟项目共享进程锁；RunState 仍按项目隔离。若锁外操作使 HEAD 沿祖先链前移，但前后两个端点的当前项目树完全一致，应用层会先 checkpoint 新 expected HEAD 再提交；分叉、回退或项目内变化继续拒绝。每个完成 TASK 创建独立提交并写入：
 
 - `Apex-Coding-Agent-Run`
 - `Apex-Coding-Agent-Project`
@@ -271,7 +272,7 @@ Git 基础设施分为：
 
 完成契约版本为 v6；旧执行模型产生的契约哈希不会被当前系统复用，也没有迁移或降级分支。
 
-恢复前统一核验项目哈希、项目根、RunState 语义、仓库根、分支与 HEAD。Worker init 已落盘时使用 SDK resume；未 init 时替换 sessionId 并复用同一 attempt，基础设施启动故障不会制造 repair 历史；Reviewer 崩溃后结束旧尝试并创建全新只读会话；committing 的 HEAD 变化只接受精确 trailer 证明的“提交成功、状态未落盘”窗口。
+恢复前统一核验项目哈希、项目根、RunState 语义、仓库根、分支与 HEAD。Worker init 已落盘时使用 SDK resume；未 init 时替换 sessionId 并复用同一 attempt，基础设施启动故障不会制造 repair 历史；Reviewer 崩溃后结束旧尝试并创建全新只读会话。HEAD 变化只接受两条可推导路径：精确 trailer 证明的“任务提交成功、状态未落盘”，或旧 HEAD 为当前 HEAD 祖先且当前项目端点树完全一致的项目外快进；后者必须先更新 checkpoint 才能继续。
 
 ## 12. RunState v6 与关键不变量
 
