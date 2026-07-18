@@ -1,6 +1,6 @@
 {
   "name": "apex-coding-agent",
-  "version": "0.1.3",
+  "version": "1.0.0",
   "description": "基于 Claude Agent SDK 的严格线性、单并发、可恢复编码任务代理",
   "type": "module",
   "bin": {
@@ -33,7 +33,7 @@
   },
   "packageManager": "pnpm@11.10.0",
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.3.211",
+    "@anthropic-ai/claude-agent-sdk": "0.3.212",
     "commander": "^15.0.0",
     "yaml": "^2.9.0",
     "zod": "^4.4.3"
