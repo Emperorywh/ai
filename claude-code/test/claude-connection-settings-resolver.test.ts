@@ -13,10 +13,30 @@ import {
 } from "../src/infrastructure/claude/claude-user-settings-source.js";
 
 describe("Claude 用户设置投影", () => {
-  it("从 Claude 用户配置读取 CC Switch 当前模型", async () => {
+  it("从 CC Switch 写入的 ANTHROPIC_MODEL 读取当前模型", async () => {
     const loadSettings: ClaudeSettingsLoader = async () => ({
       effective: {
-        model: "glm-5.2",
+        env: { ANTHROPIC_MODEL: " kimi-k3[1m] " },
+      },
+      provenance: {},
+      sources: [],
+    });
+    const resolver = new SdkClaudeModelResolver(
+      new SdkClaudeUserSettingsSource(loadSettings),
+    );
+
+    /*
+     * CC Switch 的真实用户配置只有 env 映射，解析器必须去除外围空白并保留完整模型名。
+     * 解析结果会被应用层持久化为 attempt.requestedModel，并用于 SDK 精确握手。
+     */
+    await expect(resolver.resolveModel("C:\\target-project"))
+      .resolves.toBe("kimi-k3[1m]");
+  });
+
+  it("遵循 Claude Code 优先级让 ANTHROPIC_MODEL 覆盖 model", async () => {
+    const loadSettings: ClaudeSettingsLoader = async () => ({
+      effective: {
+        model: "settings-model",
         env: { ANTHROPIC_MODEL: "environment-model" },
       },
       provenance: {},
@@ -27,8 +47,26 @@ describe("Claude 用户设置投影", () => {
     );
 
     /*
-     * 标准 model 是 Claude Code 的模型选择入口，应覆盖同一设置中的环境映射。
-     * 解析结果会被应用层持久化为 attempt.requestedModel，并用于 SDK 精确握手。
+     * 环境模型与设置模型同时存在时必须保持 Claude Code 的确定性优先级。
+     * Apex 传给 SDK 的显式模型由该结果生成，不能与终端中的 Claude 会话产生分歧。
+     */
+    await expect(resolver.resolveModel("C:\\target-project"))
+      .resolves.toBe("environment-model");
+  });
+
+  it("在没有 ANTHROPIC_MODEL 时读取标准 model 设置", async () => {
+    const loadSettings: ClaudeSettingsLoader = async () => ({
+      effective: { model: "glm-5.2" },
+      provenance: {},
+      sources: [],
+    });
+    const resolver = new SdkClaudeModelResolver(
+      new SdkClaudeUserSettingsSource(loadSettings),
+    );
+
+    /*
+     * 顶层 model 仍是 Claude Code 官方支持的持久模型入口。
+     * 该分支保证通过 /model 保存的用户选择可以直接驱动新的 Apex attempt。
      */
     await expect(resolver.resolveModel("C:\\target-project"))
       .resolves.toBe("glm-5.2");
@@ -46,10 +84,10 @@ describe("Claude 用户设置投影", () => {
 
     /*
      * requestedModel 必须来自明确配置，不能拿 SDK 隐式默认值填充运行状态。
-     * 提前失败也能让用户在 Agent 工具执行前修正 CC Switch 选择。
+     * 两个官方入口都缺失时提前失败，让用户在 Agent 工具执行前修正 CC Switch 选择。
      */
     await expect(resolver.resolveModel("C:\\target-project"))
-      .rejects.toThrow("Claude 用户配置缺少 model");
+      .rejects.toThrow("Claude 用户配置缺少 env.ANTHROPIC_MODEL 或 model");
   });
 
   it("从 Claude 用户配置读取 CC Switch 当前连接字段", async () => {

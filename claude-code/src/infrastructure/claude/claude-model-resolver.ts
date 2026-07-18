@@ -24,13 +24,18 @@ export class SdkClaudeModelResolver implements AgentModelResolver {
 
 export function selectClaudeModel(settings: Settings): string {
   /*
-   * model 是唯一模型事实源；即使 CC Switch 同时写入环境映射，也不维护第二套解析优先级。
-   * 缺少标准字段时直接拒绝启动，避免 fallback 或 SDK 默认值伪造 requestedModel。
+   * Claude Code 先读取 ANTHROPIC_MODEL，再读取 settings.model；CC Switch 当前把模型写入前者。
+   * 这里只复现官方的显式配置优先级，不读取 Provider 数据库，也不使用 SDK 隐式默认模型。
    */
+  const environmentModel = settings.env?.ANTHROPIC_MODEL?.trim();
+  if (environmentModel !== undefined && environmentModel.length > 0) {
+    return environmentModel;
+  }
+
   const configuredModel = settings.model?.trim();
   if (configuredModel === undefined || configuredModel.length === 0) {
     throw new ConfigurationError(
-      "Claude 用户配置缺少 model，请先通过 CC Switch 选择模型",
+      "Claude 用户配置缺少 env.ANTHROPIC_MODEL 或 model，请先通过 CC Switch 选择模型",
     );
   }
   return configuredModel;

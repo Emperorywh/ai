@@ -49,7 +49,8 @@ apex-coding-agent run
 
 Apex 不提供独立登录、不读取 `cc-switch.db`、不保存 Token。CC Switch 切换后写入的 Claude Code
 用户配置（默认 `~/.claude/settings.json`）是唯一认证入口；Apex 通过 Claude Agent SDK 的设置解析器
-读取同一份认证环境、网关和模型映射。用户配置中的 `env` 与 Claude Code 一样覆盖启动终端的同名变量。
+读取同一份认证环境、网关和模型映射。模型按 Claude Code 的显式配置优先级读取：
+`env.ANTHROPIC_MODEL` 优先于顶层 `model`；用户配置中的 `env` 同样覆盖启动终端的同名变量。
 
 Reviewer 不加载项目/本地权限设置，只投影当前 Claude 用户配置中的连接字段，因此 CC Switch 认证可用性
 不会破坏只读隔离。每个新 Agent 会话都会重新解析当前配置；切换 Provider 后，已运行的会话不变，
