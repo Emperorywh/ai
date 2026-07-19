@@ -82,6 +82,15 @@ export interface CandidateArchiveState {
 }
 
 /*
+ * Worker 阻塞报告不是 TASK 终态证据，只是等待独立 Reviewer 复核的结构化声明。
+ * 单独保存摘要与问题，避免从日志文本反向解析，也让崩溃恢复后能重建完全相同的阻塞审计提示词。
+ */
+export interface WorkerBlockerReport {
+  readonly summary: string;
+  readonly blockingQuestions: readonly string[];
+}
+
+/*
  * 完成证据说明本次 Run 是实际执行了任务，还是复用了 Git 历史中的有效完成提交。
  * 契约与前驱指纹仍以提交 trailer 为项目级事实，本字段只是便于状态展示和运行审计的投影。
  */
@@ -101,6 +110,7 @@ export interface TaskRunState {
   readonly candidateFingerprint?: string | undefined;
   readonly commitSha?: string | undefined;
   readonly completion?: TaskCompletionState | undefined;
+  readonly workerBlocker?: WorkerBlockerReport | undefined;
   readonly failureReason?: string | undefined;
   readonly candidateArchive?: CandidateArchiveState | undefined;
   readonly updatedAt: string;
@@ -182,6 +192,17 @@ const candidateArchiveStateSchema = z.object({
   archivedAt: z.string(),
 }).strict();
 
+/*
+ * 该 Schema 与 Worker 结构化输出保持相同的文本上限，防止持久化状态绕过 Agent 结果边界。
+ * 它只描述待审核报告，不把 Worker 的单方判断提升为 blocked 运行事实。
+ */
+const workerBlockerReportSchema = z.object({
+  summary: z.string().trim().min(1).max(10_000),
+  blockingQuestions: z.array(
+    z.string().trim().min(1).max(2_000),
+  ).max(50),
+}).strict();
+
 const taskCompletionStateSchema = z.object({
   origin: z.enum(["executed", "reused"]),
   evidenceRunId: z.string(),
@@ -198,6 +219,7 @@ const taskRunStateSchema = z.object({
   candidateFingerprint: z.string().optional(),
   commitSha: z.string().optional(),
   completion: taskCompletionStateSchema.optional(),
+  workerBlocker: workerBlockerReportSchema.optional(),
   failureReason: z.string().optional(),
   candidateArchive: candidateArchiveStateSchema.optional(),
   updatedAt: z.string(),

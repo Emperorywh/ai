@@ -542,6 +542,60 @@ describe("QueueOrchestrator", () => {
     ]);
   });
 
+  it("Worker 首次报告 blocked 时必须经过独立审计且不能被 approved 后提交", async () => {
+    let workerRuns = 0;
+    const agent = new RecordingAgent((request) => {
+      if (request.attemptKind === "review") {
+        return completedBehavior(request);
+      }
+      workerRuns += 1;
+      if (workerRuns > 1) {
+        return completedBehavior(request);
+      }
+      return {
+        ok: true,
+        sessionId: request.sessionId ?? "missing-session",
+        data: {
+          status: "blocked",
+          summary: "把人工界面验收误当成实现前置条件",
+          blockingQuestions: ["请人工打开浏览器确认"],
+          notes: [],
+          verifications: [],
+        },
+        costUsd: 0.01,
+        turns: 1,
+      };
+    });
+    const fixture = createFixture(new RecordingWorkspace(), agent);
+
+    /*
+     * Fake Reviewer 第一次误返回 approved；应用层必须把它归一化为 rejected，清除旧阻塞报告并交回 Worker。
+     * 第二次 Worker 完成后才能经过普通审核和提交，证明 blocked 与 approved 都不能绕过候选完成证据。
+     */
+    const result = await fixture.orchestrator.start(
+      createLoadedProject([{ id: "TASK-001" }]),
+    );
+
+    expect(result.state.status).toBe("completed");
+    expect(result.state.tasks["TASK-001"]?.attempts.map(
+      (attempt) => attempt.outcome,
+    )).toEqual(["blocked", "completed"]);
+    expect(result.state.tasks["TASK-001"]?.reviewAttempts.map(
+      (attempt) => attempt.outcome,
+    )).toEqual(["rejected", "approved"]);
+    expect(result.state.tasks["TASK-001"]?.workerBlocker).toBeUndefined();
+    expect(agent.requests.map((request) => request.attemptKind)).toEqual([
+      "implementation",
+      "review",
+      "repair",
+      "review",
+    ]);
+    expect(agent.requests[1]?.prompt).toContain("# Worker 阻塞独立审计协议");
+    expect(agent.requests[1]?.prompt).toContain("把人工界面验收误当成实现前置条件");
+    expect(agent.requests[1]?.prompt).toContain("本轮不得返回 approved");
+    expect(agent.requests[3]?.prompt).not.toContain("# Worker 阻塞报告");
+  });
+
   it("resume 恢复 Reviewer 阻塞的隔离候选并继续审核", async () => {
     let reviewRuns = 0;
     const workspace = new RecordingWorkspace();
@@ -823,23 +877,39 @@ describe("QueueOrchestrator", () => {
     expect(workspace.commits).toEqual([]);
   });
 
-  it("任务阻塞后隔离候选并立即终止线性队列", async () => {
-    const agent = new RecordingAgent((request) =>
-      request.taskId === "TASK-001"
-        ? {
-            ok: true,
-            sessionId: request.sessionId ?? "missing-session",
-            data: {
-              status: "blocked",
-              summary: "缺少产品决策",
-              blockingQuestions: ["请选择唯一交互规则"],
-              notes: [],
-              verifications: [],
-            },
-            costUsd: 0.01,
-            turns: 1,
-          }
-        : completedBehavior(request));
+  it("Reviewer 确认 Worker 的真实外部阻塞后才终止线性队列", async () => {
+    const agent = new RecordingAgent((request) => {
+      if (request.taskId !== "TASK-001") {
+        return completedBehavior(request);
+      }
+      if (request.attemptKind === "review") {
+        return {
+          ok: true,
+          sessionId: request.sessionId ?? "missing-review-session",
+          data: {
+            status: "blocked",
+            summary: "不可逆产品决策确实缺失",
+            findings: [],
+            blockingQuestions: ["请选择唯一交互规则"],
+          },
+          costUsd: 0.01,
+          turns: 1,
+        };
+      }
+      return {
+        ok: true,
+        sessionId: request.sessionId ?? "missing-session",
+        data: {
+          status: "blocked",
+          summary: "缺少产品决策",
+          blockingQuestions: ["请选择唯一交互规则"],
+          notes: [],
+          verifications: [],
+        },
+        costUsd: 0.01,
+        turns: 1,
+      };
+    });
     const fixture = createFixture(new RecordingWorkspace(), agent);
     const loaded = createLoadedProject([
       { id: "TASK-001" },
@@ -851,14 +921,21 @@ describe("QueueOrchestrator", () => {
 
     expect(result.state.status).toBe("blocked");
     expect(result.state.tasks["TASK-001"]?.status).toBe("blocked");
+    expect(result.state.tasks["TASK-001"]?.reviewAttempts.at(-1)?.outcome)
+      .toBe("blocked");
+    expect(result.state.tasks["TASK-001"]?.workerBlocker).toEqual({
+      summary: "缺少产品决策",
+      blockingQuestions: ["请选择唯一交互规则"],
+    });
     expect(result.state.tasks["TASK-001"]?.candidateArchive?.reference).toBe(
       "refs/quarantine/1",
     );
     expect(result.state.tasks["TASK-002"]?.status).toBe("pending");
     expect(result.state.tasks["TASK-003"]?.status).toBe("pending");
     expect(fixture.workspace.commits).toEqual([]);
-    expect(agent.requests.map((request) => request.taskId)).toEqual([
-      "TASK-001",
+    expect(agent.requests.map((request) => request.attemptKind)).toEqual([
+      "implementation",
+      "review",
     ]);
     expect(result.artifacts).toHaveLength(2);
   });

@@ -38,7 +38,7 @@ describe("assertRunStateInvariants", () => {
     };
 
     expect(() => assertRunStateInvariants(damaged, tasks)).toThrow(
-      "缺少已完成的 Worker 尝试或验证证据",
+      "缺少已完成候选或待审计 Worker 阻塞报告",
     );
   });
 

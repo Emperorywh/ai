@@ -257,7 +257,7 @@ export class QueueOrchestrator {
 
   /*
    * 自动重开严格限定为“最后一次 Reviewer 已结构化返回 blocked 且冻结候选仍可定位”的终态。
-   * Worker 阻塞、资源耗尽、失败和 completed 继续保持终态，避免 resume 偷偷扩大原任务权限或预算。
+   * Worker 阻塞报告只有经 Reviewer 确认后才满足该条件；资源耗尽、失败和 completed 继续保持终态。
    */
   private findReopenableBlockedReview(state: RunState):
     | (TaskRunState & { readonly candidateFingerprint: string })

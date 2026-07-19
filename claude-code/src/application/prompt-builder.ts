@@ -9,10 +9,13 @@ import type {
 } from "../domain/project.js";
 import type { VerificationEvidence } from "../domain/agent-result.js";
 import type { ProjectContextManifest } from "../domain/project-context.js";
+import type { WorkerBlockerReport } from "../domain/run-state.js";
 const writeSafetyRules = `
 你只负责当前一个 TASK。严格遵守以下边界：
 - 可以自主调用子 Agent、终端、技能和 MCP 完成当前 TASK；不要询问用户，优先依据现有规格和代码自行作出可逆决策。
 - 只有缺少无法从项目推导的外部信息、凭据或不可逆产品决策时，才返回 blocked 和 blockingQuestions。
+- 返回 blocked 前必须先穷尽项目内代码、文档、可用工具和所有不依赖该外部事实的当前 TASK 工作；不得把尚未尝试、可以修复或可以验证的工作包装成人工问题。
+- 人工浏览器、视觉和发布验收发生在代码候选完成之后，不能单独作为实现阻塞理由；同时不得伪造人工核对记录、外部数据、凭据或合规结论。
 - Git 只用于 status、diff、log、show 等读取；不执行任何会改变工作区、索引、引用、历史或远端的 Git 操作。
 - 不部署，不启动浏览器、UI 自动化、开发服务器或 watch 进程。
 - 优先长期架构正确性，禁止临时 patch、重复逻辑、隐式状态和跨层耦合。
@@ -36,6 +39,20 @@ const reviewDecisionProtocol = `
 - 只有正确性确实无法判断，且缺少的事实属于项目内无法推导的外部信息、凭据或不可逆产品决策时，才返回 blocked；blockingQuestions 必须准确指出缺少的外部事实。
 - 对项目已有证据支持的可逆实现选择直接作出审核判断：满足契约就批准，不满足就拒绝。不得仅因希望维护者确认偏好而返回 blocked。
 - 浏览器与 UI 验收按系统边界留给人工，不会阻止代码候选进入提交；只评估自动化证据与静态审核能覆盖的正确性风险。
+`;
+
+/*
+ * Worker 的 blocked 只是待审核声明：Reviewer 必须区分真正外部依赖、尚未穷尽的项目内工作和纯人工验收。
+ * 特别禁止用 approved 接受一个未完成候选；应用层仍会把这种协议误用归一化为 rejected 并送回 Worker。
+ */
+const workerBlockerReviewProtocol = `
+# Worker 阻塞独立审计协议
+- 当前 Worker 没有报告实现完成；本轮目标是审计它的 blocked 声明，而不是批准代码提交。
+- 先检查 TASK、SPEC、现有代码、Worker 已落盘候选和可用的非交互工具，判断 blockingQuestions 是否真的是项目内无法推导的外部信息、凭据或不可逆产品决策。
+- 如果仍有可通过代码、资产、测试、文档、可用工具或可逆实现选择推进的工作，返回 rejected，并至少写入一条 medium 或更高 finding，明确告诉 Worker 下一步应完成什么。
+- 人工浏览器、视觉或发布验收通常发生在代码候选完成之后，不能单独证明实现阶段需要 blocked；应让 Worker 先完成可自动实现和静态验证的交付物。
+- 只有核心正确性确实依赖当前无法取得的外部事实，且继续实现会迫使 Worker 伪造数据、凭据、人工记录或不可逆决策时，才返回 blocked。
+- 本轮不得返回 approved；阻塞不成立时必须返回 rejected，阻塞成立时必须返回 blocked。
 `;
 
 export class PromptBuilder {
@@ -103,6 +120,7 @@ export class PromptBuilder {
     diff: string,
     verifications: readonly VerificationEvidence[],
     projectContext: ProjectContextManifest,
+    workerBlocker?: WorkerBlockerReport,
   ): string {
     return [
       "# 审核目标",
@@ -112,6 +130,13 @@ export class PromptBuilder {
       this.renderProjectContext(projectContext),
       this.renderTaskContext(loaded, task),
       reviewDecisionProtocol,
+      ...(workerBlocker === undefined
+        ? []
+        : [
+            workerBlockerReviewProtocol,
+            "# Worker 阻塞报告",
+            this.renderWorkerBlocker(workerBlocker),
+          ]),
       "# 实际变更文件",
       changedFiles.map((file) => `- ${file}`).join("\n"),
       "# Git diff",
@@ -203,6 +228,21 @@ export class PromptBuilder {
     return verifications.map((verification) =>
       `- [${verification.status}] [${verification.scope}] ${verification.command}：${verification.summary}`
     ).join("\n");
+  }
+
+  /*
+   * 摘要和问题来自已经通过结构化 Schema 的持久化事实，这里只负责确定性投影。
+   * 空问题数组仍显式展示，避免 Reviewer 把缺少具体问题误认为日志截断或上下文丢失。
+   */
+  private renderWorkerBlocker(report: WorkerBlockerReport): string {
+    const questions = report.blockingQuestions.length === 0
+      ? "- <Worker 未提供具体 blockingQuestions>"
+      : report.blockingQuestions.map((question) => `- ${question}`).join("\n");
+    return [
+      `摘要：${report.summary}`,
+      "阻塞问题：",
+      questions,
+    ].join("\n");
   }
 
 }

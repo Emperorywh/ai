@@ -226,16 +226,24 @@ export class ImplementationStage {
       return this.handleFailure(input, finishedState, outcome);
     }
     if (outcome.data.status === "blocked") {
-      const reason = outcome.data.blockingQuestions.join("；") || outcome.data.summary;
+      /*
+       * Worker 只能报告阻塞，不能凭单次会话直接终结严格线性 Run。
+       * 先冻结它已经产生的候选，再由全新只读 Reviewer 对外部依赖、人工验收边界和剩余可执行工作做独立审计。
+       */
       return {
         state: transitionTask(
           finishedState,
           input.task.id,
-          "blocked",
+          "candidate_pending",
           this.support.now(),
-          { failureReason: reason },
+          {
+            workerBlocker: {
+              summary: outcome.data.summary,
+              blockingQuestions: outcome.data.blockingQuestions,
+            },
+          },
         ),
-        message: `任务需要人工决策：${reason}`,
+        message: "Worker 报告阻塞，已进入候选冻结与独立阻塞审计",
         details: this.support.createOutcomeDetails(outcome),
       };
     }

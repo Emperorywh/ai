@@ -152,9 +152,9 @@ executing/reviewing
   → executing
 ```
 
-`candidate_pending` 将 Worker 结构化终态与 Git 候选捕获分为两个 checkpoint。进程在二者之间中断时不会重新运行已经完成的 Agent 会话。
+`candidate_pending` 将 Worker 结构化结果与 Git 候选捕获分为两个 checkpoint。它既承载已完成实现，也承载等待独立 Reviewer 复核的 Worker 阻塞报告；进程在二者之间中断时不会重新运行已经完成的 Agent 会话。
 
-`blocked` 或 `failed` 出现后，当前候选先进入隔离区，Run 随即结束，全部后继保持 `pending`。
+Worker 的首次 `blocked` 声明不会直接产生 TASK 终态。应用层持久化摘要与 blockingQuestions、冻结当前候选并启动全新只读 Reviewer：阻塞不成立或仍有项目内可执行工作时进入 repair；只有 Reviewer 确认缺少真实外部信息、凭据或不可逆决策后才进入 `blocked`。`blocked` 或 `failed` 终态出现后，当前候选先进入隔离区，Run 随即结束，全部后继保持 `pending`。
 
 ## 6. Worker 能力与系统守卫
 
@@ -238,7 +238,7 @@ Reviewer 启动前才组合：
 
 Reviewer 使用 `Read/Glob/Grep`、`dontAsk`、空 MCP、空 skills、空 setting sources。每次审核都创建全新 session，不继承 Worker、项目设置或用户权限设置；基础设施通过 Claude SDK 重新解析当前用户级/托管级配置，并投影连接环境与认证辅助命令。该读取路径与 CC Switch 切换后 Claude Code 使用的实时配置一致，不访问 `cc-switch.db`，也不在 Apex 中维护凭据副本。令牌通过合并后的子进程环境传递，不进入命令行参数；用户设置环境覆盖宿主终端同名变量，认证/网关连接和工具权限保持解耦。
 
-审核通过且没有 critical/high/medium finding 才进入提交；拒绝或实质 finding 进入 repair，即使模型把带实质 finding 的结果误标为 blocked，应用层也以 finding 为准进入 repair。只有正确性依赖项目内无法推导的外部信息、凭据或不可逆产品决策时才允许进入 blocked；明确契约偏差必须形成 finding，可逆实现选择必须由 Reviewer 直接批准或拒绝。会话已建立后的可恢复 Agent 错误按 Reviewer 预算新建会话重试；会话初始化前的子进程启动故障属于 Run 基础设施中断，保留 `running` 状态且不消耗 Reviewer/Worker 预算；认证失败属于需要修复外部配置的不可重试错误并立即终止。
+审核通过且没有 critical/high/medium finding 才进入提交；拒绝或实质 finding 进入 repair，即使模型把带实质 finding 的结果误标为 blocked，应用层也以 finding 为准进入 repair。Worker 阻塞审计不是完成候选审核，因此 Reviewer 的 approved 会被应用层归一化为 rejected，只有 blocked 才能确认真实阻塞。只有正确性依赖项目内无法推导的外部信息、凭据或不可逆产品决策时才允许进入 blocked；明确契约偏差必须形成 finding，可逆实现选择必须由 Reviewer 直接批准或拒绝。会话已建立后的可恢复 Agent 错误按 Reviewer 预算新建会话重试；会话初始化前的子进程启动故障属于 Run 基础设施中断，保留 `running` 状态且不消耗 Reviewer/Worker 预算；认证失败属于需要修复外部配置的不可重试错误并立即终止。
 
 ## 10. Git 候选、账本与隔离区
 
@@ -259,7 +259,7 @@ Git 基础设施分为：
 - `Apex-Coding-Agent-Task-Contract`
 - `Apex-Coding-Agent-Task-Predecessor`
 
-无文件差异时仍创建空提交。阻塞/失败候选保存到确定性 `refs/apex-coding-agent/quarantine/*` 后清理主工作区；归档逻辑可重入。Reviewer 阻塞的 Run 被显式 `resume` 时，系统先拒绝覆盖其他工作区改动，再从隔离提交恢复当前项目的索引与工作树以覆盖新增/删除文件，并把索引归一化到 HEAD。恢复内容来自受状态引用约束的 Git 提交；考虑 Git clean/smudge 过滤器可能规范化工作树字节，系统会重新冻结恢复后的候选指纹，checkpoint 为 `reviewing` 后再消费旧引用。若恢复与 checkpoint 之间中断，旧引用仍保留用于重试。Worker 阻塞、资源耗尽和失败终态不会走该路径。
+无文件差异时仍创建空提交。阻塞/失败候选保存到确定性 `refs/apex-coding-agent/quarantine/*` 后清理主工作区；归档逻辑可重入。Reviewer 阻塞的 Run 被显式 `resume` 时，系统先拒绝覆盖其他工作区改动，再从隔离提交恢复当前项目的索引与工作树以覆盖新增/删除文件，并把索引归一化到 HEAD。恢复内容来自受状态引用约束的 Git 提交；考虑 Git clean/smudge 过滤器可能规范化工作树字节，系统会重新冻结恢复后的候选指纹，checkpoint 为 `reviewing` 后再消费旧引用。若恢复与 checkpoint 之间中断，旧引用仍保留用于重试。经 Reviewer 确认的 Worker 阻塞同样属于该恢复路径；资源耗尽和失败终态不会走该路径。
 
 ## 11. 跨 Run 复用与恢复
 
@@ -285,7 +285,7 @@ RunState v6 不迁移旧状态。每次 checkpoint 和 resume 都调用同一语
 3. 同一时刻至多一个活动 TASK；
 4. Worker/Reviewer 尝试编号连续，结束时间与结果成对，历史项全部结束；
 5. resolved model 必须有 session init 证据；
-6. candidate_pending 必须有 completed Worker 尝试；
+6. candidate_pending 必须有 completed Worker 尝试，或有 blocked Worker 尝试及其待审计结构化报告；
 7. reviewing/committing 必须有候选指纹；
 8. committing 必须有 approved Reviewer 尝试；
 9. completed TASK 必须有 commit 与完成证据；
@@ -299,6 +299,7 @@ RunState v6 不迁移旧状态。每次 checkpoint 和 resume 都调用同一语
 
 - 严格项目加载、线性序列与完成前缀复用；
 - Worker/Reviewer/repair/resume/candidate_pending/commit 状态流；
+- Worker blocked 报告的候选冻结、独立审计、错误 approved 归一化与真实阻塞确认；
 - CC Switch 模型解析、attempt 模型不匹配、结构化输出、API 重试和工具调用遥测；
 - PreToolUse 守卫的允许与拒绝矩阵；
 - 项目上下文稳定排序、忽略策略和脚本发现；

@@ -95,12 +95,41 @@ function assertTaskFields(task: TaskRunState): void {
   }
   if (task.status === "candidate_pending") {
     const currentAttempt = task.attempts.at(-1);
+    const completedCandidate = currentAttempt?.outcome === "completed"
+      && currentAttempt.verifications !== undefined
+      && task.workerBlocker === undefined;
+    const blockerCandidate = currentAttempt?.outcome === "blocked"
+      && currentAttempt.verifications !== undefined
+      && task.workerBlocker !== undefined;
     if (
-      currentAttempt?.outcome !== "completed"
-      || currentAttempt.verifications === undefined
+      !completedCandidate
+      && !blockerCandidate
     ) {
       throw new StateTransitionError(
-        `candidate_pending TASK 缺少已完成的 Worker 尝试或验证证据：${task.taskId}`,
+        `candidate_pending TASK 缺少已完成候选或待审计 Worker 阻塞报告：${task.taskId}`,
+      );
+    }
+  }
+  /*
+   * 阻塞报告只能伴随最后一次 blocked Worker 尝试进入候选冻结、审核或经 Reviewer 确认后的终态。
+   * 该约束阻止普通完成候选携带过期报告，也禁止未经独立审核就构造 blocked TASK。
+   */
+  if (task.workerBlocker !== undefined) {
+    const currentAttempt = task.attempts.at(-1);
+    const allowedStatus = task.status === "candidate_pending"
+      || task.status === "reviewing"
+      || task.status === "blocked";
+    if (currentAttempt?.outcome !== "blocked" || !allowedStatus) {
+      throw new StateTransitionError(
+        `Worker 阻塞报告与 TASK 阶段不一致：${task.taskId}`,
+      );
+    }
+    if (
+      task.status === "blocked"
+      && task.reviewAttempts.at(-1)?.outcome !== "blocked"
+    ) {
+      throw new StateTransitionError(
+        `blocked TASK 的 Worker 阻塞报告缺少 Reviewer 确认证据：${task.taskId}`,
       );
     }
   }

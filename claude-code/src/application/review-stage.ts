@@ -113,6 +113,7 @@ export class ReviewStage {
       reviewBundle.diff,
       taskState.attempts.at(-1)?.verifications ?? [],
       projectContext,
+      taskState.workerBlocker,
       sessionCheckpoint,
     );
     workingState = sessionCheckpoint.currentState;
@@ -154,7 +155,10 @@ export class ReviewStage {
           input.task.id,
           "failed",
           this.support.now(),
-          { failureReason: `审核失败：${outcome.message}` },
+          {
+            failureReason: `审核失败：${outcome.message}`,
+            workerBlocker: undefined,
+          },
         ),
         message: `审核失败且无法继续：${outcome.message}`,
         details: this.support.createOutcomeDetails(outcome),
@@ -168,7 +172,14 @@ export class ReviewStage {
      * critical/high/medium finding 是“候选存在可修复缺陷”的确定性事实，优先级高于模型给出的状态标签。
      * 即使 Reviewer 误把同一结果标成 blocked，也应进入 repair，而不是终止整个 Run 等待人工裁决。
      */
+    const workerBlocker = taskState.workerBlocker;
+    const isWorkerBlockerReview = workerBlocker !== undefined;
+    /*
+     * 普通候选继续以实质 finding 覆盖错误状态标签；阻塞审计还必须禁止 approved。
+     * Worker 从未报告 completed，因此即使 Reviewer 误给 approved，也只能回流 repair，绝不能进入提交。
+     */
     const normalizedOutcome = hasMaterialFindings
+      || (isWorkerBlockerReview && outcome.data.status === "approved")
       ? "rejected" as const
       : outcome.data.status;
     const finishedState = this.finishAttempt(
@@ -178,10 +189,21 @@ export class ReviewStage {
       normalizedOutcome,
     );
     if (normalizedOutcome === "rejected") {
+      const feedback = workerBlocker !== undefined
+        && outcome.data.status === "approved"
+        ? [
+            "独立 Reviewer 未确认 Worker 的阻塞声明，当前候选仍未完成。",
+            `Reviewer 摘要：${outcome.data.summary}`,
+            `原阻塞摘要：${workerBlocker.summary}`,
+            "请继续完成 TASK 中所有可通过项目代码、资产、测试、文档或可用工具推进的工作。",
+          ].join("\n")
+        : formatReviewFeedback(outcome.data);
       const retry = this.support.scheduleRetry(input, finishedState, {
         kind: "repair",
-        reason: "独立审核未通过",
-        feedback: formatReviewFeedback(outcome.data),
+        reason: isWorkerBlockerReview
+          ? "Worker 阻塞声明未通过独立审计"
+          : "独立审核未通过",
+        feedback,
       });
       return {
         ...retry,
@@ -222,6 +244,7 @@ export class ReviewStage {
     diff: string,
     verifications: NonNullable<TaskRunState["attempts"][number]["verifications"]>,
     projectContext: Awaited<ReturnType<ProjectContextProvider["compile"]>>,
+    workerBlocker: TaskRunState["workerBlocker"],
     sessionCheckpoint: ReviewSessionCheckpoint,
   ): Promise<AgentRunOutcome<ReviewResult>> {
     /*
@@ -240,6 +263,7 @@ export class ReviewStage {
         diff,
         verifications,
         projectContext,
+        workerBlocker,
       ),
       cwd: input.loaded.projectRoot,
       model: reviewAttempt.requestedModel,
