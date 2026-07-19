@@ -377,6 +377,88 @@ export function reopenBlockedReview(
   };
 }
 
+/*
+ * v1.0.5 之前的 Worker blocked 会直接终结 Run，因而没有 workerBlocker、候选指纹或 Reviewer 尝试。
+ * 兼容恢复只接受“归档明确为空”的旧状态，把原结构化 attempt 提升为待审计报告；绝不猜测或丢弃未提交文件。
+ */
+export function reopenLegacyWorkerBlocker(
+  state: RunState,
+  taskId: string,
+  now: string,
+): RunState {
+  const current = state.tasks[taskId];
+  const currentAttempt = current?.attempts.at(-1);
+  const archiveIsEmpty = current?.candidateArchive === undefined
+    || (
+      current.candidateArchive.reference === undefined
+      && current.candidateArchive.changedFiles.length === 0
+    );
+  if (
+    state.status !== "blocked"
+    || current?.status !== "blocked"
+    || current.workerBlocker !== undefined
+    || current.candidateFingerprint !== undefined
+    || currentAttempt?.outcome !== "blocked"
+    || currentAttempt.verifications === undefined
+    || !archiveIsEmpty
+  ) {
+    throw new StateTransitionError(
+      `任务 ${taskId} 不是可安全迁移的旧版 Worker blocked 状态`,
+    );
+  }
+  const summary = currentAttempt.summary?.trim();
+  if (summary === undefined || summary.length === 0) {
+    throw new StateTransitionError(
+      `任务 ${taskId} 的旧版 Worker blocked 状态缺少结构化摘要`,
+    );
+  }
+
+  const taskWithoutTerminalFields = { ...current };
+  delete taskWithoutTerminalFields.failureReason;
+  delete taskWithoutTerminalFields.candidateArchive;
+  delete taskWithoutTerminalFields.retry;
+  const stateWithoutFailure = { ...state };
+  delete stateWithoutFailure.failureReason;
+  return {
+    ...stateWithoutFailure,
+    status: "running",
+    updatedAt: now,
+    tasks: {
+      ...state.tasks,
+      [taskId]: {
+        ...taskWithoutTerminalFields,
+        status: "candidate_pending",
+        workerBlocker: {
+          summary,
+          blockingQuestions: readLegacyBlockingQuestions(
+            current.failureReason,
+            summary,
+          ),
+        },
+        updatedAt: now,
+      },
+    },
+  };
+}
+
+/*
+ * 旧状态只保存了以中文分号连接后的问题文本；只有它不是 summary fallback 时才尝试还原问题数组。
+ * 原结构化协议限制每个问题不超过 2000 字符，超界片段不截断、不伪造，摘要仍完整保留给 Reviewer。
+ */
+function readLegacyBlockingQuestions(
+  failureReason: string | undefined,
+  summary: string,
+): readonly string[] {
+  if (failureReason === undefined || failureReason.trim() === summary) {
+    return [];
+  }
+  return failureReason
+    .split("；")
+    .map((question) => question.trim())
+    .filter((question) => question.length > 0 && question.length <= 2_000)
+    .slice(0, 50);
+}
+
 export function transitionTask(
   state: RunState,
   taskId: string,

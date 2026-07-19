@@ -11,6 +11,7 @@ import type { LoadedProject, TaskDefinition } from "../domain/project.js";
 import {
   createInitialRunState,
   reopenBlockedReview,
+  reopenLegacyWorkerBlocker,
   replaceExpectedHead,
   type RunState,
   type TaskRunState,
@@ -168,7 +169,14 @@ export class QueueOrchestrator {
     }
     this.resumeValidator.validateProjectAndState(loaded, existing);
     const blockedReviewTask = this.findReopenableBlockedReview(existing);
-    if (existing.status !== "running" && blockedReviewTask === undefined) {
+    const legacyWorkerBlockerTask = blockedReviewTask === undefined
+      ? this.findReopenableLegacyWorkerBlocker(existing)
+      : undefined;
+    if (
+      existing.status !== "running"
+      && blockedReviewTask === undefined
+      && legacyWorkerBlockerTask === undefined
+    ) {
       return { state: existing, artifacts: [] };
     }
 
@@ -206,6 +214,17 @@ export class QueueOrchestrator {
           restoredFingerprint,
           this.now(),
         );
+      } else if (legacyWorkerBlockerTask !== undefined) {
+        /*
+         * 旧版 Worker blocked 没有候选指纹；只有归档已证明无变更时才允许迁移。
+         * 先要求工作区完全干净，再重开到 candidate_pending，由正常冻结阶段生成空候选指纹并进入独立审计。
+         */
+        await this.workspace.assertClean();
+        resumedState = reopenLegacyWorkerBlocker(
+          resumedState,
+          legacyWorkerBlockerTask.taskId,
+          this.now(),
+        );
       }
       await this.checkpoint(
         resumedState,
@@ -215,7 +234,9 @@ export class QueueOrchestrator {
         this.describeTaskQueue(
           workspaceResolution.reconciledHead === undefined
             ? blockedReviewTask === undefined
-              ? "恢复已有运行"
+              ? legacyWorkerBlockerTask === undefined
+                ? "恢复已有运行"
+                : `迁移旧版 Worker 阻塞并重开 ${legacyWorkerBlockerTask.taskId} 审计`
               : `恢复 Reviewer 阻塞候选并重开 ${blockedReviewTask.taskId} 审核`
             : `恢复已有运行，项目外 HEAD 快进已协调至 ${workspaceResolution.reconciledHead}`,
           orderedTasks,
@@ -231,6 +252,12 @@ export class QueueOrchestrator {
           ...(blockedReviewTask === undefined
             ? {}
             : { reopenedBlockedReviewTaskId: blockedReviewTask.taskId }),
+          ...(legacyWorkerBlockerTask === undefined
+            ? {}
+            : {
+                reopenedLegacyWorkerBlockerTaskId:
+                  legacyWorkerBlockerTask.taskId,
+              }),
         },
       );
       if (blockedReviewTask?.candidateArchive?.reference !== undefined) {
@@ -271,6 +298,33 @@ export class QueueOrchestrator {
     return task?.candidateFingerprint !== undefined
         && task.reviewAttempts.at(-1)?.outcome === "blocked"
       ? task as TaskRunState & { readonly candidateFingerprint: string }
+      : undefined;
+  }
+
+  /*
+   * 历史兼容入口严格匹配旧版 Worker 直接阻塞且终态归档为空的形状。
+   * 有候选引用、变更文件、冻结指纹或新式 workerBlocker 的状态都由其他恢复协议处理或保持终态。
+   */
+  private findReopenableLegacyWorkerBlocker(
+    state: RunState,
+  ): TaskRunState | undefined {
+    if (state.status !== "blocked") {
+      return undefined;
+    }
+    const task = Object.values(state.tasks).find(
+      (candidate) => candidate.status === "blocked",
+    );
+    const archiveIsEmpty = task?.candidateArchive === undefined
+      || (
+        task.candidateArchive.reference === undefined
+        && task.candidateArchive.changedFiles.length === 0
+      );
+    return task?.workerBlocker === undefined
+        && task?.candidateFingerprint === undefined
+        && task?.attempts.at(-1)?.outcome === "blocked"
+        && task.attempts.at(-1)?.verifications !== undefined
+        && archiveIsEmpty
+      ? task
       : undefined;
   }
 

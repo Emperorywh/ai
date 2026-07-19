@@ -651,6 +651,44 @@ describe("QueueOrchestrator", () => {
     ]);
   });
 
+  it("resume 迁移旧版无候选 Worker blocked 并进入独立阻塞审计", async () => {
+    const workspace = new NoChangeWorkspace();
+    const agent = new RecordingAgent();
+    const fixture = createFixture(workspace, agent);
+    const loaded = createLoadedProject([{ id: "TASK-001" }]);
+    const legacyBlocked = createLegacyWorkerBlockedState(loaded);
+    await fixture.stateStore.save(legacyBlocked);
+
+    /*
+     * 历史状态没有 workerBlocker、候选指纹或 Reviewer 尝试，但归档明确记录 changedFiles=[]。
+     * resume 必须先校验干净工作区，再冻结空候选并审计；Reviewer 的错误 approved 仍只能回流 repair。
+     */
+    const resumed = await fixture.orchestrator.resume(
+      loaded,
+      legacyBlocked.runId,
+    );
+
+    expect(resumed.state.status).toBe("completed");
+    expect(workspace.cleanChecks).toBe(1);
+    expect(resumed.state.tasks["TASK-001"]?.attempts.map(
+      (attempt) => attempt.outcome,
+    )).toEqual(["blocked", "completed"]);
+    expect(resumed.state.tasks["TASK-001"]?.reviewAttempts.map(
+      (attempt) => attempt.outcome,
+    )).toEqual(["rejected", "approved"]);
+    expect(agent.requests.map((request) => request.attemptKind)).toEqual([
+      "review",
+      "repair",
+      "review",
+    ]);
+    expect(agent.requests[0]?.prompt).toContain("# Worker 阻塞报告");
+    expect(agent.requests[0]?.prompt).toContain("缺少外部坐标来源");
+    expect(fixture.logger.events[0]).toMatchObject({
+      type: "run_resumed",
+      details: { reopenedLegacyWorkerBlockerTaskId: "TASK-001" },
+    });
+  });
+
   it("达到 TASK Worker 会话预算后停止 repair 并转为可解释阻塞", async () => {
     const agent = new RecordingAgent((request) => ({
       ok: true,
@@ -1146,6 +1184,63 @@ function createCommittingState(
           outcome: "approved",
         }],
         updatedAt: "2026-07-13T00:00:04.000Z",
+      },
+    },
+  };
+}
+
+function createLegacyWorkerBlockedState(
+  loaded: ReturnType<typeof createLoadedProject>,
+): RunState {
+  const initial = createInitialRunState({
+    runId: "run-legacy-worker-blocked",
+    projectHash: loaded.projectHash,
+    projectRoot: loaded.projectRoot,
+    workspace: {
+      repositoryRoot: "/project",
+      branch: "main",
+      expectedHead: "base-sha",
+    },
+    tasks: [{ taskId: "TASK-001" }],
+    now: "2026-07-13T00:00:00.000Z",
+  });
+  const task = initial.tasks["TASK-001"];
+  if (task === undefined) {
+    throw new Error("测试状态缺少 TASK-001");
+  }
+
+  /*
+   * 该夹具精确复现 v1.0.5 之前的 Worker 直接 blocked 终态：结构化 attempt 已结束，
+   * reviewAttempts 为空，candidateArchive 明确证明没有未提交文件，且阻塞问题只存在于 failureReason。
+   */
+  return {
+    ...initial,
+    status: "blocked",
+    failureReason: "TASK-001: 缺少外部坐标来源",
+    updatedAt: "2026-07-13T00:00:03.000Z",
+    tasks: {
+      "TASK-001": {
+        ...task,
+        status: "blocked",
+        attempts: [{
+          number: 1,
+          kind: "implementation",
+          sessionId: "33333333-3333-4333-8333-333333333333",
+          sessionInitialized: true,
+          requestedModel: "claude-sonnet-5",
+          resolvedModel: "claude-sonnet-5",
+          startedAt: "2026-07-13T00:00:01.000Z",
+          finishedAt: "2026-07-13T00:00:02.000Z",
+          outcome: "blocked",
+          summary: "核心交付物缺少外部坐标来源",
+          verifications: [],
+        }],
+        failureReason: "缺少外部坐标来源；需要人工核对记录",
+        candidateArchive: {
+          changedFiles: [],
+          archivedAt: "2026-07-13T00:00:03.000Z",
+        },
+        updatedAt: "2026-07-13T00:00:03.000Z",
       },
     },
   };
