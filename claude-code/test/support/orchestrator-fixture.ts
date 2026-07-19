@@ -132,6 +132,11 @@ export class RecordingWorkspace implements Workspace {
   public readonly commitExpectedHeads: string[] = [];
   public cleanChecks = 0;
   public quarantines = 0;
+  public readonly restoredCandidates: {
+    reference?: string | undefined;
+    expectedFingerprint: string;
+  }[] = [];
+  public readonly consumedCandidateArchives: string[] = [];
   private currentHead = "base-sha";
   private readonly completionHistory: TaskCompletionEvidence[] = [];
   private readonly headAdvances = new Map<string, WorkspaceHeadAdvance>();
@@ -197,6 +202,26 @@ export class RecordingWorkspace implements Workspace {
       reference: `refs/quarantine/${this.quarantines}`,
       changedFiles: ["src/candidate.ts"],
     };
+  }
+
+  /*
+   * 应用层 Fake 只记录 blocked 候选恢复协议；真实 Git 文件恢复与引用消费由基础设施测试覆盖。
+   * 记录完整输入可以断言编排器没有绕过冻结指纹，也没有恢复错误的隔离引用。
+   */
+  public async restoreCandidate(input: {
+    reference?: string | undefined;
+    expectedFingerprint: string;
+  }): Promise<string> {
+    this.restoredCandidates.push(input);
+    return input.expectedFingerprint;
+  }
+
+  /*
+   * Fake 将引用消费与候选恢复分开记录，锁定“先 checkpoint、后消费”的两阶段恢复协议。
+   * 真实引用删除仍由 GitWorkspace 集成测试验证，不在应用层测试里模拟 Git 对象数据库。
+   */
+  public async consumeCandidateArchive(reference: string): Promise<void> {
+    this.consumedCandidateArchives.push(reference);
   }
 
   public async commitTask(input: {

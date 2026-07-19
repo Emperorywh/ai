@@ -542,6 +542,61 @@ describe("QueueOrchestrator", () => {
     ]);
   });
 
+  it("resume 恢复 Reviewer 阻塞的隔离候选并继续审核", async () => {
+    let reviewRuns = 0;
+    const workspace = new RecordingWorkspace();
+    const agent = new RecordingAgent((request) => {
+      if (request.attemptKind !== "review") {
+        return completedBehavior(request);
+      }
+      reviewRuns += 1;
+      if (reviewRuns > 1) {
+        return completedBehavior(request);
+      }
+      return {
+        ok: true,
+        sessionId: request.sessionId ?? "missing-review-session",
+        data: {
+          status: "blocked",
+          summary: "需要重新判定候选是否满足契约",
+          findings: [],
+          blockingQuestions: ["是否接受当前可逆实现选择"],
+        },
+        costUsd: 0.01,
+        turns: 1,
+      };
+    });
+    const fixture = createFixture(workspace, agent);
+    const loaded = createLoadedProject([{ id: "TASK-001" }]);
+
+    /*
+     * 第一次运行模拟历史版本留下的 Reviewer 误阻塞；候选必须先进入 quarantine 并形成终态。
+     * resume 随后应从可信引用恢复并重新冻结候选、消费归档，再创建全新 Reviewer 会话直至提交。
+     */
+    const blocked = await fixture.orchestrator.start(loaded);
+    const resumed = await fixture.orchestrator.resume(
+      loaded,
+      blocked.state.runId,
+    );
+
+    expect(blocked.state.status).toBe("blocked");
+    expect(resumed.state.status).toBe("completed");
+    expect(workspace.restoredCandidates).toEqual([{
+      reference: "refs/quarantine/1",
+      expectedFingerprint: "stable-candidate",
+    }]);
+    expect(workspace.consumedCandidateArchives).toEqual(["refs/quarantine/1"]);
+    expect(resumed.state.tasks["TASK-001"]?.candidateArchive).toBeUndefined();
+    expect(resumed.state.tasks["TASK-001"]?.reviewAttempts.map(
+      (attempt) => attempt.outcome,
+    )).toEqual(["blocked", "approved"]);
+    expect(agent.requests.map((request) => request.attemptKind)).toEqual([
+      "implementation",
+      "review",
+      "review",
+    ]);
+  });
+
   it("达到 TASK Worker 会话预算后停止 repair 并转为可解释阻塞", async () => {
     const agent = new RecordingAgent((request) => ({
       ok: true,

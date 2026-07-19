@@ -259,7 +259,7 @@ Git 基础设施分为：
 - `Apex-Coding-Agent-Task-Contract`
 - `Apex-Coding-Agent-Task-Predecessor`
 
-无文件差异时仍创建空提交。阻塞/失败候选保存到确定性 `refs/apex-coding-agent/quarantine/*` 后清理主工作区；归档逻辑可重入。
+无文件差异时仍创建空提交。阻塞/失败候选保存到确定性 `refs/apex-coding-agent/quarantine/*` 后清理主工作区；归档逻辑可重入。Reviewer 阻塞的 Run 被显式 `resume` 时，系统先拒绝覆盖其他工作区改动，再从隔离提交恢复当前项目的索引与工作树以覆盖新增/删除文件，并把索引归一化到 HEAD。恢复内容来自受状态引用约束的 Git 提交；考虑 Git clean/smudge 过滤器可能规范化工作树字节，系统会重新冻结恢复后的候选指纹，checkpoint 为 `reviewing` 后再消费旧引用。若恢复与 checkpoint 之间中断，旧引用仍保留用于重试。Worker 阻塞、资源耗尽和失败终态不会走该路径。
 
 ## 11. 跨 Run 复用与恢复
 

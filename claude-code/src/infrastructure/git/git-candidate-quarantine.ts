@@ -11,6 +11,8 @@ import type { CandidateArchive } from "../../ports/workspace.js";
 import type { GitCommandRunner } from "./git-command-runner.js";
 import type { GitProjectBoundary } from "./git-project-boundary.js";
 
+const QUARANTINE_REFERENCE_PREFIX = `${PRODUCT_IDENTITY.gitReferenceRoot}/quarantine/`;
+
 export class GitCandidateQuarantine {
   public constructor(
     private readonly projectRoot: string,
@@ -88,6 +90,58 @@ export class GitCandidateQuarantine {
       return { reference, changedFiles };
     } finally {
       await rm(temporaryRoot, { recursive: true, force: true });
+    }
+  }
+
+  /*
+   * 恢复只接受本产品 quarantine 命名空间中的引用，并只写当前项目 pathspec。
+   * 先同时恢复索引与工作树以覆盖归档中的新增/删除文件，再把索引重置到 HEAD，保持正常未暂存候选语义。
+   */
+  public async restore(reference: string): Promise<void> {
+    this.assertQuarantineReference(reference);
+    const archivedCommit = (
+      await this.git.run(["for-each-ref", "--format=%(objectname)", reference])
+    ).trim();
+    if (archivedCommit.length === 0) {
+      throw new Error(`找不到终态候选隔离引用：${reference}`);
+    }
+    await this.git.run([
+      "restore",
+      `--source=${reference}`,
+      "--staged",
+      "--worktree",
+      "--",
+      ".",
+    ]);
+    await this.normalizeIndex();
+  }
+
+  /*
+   * 若进程恰好在文件恢复后、索引归一化前中断，下一次 resume 会看到同指纹候选。
+   * 独立的幂等归一化入口确保该崩溃窗口不会把暂存状态泄漏给后续审核或提交阶段。
+   */
+  public async normalizeIndex(): Promise<void> {
+    await this.git.run([
+      "restore",
+      "--source=HEAD",
+      "--staged",
+      "--",
+      ".",
+    ]);
+  }
+
+  /*
+   * 候选已经回到受指纹保护的工作区后，旧隔离引用必须被消费。
+   * 同一 Run/TASK 若再次阻塞，归档器即可用确定性引用保存最新候选，而不会误用旧快照。
+   */
+  public async consume(reference: string): Promise<void> {
+    this.assertQuarantineReference(reference);
+    await this.git.run(["update-ref", "-d", reference]);
+  }
+
+  private assertQuarantineReference(reference: string): void {
+    if (!reference.startsWith(QUARANTINE_REFERENCE_PREFIX)) {
+      throw new Error(`拒绝恢复非 Apex 隔离引用：${reference}`);
     }
   }
 }

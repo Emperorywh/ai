@@ -96,6 +96,18 @@ export interface CandidateQuarantine {
   }): Promise<CandidateArchive>;
 }
 
+/*
+ * Reviewer 误阻塞恢复必须先把可信隔离提交放回工作区，并重新冻结恢复后的候选指纹。
+ * expectedFingerprint 用于识别崩溃后已恢复的同一候选；reference 允许缺省以覆盖空候选路径。
+ */
+export interface CandidateArchiveRestorer {
+  restoreCandidate(input: {
+    reference?: string | undefined;
+    expectedFingerprint: string;
+  }): Promise<string>;
+  consumeCandidateArchive(reference: string): Promise<void>;
+}
+
 export interface TaskCommitter {
   commitTask(input: {
     runId: string;
@@ -129,6 +141,7 @@ export interface Workspace
     WorkspaceHistoryInspector,
     CandidateStore,
     CandidateQuarantine,
+    CandidateArchiveRestorer,
     TaskCommitter,
     TaskCommitRecovery,
     TaskCompletionLedger {}

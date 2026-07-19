@@ -10,14 +10,17 @@ import {
 import type { LoadedProject, TaskDefinition } from "../domain/project.js";
 import {
   createInitialRunState,
+  reopenBlockedReview,
   replaceExpectedHead,
   type RunState,
+  type TaskRunState,
 } from "../domain/run-state.js";
 import type { Clock } from "../ports/clock.js";
 import type { RunLock } from "../ports/run-lock.js";
 import type { StateStore } from "../ports/state-store.js";
 import type { TimeFormatter } from "../ports/time-formatter.js";
 import type {
+  CandidateArchiveRestorer,
   WorkspaceIdentityStore,
 } from "../ports/workspace.js";
 import type {
@@ -55,7 +58,7 @@ export interface QueueOrchestratorDependencies {
   readonly taskProgress: TaskProgressReconciler;
   readonly stateStore: StateStore;
   readonly runLock: RunLock;
-  readonly workspace: WorkspaceIdentityStore;
+  readonly workspace: WorkspaceIdentityStore & CandidateArchiveRestorer;
   readonly checkpoints: RunCheckpointWriter;
   readonly resumeValidator: RunResumeValidator;
   readonly finalizer: RunFinalizer;
@@ -70,7 +73,7 @@ export class QueueOrchestrator {
   private readonly taskProgress: TaskProgressReconciler;
   private readonly stateStore: StateStore;
   private readonly runLock: RunLock;
-  private readonly workspace: WorkspaceIdentityStore;
+  private readonly workspace: WorkspaceIdentityStore & CandidateArchiveRestorer;
   private readonly checkpoints: RunCheckpointWriter;
   private readonly resumeValidator: RunResumeValidator;
   private readonly finalizer: RunFinalizer;
@@ -164,7 +167,8 @@ export class QueueOrchestrator {
       throw new ConfigurationError(`找不到运行 ${runId}`);
     }
     this.resumeValidator.validateProjectAndState(loaded, existing);
-    if (existing.status !== "running") {
+    const blockedReviewTask = this.findReopenableBlockedReview(existing);
+    if (existing.status !== "running" && blockedReviewTask === undefined) {
       return { state: existing, artifacts: [] };
     }
 
@@ -178,13 +182,31 @@ export class QueueOrchestrator {
        * 恢复校验只返回可接受的新 HEAD，驱动器负责先把它写入 run_resumed checkpoint。
        * 后续 CommitStage 因而始终从持久化基线继续，不依赖本进程内的临时协调结果。
        */
-      const resumedState = workspaceResolution.reconciledHead === undefined
+      let resumedState = workspaceResolution.reconciledHead === undefined
         ? existing
         : replaceExpectedHead(
             existing,
             workspaceResolution.reconciledHead,
             this.now(),
           );
+      if (blockedReviewTask !== undefined) {
+        /*
+         * 终态归档先从可信 Git 引用恢复并重新冻结指纹，状态随后才从 blocked 原子重开到 reviewing。
+         * 若进程在两步之间退出，restoreCandidate 会识别工作区中的同一候选并安全重入。
+         */
+        const restoredFingerprint = await this.workspace.restoreCandidate({
+          ...(blockedReviewTask.candidateArchive?.reference === undefined
+            ? {}
+            : { reference: blockedReviewTask.candidateArchive.reference }),
+          expectedFingerprint: blockedReviewTask.candidateFingerprint,
+        });
+        resumedState = reopenBlockedReview(
+          resumedState,
+          blockedReviewTask.taskId,
+          restoredFingerprint,
+          this.now(),
+        );
+      }
       await this.checkpoint(
         resumedState,
         orderedTasks,
@@ -192,7 +214,9 @@ export class QueueOrchestrator {
         "run_resumed",
         this.describeTaskQueue(
           workspaceResolution.reconciledHead === undefined
-            ? "恢复已有运行"
+            ? blockedReviewTask === undefined
+              ? "恢复已有运行"
+              : `恢复 Reviewer 阻塞候选并重开 ${blockedReviewTask.taskId} 审核`
             : `恢复已有运行，项目外 HEAD 快进已协调至 ${workspaceResolution.reconciledHead}`,
           orderedTasks,
         ),
@@ -204,8 +228,20 @@ export class QueueOrchestrator {
                 previousExpectedHead: existing.workspace.expectedHead,
                 reconciledExpectedHead: workspaceResolution.reconciledHead,
               }),
+          ...(blockedReviewTask === undefined
+            ? {}
+            : { reopenedBlockedReviewTaskId: blockedReviewTask.taskId }),
         },
       );
+      if (blockedReviewTask?.candidateArchive?.reference !== undefined) {
+        /*
+         * 新 reviewing checkpoint 已经持久化当前工作区指纹，此时旧隔离引用才不再承担恢复职责。
+         * 即使消费后进程退出，普通 running resume 也会从刚落盘的新候选身份继续。
+         */
+        await this.workspace.consumeCandidateArchive(
+          blockedReviewTask.candidateArchive.reference,
+        );
+      }
       return await this.drive(loaded, orderedTasks, resumedState, true, signal);
     } finally {
       await lock.release();
@@ -217,6 +253,25 @@ export class QueueOrchestrator {
     return resolvedRunId === undefined
       ? undefined
       : this.stateStore.load(resolvedRunId);
+  }
+
+  /*
+   * 自动重开严格限定为“最后一次 Reviewer 已结构化返回 blocked 且冻结候选仍可定位”的终态。
+   * Worker 阻塞、资源耗尽、失败和 completed 继续保持终态，避免 resume 偷偷扩大原任务权限或预算。
+   */
+  private findReopenableBlockedReview(state: RunState):
+    | (TaskRunState & { readonly candidateFingerprint: string })
+    | undefined {
+    if (state.status !== "blocked") {
+      return undefined;
+    }
+    const task = Object.values(state.tasks).find(
+      (candidate) => candidate.status === "blocked",
+    );
+    return task?.candidateFingerprint !== undefined
+        && task.reviewAttempts.at(-1)?.outcome === "blocked"
+      ? task as TaskRunState & { readonly candidateFingerprint: string }
+      : undefined;
   }
 
   private async drive(

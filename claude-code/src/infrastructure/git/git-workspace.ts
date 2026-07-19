@@ -2,6 +2,7 @@
  * GitWorkspace 是默认组合根使用的薄门面，只装配并转发相互独立的 Git 组件。
  * 应用层依赖职责化端口；门面保留统一实例生命周期，但不再承载候选、账本或隔离算法。
  */
+import { CandidateChangedError } from "../../domain/errors.js";
 import type { TaskDefinition } from "../../domain/project.js";
 import type {
   CandidateArchive,
@@ -68,6 +69,44 @@ export class GitWorkspace implements Workspace {
     taskId: string;
   }): Promise<CandidateArchive> {
     return this.quarantine.quarantine(input);
+  }
+
+  /*
+   * blocked 恢复可能在“恢复文件、消费引用、写 checkpoint”任一点崩溃，因此该操作必须可重入。
+   * 工作区已有完全相同的冻结候选时直接沿用；存在其他改动时拒绝覆盖，避免吞掉人工修改。
+   */
+  public async restoreCandidate(input: {
+    reference?: string | undefined;
+    expectedFingerprint: string;
+  }): Promise<string> {
+    const current = await this.candidates.captureCandidate();
+    if (current.files.length > 0) {
+      if (current.fingerprint !== input.expectedFingerprint) {
+        throw new CandidateChangedError(
+          "恢复终态候选前工作区存在其他改动，拒绝覆盖",
+        );
+      }
+      await this.quarantine.normalizeIndex();
+      return current.fingerprint;
+    } else if (input.reference !== undefined) {
+      await this.quarantine.restore(input.reference);
+    }
+
+    const restored = await this.candidates.captureCandidate();
+    if (input.reference === undefined && restored.fingerprint !== input.expectedFingerprint) {
+      throw new CandidateChangedError(
+        `终态隔离候选恢复后的内容指纹与原审核候选不一致：期望 ${input.expectedFingerprint}，实际 ${restored.fingerprint}；恢复文件 ${restored.files.map((file) => `${file.path}:${file.mode}:${file.contentHash}`).join(", ") || "<空>"}`,
+      );
+    }
+    return restored.fingerprint;
+  }
+
+  /*
+   * 隔离引用必须等“新候选指纹 + reviewing 状态”成功 checkpoint 后才能消费。
+   * 该顺序确保状态落盘失败时旧引用仍可作为恢复源，不会只剩无法证明来源的工作区文件。
+   */
+  public async consumeCandidateArchive(reference: string): Promise<void> {
+    await this.quarantine.consume(reference);
   }
 
   public commitTask(input: {

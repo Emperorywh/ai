@@ -338,6 +338,55 @@ describe("GitWorkspace", () => {
     expect(recovered).toEqual(archive);
   });
 
+  it("Reviewer 阻塞候选可从隔离引用恢复、重新冻结并消费引用", async () => {
+    const fixture = await createGitFixture();
+    await writeFile(
+      join(fixture.root, "README.md"),
+      "# 临时仓库\n\n等待重新审核。\n",
+      "utf8",
+    );
+    await writeFile(
+      join(fixture.root, "feature.ts"),
+      "export const reviewAgain = true;\n",
+      "utf8",
+    );
+    const candidate = await fixture.workspace.captureCandidate();
+    const archive = await fixture.workspace.quarantineCandidate({
+      runId: "run-review-resume",
+      taskId: "TASK-003",
+    });
+    if (archive.reference === undefined) {
+      throw new Error("测试候选应生成隔离引用");
+    }
+
+    /*
+     * Git 过滤器可能规范化换行，因此恢复后以可信隔离提交重建工作区并重新冻结候选指纹。
+     * 再次使用同一 Run/TASK 归档应成功重建确定性引用，证明后续再次阻塞不会误用旧快照。
+     */
+    const restoredFingerprint = await fixture.workspace.restoreCandidate({
+      reference: archive.reference,
+      expectedFingerprint: candidate.fingerprint,
+    });
+    expect((await fixture.workspace.captureCandidate()).fingerprint).toBe(
+      restoredFingerprint,
+    );
+    await fixture.workspace.consumeCandidateArchive(archive.reference);
+    expect(
+      await runGit(fixture.root, [
+        "for-each-ref",
+        "--format=%(objectname)",
+        archive.reference,
+      ]),
+    ).toBe("");
+
+    const archivedAgain = await fixture.workspace.quarantineCandidate({
+      runId: "run-review-resume",
+      taskId: "TASK-003",
+    });
+    expect(archivedAgain.reference).toBe(archive.reference);
+    await expect(fixture.workspace.assertClean()).resolves.toBeUndefined();
+  });
+
   it("正常提交写入精确 trailers，并按任务、父提交和候选恢复", async () => {
     const fixture = await createGitFixture();
     const task = createTask("TASK-010");

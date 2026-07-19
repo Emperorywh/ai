@@ -313,6 +313,48 @@ export function replaceExpectedHead(
   };
 }
 
+/*
+ * 只有已由 Reviewer 明确返回 blocked 的终态才能沿原候选重开审核。
+ * 该转换原子清除 Run/TASK 失败原因和已消费的归档位置，同时保留全部尝试历史与候选指纹供审计。
+ */
+export function reopenBlockedReview(
+  state: RunState,
+  taskId: string,
+  candidateFingerprint: string,
+  now: string,
+): RunState {
+  const current = state.tasks[taskId];
+  if (state.status !== "blocked" || current?.status !== "blocked") {
+    throw new StateTransitionError(`任务 ${taskId} 不是可重开的 blocked 审核`);
+  }
+  if (
+    current.candidateFingerprint === undefined
+    || current.reviewAttempts.at(-1)?.outcome !== "blocked"
+  ) {
+    throw new StateTransitionError(`任务 ${taskId} 缺少 Reviewer 阻塞候选证据`);
+  }
+
+  const taskWithoutTerminalFields = { ...current };
+  delete taskWithoutTerminalFields.failureReason;
+  delete taskWithoutTerminalFields.candidateArchive;
+  const stateWithoutFailure = { ...state };
+  delete stateWithoutFailure.failureReason;
+  return {
+    ...stateWithoutFailure,
+    status: "running",
+    updatedAt: now,
+    tasks: {
+      ...state.tasks,
+      [taskId]: {
+        ...taskWithoutTerminalFields,
+        status: "reviewing",
+        candidateFingerprint,
+        updatedAt: now,
+      },
+    },
+  };
+}
+
 export function transitionTask(
   state: RunState,
   taskId: string,
