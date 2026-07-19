@@ -1,204 +1,439 @@
 # Apex Coding Agent
 
-`apex-coding-agent` 是基于 `@anthropic-ai/claude-agent-sdk` 的严格线性、单并发、可恢复 TASK 编排代理。一次运行会自动加载任务目录中的全部 TASK，并按数字序号逐个执行，无需人工逐次向 Claude Code 投喂任务。
+`apex-coding-agent` 是一个面向现有 Git 项目的无人值守编码任务编排器。
 
-## 执行模型
+你只需要准备一份项目规格 `SPEC.md` 和一组按编号排列的 TASK 文档。Apex 会调用 Claude Code 逐个完成任务：先由可写 Worker 实现和验证，再由全新的只读 Reviewer 独立审核；审核通过后，Apex 会为该 TASK 创建独立 Git 提交，然后继续下一个任务。
+
+它不是另一个聊天窗口，也不是只执行一次提示词的脚本。它主要解决的是：**如何让一组已经写清楚的编码任务，按照固定顺序、安全地长时间自动执行，并且能够审核、提交、追踪和恢复。**
+
+## 先看一个完整流程
 
 ```text
-集中式编排目录
-  + TASK 目录（唯一任务事实源）
-  → 严格元数据校验与数字线性序列
-  → 核验当前 HEAD 中的任务完成证据
-  → 编译确定性轻量项目清单
-  → 写入 Worker
-  → 持久化结构化验证证据
-  → 冻结候选身份并按需生成紧凑 diff
-  → 全新只读 Reviewer
-  → 原子 Git 提交
-  → 前一 TASK 完成后开启下一 TASK
+orchestration/SPEC.md
+orchestration/tasks/*.md
+          │
+          ▼
+严格校验并按 TASK 数字编号排序
+          │
+          ▼
+可写 Worker 阅读规格、任务和项目代码，完成实现与非浏览器验证
+          │
+          ▼
+冻结本次代码候选及其内容指纹
+          │
+          ▼
+全新只读 Reviewer 独立检查代码、diff 和验证证据
+          │
+          ├─ 发现问题 → 将审核意见交回 Worker 修复 → 再次审核
+          ├─ 需要人工决策 → 停止当前 Run，后续 TASK 保持 pending
+          └─ 审核通过 → 为当前 TASK 创建 Git 提交 → 执行下一个 TASK
 ```
 
-- 任务目录中的每个 `.md` 文件都会进入目录校验，不存在“文件已创建但未登记”的静默遗漏。
-- TASK 的 YAML 前置元数据只包含 ID 和标题，完整需求与任务特有验收事实统一写入任务描述。
-- Worker 可以修改项目内任意文件；系统不注入路径白名单，但通过 `PreToolUse` 守卫拒绝 Git 历史改写、发布部署、浏览器和常驻服务。
-- 实现失败和审核意见在固定资源预算内进入 repair；会话级轮数、费用、时长以及 TASK 级累计会话、轮数和费用都有明确上限，耗尽后转为人工阻塞。
-- 写入 Worker 可自主使用完整 Claude Code 工具、终端、技能、项目 MCP 和子 Agent，并自行完成非浏览器验证。
-- Worker 按“定向检查 → 稳定后一次全量检查”执行验证，并把实际命令、范围和结果保存为结构化证据；Reviewer 会独立评估证据覆盖度。
-- 每个新 attempt 从 Claude 用户配置读取一次当前模型并持久化；SDK `system/init` 返回值必须与该请求快照完全一致，否则在工具执行前以不可重试错误终止。
-- Agent 需要人工决策等真正阻塞会终止当前 TASK 和本次 Run，后续 TASK 保持 `pending`。
-- 阻塞或失败 TASK 的候选会保存到持久 Git 引用并清理主工作区，不会越过当前任务继续执行。
-- 每次状态转换、SDK 会话初始化、审核结果和候选归档都会落盘，进程中断后可精确恢复。
-- Claude Code 子进程在会话初始化前启动失败时按基础设施中断处理：Run 保持 `running`，不创建 repair、不消耗 TASK 会话预算，环境恢复后可原地 `resume`。
-- 同一 Git worktree 的兄弟项目共享进程锁，避免不同 Run 竞争同一个 HEAD、索引和文件树；RunState 仍按项目分别保存。
-- 运行期间若 HEAD 仅沿祖先链前移且当前项目树未变化，编排器会先 checkpoint 新基线再继续；分叉、回退或项目内变化仍会拒绝提交。
-- 新 `run` 默认按任务契约、直接前驱提交和 Git 可达性复用连续完成前缀；`--fresh` 才会明确全量重跑。
-- 编排器不启动浏览器或 UI 自动化。全部可运行任务结束后生成运行摘要和人工验收清单。
+Apex 在任意时刻只处理一个 TASK。前一个任务没有完成并提交，后一个任务绝不会开始。
 
-## 环境要求
+## 它适合什么场景
 
-- Node.js 20+
-- pnpm
-- Git，目标项目至少有一个提交
-- 已能正常工作的 Claude Code 当前认证配置
+适合：
+
+- 已有代码仓库，需要连续实现一组边界清楚的功能任务；
+- 希望 Agent 自动读代码、修改代码、运行测试、修复审核问题并提交结果；
+- 任务可能运行较久，需要在终端中断、进程异常或机器重启后继续；
+- 希望每个任务都有独立提交、结构化验证记录和独立 Reviewer；
+- 希望后续运行自动复用当前分支中仍然有效的已完成任务。
+
+不适合：
+
+- 只有一句模糊想法，希望 Agent 一边开发一边替你决定产品方向；
+- 需要多个任务并行执行，或需要 DAG、条件分支和自定义依赖关系；
+- 目标目录不是 Git 仓库，或不希望 Agent 自动创建提交；
+- 必须由 Agent 启动浏览器、开发服务器或 UI 自动化完成验收；
+- 不信任仓库中的 Claude 配置、MCP、技能或脚本。
+
+## 快速开始
+
+### 1. 准备环境
+
+运行 Apex 需要：
+
+- Node.js 20 或更高版本；
+- Git；
+- 目标项目至少已有一个 Git 提交；
+- 整个 Git 仓库没有未提交改动，包括父仓库中的兄弟目录；
+- Claude Code 已完成认证，并在用户配置中明确选择了模型。
+
+先确认 Claude Code 当前认证可用：
 
 ```powershell
-# 先用 CC Switch 选择 Claude Provider，再核验 Claude Code 当前状态
 claude auth status
-apex-coding-agent run
 ```
 
-Apex 不提供独立登录、不读取 `cc-switch.db`、不保存 Token。CC Switch 切换后写入的 Claude Code
-用户配置（默认 `~/.claude/settings.json`）是唯一认证入口；Apex 通过 Claude Agent SDK 的设置解析器
-读取同一份认证环境、网关和模型映射。模型按 Claude Code 的显式配置优先级读取：
-`env.ANTHROPIC_MODEL` 优先于顶层 `model`；用户配置中的 `env` 同样覆盖启动终端的同名变量。
+如果使用 CC Switch，请先在 CC Switch 中选择可用的 Provider 和模型。Apex 不提供独立登录、不读取 `cc-switch.db`，也不保存 Token；它通过 Claude Agent SDK 读取 Claude Code 当前用户配置。
 
-Reviewer 不加载项目/本地权限设置，只投影当前 Claude 用户配置中的连接字段，因此 CC Switch 认证可用性
-不会破坏只读隔离。每个新 Agent 会话都会重新解析当前配置；切换 Provider 后，已运行的会话不变，
-下一次 Worker/Reviewer 会话自动使用新 Provider。不要把密钥写入 TASK、项目 `.env` 或仓库。
+模型必须在 Claude 用户配置中显式存在。读取优先级为：
 
-## 安装全局命令
+1. `env.ANTHROPIC_MODEL`
+2. 顶层 `model`
+
+如果两者都不存在，Apex 会拒绝创建不可审计的 Agent 会话。
+
+### 2. 安装命令行工具
+
+从 npm 全局安装：
 
 ```powershell
-# 从当前源码构建并安装
-pnpm install
-pnpm build
-npm install --global .
-
-# 确认全局入口及版本
+npm install --global apex-coding-agent
 apex-coding-agent --version
 apex-coding-agent --help
 ```
 
-全局安装会替换 CLI 自身目录。不要在 Apex Run 仍在执行时运行 `npm install --global .`、`npm install --global apex-coding-agent` 或其他升级命令；应先等待 Run 结束或中止到 checkpoint，完成安装并验证版本后再执行 `apex-coding-agent resume`。
-
-包发布到 npm 后，可以在任意目录直接安装：
+如果你正在开发当前源码仓库，可从源码构建并安装：
 
 ```powershell
-npm install --global apex-coding-agent
+pnpm install
+pnpm build
+npm install --global .
 ```
 
-维护者首次发布、后续版本发布、Security Key 2FA 配置和错误排查流程见 [npm 包发布手册](docs/NpmPublishing.md)。
+不要在 Apex Run 仍在执行时升级或重新全局安装 Apex。应先让当前进程结束或中断到 checkpoint，升级完成并确认版本后，再执行 `apex-coding-agent resume`。
 
-## 初始化
+### 3. 在目标项目中初始化编排文档
 
-在目标项目根目录执行：
+进入目标项目根目录，然后执行：
 
 ```powershell
 apex-coding-agent init .
 ```
 
-初始化器只增量创建静态编排输入：
-
-- `orchestration/SPEC.md`
-- `orchestration/tasks/TASK-001.md`
-
-`SPEC.md` 是唯一项目级上下文，规格、架构和执行约束都在其中维护。初始化器不创建 `PLAN.md`、`AGENTS.md` 或 `PROGRESS.md`；已有普通文件不会被覆盖，路径类型冲突会回滚本次新建文件。
-
-## 固定项目约定
-
-编排器不读取项目级配置文件，也不支持通过 CLI、环境变量或 TASK 覆盖系统策略。所有命令以当前工作目录为项目根，并固定加载唯一编排目录：
+初始化器只会补齐以下两个文件：
 
 ```text
-<project-root>/
-  orchestration/
-    SPEC.md
-    tasks/
-      <task-id>.md
+orchestration/
+  SPEC.md
+  tasks/
+    TASK-001.md
 ```
 
-Worker 与只读 Reviewer 使用 CC Switch 写入 Claude 用户配置的当前模型，effort 固定为 `high`，Git 提交前缀固定为 `task`。Worker 单会话最多 80 轮、$6、45 分钟，Reviewer 单会话最多 30 轮、$2、15 分钟；每个 TASK 最多 8 个 Worker 会话、3 个 Reviewer 会话、累计 200 轮和 $15。新 attempt 会读取最新模型，恢复已有 attempt 则继续使用状态中保存的模型快照；TASK 不能覆盖这些执行策略。
+已有普通文件不会被覆盖。初始化器也不会创建 `PLAN.md`、`PROGRESS.md`、`AGENTS.md` 或额外配置文件。
 
-## TASK 文档
+### 4. 编写项目规格
 
-`orchestration/tasks` 中的文件名必须严格等于 `<id>.md`，每个文件只采用以下结构：
+`orchestration/SPEC.md` 是所有 TASK 共享的唯一项目级执行上下文。建议至少写清楚：
+
+- 系统目标和非目标；
+- 关键业务规则；
+- 架构边界与依赖方向；
+- 核心数据流和状态流；
+- 安全、一致性和兼容性要求；
+- 项目统一的验证命令或验收标准；
+- 明确禁止 Agent 自行扩展的范围。
+
+SPEC 应描述“最终必须满足什么”，不必提前指定每个函数、类名或待修改文件。Worker 会在执行 TASK 时读取当前代码，自行选择合理的实现位置。
+
+### 5. 编写 TASK
+
+每个 TASK 都是 `orchestration/tasks` 下的一个 Markdown 文件，格式必须严格如下：
 
 ```markdown
 ---
-id: TASK-002
-title: 实现用户列表
+id: TASK-001
+title: 实现用户列表查询
 ---
 
 ## 任务描述
 
-这里是任务正文。
+实现用户列表查询能力。
+
+要求：
+
+- 支持按用户名关键字筛选；
+- 返回结果保持稳定排序；
+- 未认证请求沿用现有鉴权错误格式；
+- 补充适用的自动化测试，并运行项目现有全量检查。
 ```
 
-约束：
+TASK 的规则：
 
-- ID 必须为 `TASK-数字` 且数字至少三位，例如 `TASK-001`；系统按数字值而非字符串或目录枚举顺序执行。
-- 每个 TASK 的前驱由线性序列自动推导，不允许声明 `dependsOn`、`maxAttempts`、`timeoutMinutes` 或 `manualAcceptance`。
-- 前一个 TASK 未完成时，下一个 TASK 永远不会启动；当前任务阻塞或失败会直接结束 Run。
-- `status` 不允许写在 TASK 中。运行状态只存在于状态库，避免静态文档和真实执行状态漂移。
-- `scope`、`gates`、`verification` 及其他未知字段会直接拒绝，不提供兼容或 fallback。
-- 所有 Markdown TASK 都会加载；文件名/ID 不一致、数字序号重复、缺少任务描述或正文为空都会在运行前失败。
+- 文件名必须与 ID 完全一致，例如 `TASK-001.md`；
+- ID 必须符合 `TASK-数字`，数字至少三位，例如 `TASK-001`、`TASK-010`；
+- TASK 按数字值排序，不要求编号连续；
+- YAML 前置元数据只允许 `id` 和 `title`；
+- 正文必须以 `## 任务描述` 开始，并且不能为空；
+- 目录中的所有 `.md` 文件都会被加载；任意一个文档无效都会阻止运行，不存在额外任务索引；
+- 不要添加 `status`、`dependsOn`、`scope`、`gates`、`verification`、`maxAttempts`、`timeoutMinutes` 或其他字段；
+- 前驱关系由数字顺序自动确定，不需要维护额外任务索引；
+- 任务中可以写任务特有的验收事实，但不能覆盖 Apex 的模型、预算、审核或 Git 策略。
 
-## 命令
-
-```powershell
-# 只校验唯一规格、完整任务目录、文档和线性顺序
-apex-coding-agent validate
-
-# 新建运行；核验并复用当前 HEAD 中仍然有效的 TASK 完成证据
-apex-coding-agent run
-
-# 新建运行并明确放弃历史完成证据，全量重跑
-apex-coding-agent run --fresh
-
-# 恢复最近或指定的 running 运行
-apex-coding-agent resume
-apex-coding-agent resume <run-id>
-
-# supervisor 幂等入口：无状态时新建，running 时恢复，终态时返回
-apex-coding-agent continue
-
-# 查看状态
-apex-coding-agent status
-apex-coding-agent status <run-id>
-```
-
-退出码：`0` 全部完成，`1` 存在失败或基础设施错误，`2` 存在人工阻塞，`130` 收到中断并保留可恢复状态。
-
-控制台日志、`status` 输出和运行摘要统一使用北京时间，例如 `2026-07-15T03:28:40.710+08:00`。状态文件和 JSONL 事件仍保存 UTC 作为机器事实；新运行 ID 的时间段使用文件安全的北京时间格式，例如 `2026-07-15T03-28-40-710+08-00-xxxxxxxx`。
-
-## 状态、审核与 Git
-
-状态保存在 Git common directory：
+需要更多任务时，直接新增文件即可：
 
 ```text
-.git/apex-coding-agent/<project-hash>/
-  active.lock
-  latest
-  runs/<run-id>/
-    state.json
-    events.jsonl
-    summary.md
-    manual-acceptance.md
+orchestration/tasks/
+  TASK-001.md
+  TASK-002.md
+  TASK-010.md
 ```
 
-Worker 返回 `completed` 后，编排器捕获完整项目候选并保存稳定指纹。Reviewer 和提交阶段都必须看到同一候选；中途变化会显式阻塞，不能把未经当前审核的内容混入提交。
+### 6. 校验并运行
 
-候选身份快照只保存路径、类型、模式和内容哈希；大体积 diff 只在 Reviewer 启动前按需生成一次，并使用紧凑上下文。普通 checkpoint、恢复判断和提交前校验不会反复拼接完整 diff。
+先检查文档和任务顺序：
 
-Git 基线协调区分“仓库历史变化”和“当前项目内容变化”。兄弟目录提交只要是当前 expected HEAD 的后继，且两个端点的项目树完全一致，就不会使已冻结候选或 Reviewer 结论失效；系统会持久化新的 expected HEAD 后再提交。任何当前项目文件变化、分支切换、历史分叉或回退仍需人工处理。
+```powershell
+apex-coding-agent validate
+```
 
-每个成功 TASK 产生独立提交，并包含：
+校验通过后，确认整个仓库干净，再启动运行：
 
-- `Apex-Coding-Agent-Run`
-- `Apex-Coding-Agent-Project`
-- `Apex-Coding-Agent-Task`
-- `Apex-Coding-Agent-Candidate`
-- `Apex-Coding-Agent-Task-Contract`
-- `Apex-Coding-Agent-Task-Predecessor`
+```powershell
+git status --short
+apex-coding-agent run
+```
 
-默认 `run` 会按线性顺序读取当前 HEAD 的完成提交：任务契约指纹相同、直接前驱绑定的完成提交相同，且证据提交仍在当前分支祖先链中时，该 TASK 在新 Run 中记为 `completed/reused`。复用必须形成从首个 TASK 开始的连续前缀；任一任务正文或项目上下文变化后，该任务以及全部后继都会重新执行。每个 TASK 只核验当前祖先链中的最新完成证据，不会越过较新的异契约提交回退复用旧结果。
+运行期间，终端会实时显示当前 TASK、Worker/Reviewer 会话、Claude 文本、工具调用、重试、费用和阶段变化。
 
-若现有代码已经满足 TASK，Worker 可以不产生 diff；编排器仍会执行独立审核，并以空提交保存新的完成证据。`--fresh` 不删除历史，只明确禁止本次 Run 复用它们。
+### 7. 查看结果并人工验收
 
-阻塞/失败候选保存在 `refs/apex-coding-agent/quarantine/*`，归档后本次 Run 立即终止，所有后继保持 `pending`。Git 基础设施按项目边界、候选存储、完成账本和隔离区拆分；Worker 的系统 Hook 明确禁止 push、commit、reset、checkout、merge、rebase、部署、浏览器测试及常驻服务，Reviewer 始终只读。
+成功的 TASK 会产生一个独立提交，标题类似：
 
-RunState v6 保存 Worker/Reviewer 每次尝试的请求模型、实际模型、耗时、轮数、费用、API 重试次数与等待时间、工具调用数和验证证据。`summary.md` 与终态事件只从这些持久化事实聚合，不解析可能被拼接或截断的控制台日志。
+```text
+task: TASK-001 实现用户列表查询
+```
 
-## 开发验证
+运行结束后可以查看：
+
+```powershell
+apex-coding-agent status
+git log --oneline
+```
+
+CLI 会打印状态目录和生成的验收产物路径。重点检查：
+
+- `summary.md`：Run 状态、会话数、轮数、费用、耗时、重试、工具调用和模型握手；
+- `manual-acceptance.md`：全部已完成 TASK 的人工验收清单；
+- Git 提交：实际代码、测试和提交范围是否符合预期。
+
+Apex 不运行浏览器或 UI 自动化，因此界面、交互和视觉结果必须由人手动验收。
+
+## 常用命令
+
+| 命令 | 作用 |
+|---|---|
+| `apex-coding-agent init .` | 增量创建 SPEC 和第一个 TASK 模板 |
+| `apex-coding-agent validate` | 校验 SPEC、完整 TASK 目录、文档格式和数字顺序，不执行 Agent |
+| `apex-coding-agent run` | 创建新 Run，并复用当前 HEAD 中仍有效的连续完成前缀 |
+| `apex-coding-agent run --fresh` | 创建新 Run，但本次不复用历史完成证据，所有 TASK 重新执行 |
+| `apex-coding-agent resume` | 读取 `latest` 指向的 Run；若仍为 `running` 则恢复，若已终结则原样返回 |
+| `apex-coding-agent resume <run-id>` | 读取指定 Run；若仍为 `running` 则恢复，若已终结则原样返回 |
+| `apex-coding-agent continue` | 没有状态时新建、运行中时恢复、最新状态已终结时直接返回 |
+| `apex-coding-agent status` | 以 JSON 查看最近 Run 的持久化状态 |
+| `apex-coding-agent status <run-id>` | 查看指定 Run |
+
+`continue` 适合作为外部 supervisor 或定时调度的幂等入口。它不会在一个已经终结的 Run 上自动创建新 Run；需要新一轮执行时请显式使用 `run`。
+
+`resume` 省略 Run ID 时不会向前搜索更早的 `running` 状态，只读取 `latest`。如需恢复其他 Run，请显式传入它的 Run ID。
+
+退出码：
+
+| 退出码 | 含义 |
+|---:|---|
+| `0` | 命令成功；对于 `run`、`resume`、`continue`，表示返回的 Run 已完成 |
+| `1` | Run 失败，或命令遇到配置、基础设施等错误 |
+| `2` | 返回的 Run 存在需要人工处理的阻塞 |
+| `130` | 活动 Run 收到中断信号，并保留了可恢复状态 |
+
+`init`、`validate` 和 `status` 是管理命令：命令本身成功时返回 `0`。因此 `status` 即使展示的是一个历史 `failed` Run，也仍然会返回 `0`。
+
+## TASK 在运行中会经历什么
+
+正常状态流：
+
+```text
+pending
+  → executing
+  → candidate_pending
+  → reviewing
+  → committing
+  → completed
+```
+
+如果 Worker 实现失败、验证仍失败，或 Reviewer 发现 `critical`、`high`、`medium` 问题，会进入修复流程：
+
+```text
+executing / reviewing
+  → retry_pending
+  → executing
+```
+
+终态含义：
+
+| 状态 | 含义 |
+|---|---|
+| `completed` | 审核通过并已创建任务提交 |
+| `blocked` | 缺少外部信息、需要人工决策，或 TASK 资源预算耗尽 |
+| `failed` | 发生不可重试错误，例如认证失败、模型握手不一致或不可恢复的 Agent 错误 |
+| `pending` | 任务尚未开放，通常是前驱任务尚未完成 |
+
+当前 TASK 一旦 `blocked` 或 `failed`，本次 Run 会立即终止，后续 TASK 保持 `pending`，不会跳过失败继续执行。
+
+## 中断、恢复和重新运行
+
+### 安全中断
+
+第一次按 `Ctrl+C` 时，Apex 会请求当前阶段停止并保存 checkpoint。之后执行：
+
+```powershell
+apex-coding-agent resume
+```
+
+如果 Claude Code 子进程在会话初始化前启动失败，Apex 会把它视为基础设施中断：Run 保持 `running`，不会制造一次修复记录，也不会消耗 TASK 会话预算。修复本机环境后直接 `resume` 即可。
+
+### 什么情况下不能 resume
+
+恢复要求原 Run 的项目事实和 Git 基线仍然可信。以下变化通常会拒绝恢复：
+
+- 修改了 `orchestration/SPEC.md` 或任意 TASK；
+- 切换了 Git 分支；
+- 当前项目内容相对记录的 HEAD 已变化；
+- Git 历史发生回退或分叉；
+- 当前状态文件损坏或不是 RunState v6。
+
+如果你有意修改了 SPEC 或 TASK，应创建新 Run：
+
+```powershell
+apex-coding-agent run
+```
+
+### 默认复用与全量重跑
+
+普通 `run` 会读取当前分支祖先链中的 Apex 完成提交，并尝试复用从第一个 TASK 开始的连续完成前缀。只有同时满足以下条件才会复用：
+
+- 当前 TASK 的标题、正文和共享 SPEC 形成的契约指纹没有变化；
+- 它绑定的直接前驱完成提交没有变化；
+- 完成证据仍在当前 HEAD 的祖先链中；
+- 之前的所有 TASK 都已连续复用。
+
+任一 TASK 契约变化后，该任务及全部后继都会重新执行。新增一个排在末尾的 TASK 时，前面仍有效的任务可以直接复用。
+
+`run --fresh` 只表示本次不复用历史证据，不会删除旧提交或旧 Run。即使现有代码已经满足任务，Apex 仍会审核并创建一个允许为空的完成证据提交。
+
+## Worker、Reviewer 与安全边界
+
+### Worker
+
+Worker 是可写的 Claude Code 会话，拥有完整开发工具、终端、技能、用户/项目/本地设置、MCP 和子 Agent 能力。它可以在当前项目内自主查找和修改所需文件，也可以运行适用的非交互验证命令。
+
+系统通过 `PreToolUse` 守卫拒绝：
+
+- `commit`、`push`、`reset`、`checkout`、`merge`、`rebase`、`stash` 等 Git 写操作；
+- npm、云平台、容器和 GitHub CLI 的发布或部署操作；
+- Playwright、Cypress、Selenium、Puppeteer 和浏览器工具；
+- `dev`、`preview`、`serve`、`start` 等常驻服务。
+
+Worker 使用 `bypassPermissions`，Apex 本身也不会注入文件路径白名单；任务提示词要求 Worker 留在当前 TASK 和项目边界内，最终 Git 提交则只接受当前项目范围。请只在可信仓库和可信宿主环境中运行 Apex，并提前检查 Claude 配置、技能和 MCP 是否可能访问外部系统或敏感数据。不要把密钥写进 SPEC、TASK、项目 `.env` 或仓库。
+
+### Reviewer
+
+Reviewer 每次都是全新的只读会话，只提供 `Read`、`Glob`、`Grep`：
+
+- 不继承 Worker 会话；
+- 不加载项目或本地 Claude 设置；
+- 不加载技能、MCP 或子 Agent；
+- 只读取候选 diff、变更文件、相关代码和 Worker 的验证证据；
+- 只有不存在 `critical`、`high`、`medium` 问题时才允许提交。
+
+Reviewer 会读取 Claude 用户配置中的认证、代理和网关连接字段，以便继续使用 CC Switch 当前 Provider，但这些连接设置不会扩大 Reviewer 的工具权限。
+
+### Git 行为
+
+- 新 Run 启动前要求整个仓库干净；
+- 每个 TASK 审核通过后由 Apex 创建一个独立提交；
+- Apex 不会自动 push；
+- 自动提交使用 `--no-verify` 和 `--no-gpg-sign`，不会执行本地提交钩子或 GPG 签名；
+- 提交只包含当前项目范围，不会夹带父仓库兄弟目录的改动；
+- 候选冻结后如果文件内容变化，Reviewer 或提交阶段会拒绝继续；
+- 同一 Git worktree 同时只允许一个 Apex Run 操作共享的 HEAD、索引和文件树。
+
+如果当前 TASK 最终阻塞或失败，未提交候选会被保存到 `refs/apex-coding-agent/quarantine/*`，然后从主工作区清理。可在 `status` 的 `candidateArchive.reference` 中找到引用，并使用下面的命令检查归档内容：
+
+```powershell
+git show <candidateArchive.reference>
+```
+
+## 资源限制
+
+这些限制由 Apex 固定，不能通过 TASK、CLI 或项目配置覆盖：
+
+| 范围 | 模型 / effort | 最大轮数 | 最大费用 | 最大时长 |
+|---|---|---:|---:|---:|
+| 单次 Worker 会话 | Claude 用户当前模型 / `high` | 80 | $6 | 45 分钟 |
+| 单次 Reviewer 会话 | Claude 用户当前模型 / `high` | 30 | $2 | 15 分钟 |
+
+每个 TASK 累计最多：
+
+- 8 个 Worker 会话；
+- 3 个 Reviewer 会话；
+- 200 轮；
+- $15。
+
+达到 TASK 累计上限后会转为 `blocked`，交由人工处理，而不是无限修复。
+
+每个新 attempt 都会重新读取一次 Claude 用户配置中的当前模型，并把请求模型写入状态。Claude SDK 返回 `system/init` 后，Apex 会核验实际模型是否完全一致；不一致时会在接受工具结果前终止。恢复同一个 attempt 时继续使用原模型快照，不受之后切换 Provider 的影响。
+
+## 状态和运行产物
+
+状态不会写入目标项目文件树，而是保存在 Git 管理目录中。普通单 worktree 仓库通常类似：
+
+```text
+.git/apex-coding-agent/
+  active.lock
+  <project-hash>/
+    latest
+    runs/
+      <run-id>/
+        state.json
+        events.jsonl
+        summary.md
+        manual-acceptance.md
+```
+
+更准确地说：
+
+- 状态位于 `<git-common-dir>/apex-coding-agent/<project-hash>/`；
+- 进程锁位于当前 worktree 的 `<git-dir>/apex-coding-agent/active.lock`；
+- 同一仓库中的兄弟项目拥有不同状态目录，但共享同一个 worktree 锁；
+- linked worktree 使用自己的锁，可以在不共享 HEAD、索引和文件树时独立运行。
+
+`state.json` 和 `events.jsonl` 以 UTC 保存机器事实；终端日志、`status` 投影、Run ID 和 Markdown 产物使用北京时间（UTC+08:00）。
+
+## 常见问题
+
+### 启动时报“整个 Git 仓库必须干净”
+
+在仓库顶层执行 `git status --short`。Apex 检查的是整个仓库，不只是当前子项目。请先提交、暂存到其他安全位置或自行处理已有改动，再启动新 Run。
+
+### 提示 Claude 用户配置缺少模型
+
+先通过 CC Switch 选择模型，或在 Claude Code 用户配置中明确设置 `env.ANTHROPIC_MODEL` 或顶层 `model`。Apex 不使用 SDK 的隐式默认模型。
+
+### 认证失败后为什么没有自动反复重试
+
+认证失败需要修复外部配置，重复创建相同会话没有意义，因此会作为不可重试错误终止。先运行 `claude auth status` 并修复认证，再根据状态创建新 Run 或恢复仍为 `running` 的 Run。
+
+### 为什么修改 TASK 后不能 resume
+
+`resume` 只能继续同一份已冻结的项目输入。修改规格或任务意味着执行契约已经改变，应使用 `run` 创建新状态，并让系统重新核验哪些旧任务仍可复用。
+
+### 为什么没有代码变化也产生提交
+
+如果现有代码已经满足 TASK，Worker 可以不修改文件。Apex 仍会执行独立审核，并创建空提交保存该任务在当前契约和前驱下已经完成的 Git 证据。
+
+### 为什么不自动测试页面
+
+Apex 明确禁止浏览器、UI 自动化和常驻开发服务器。Worker 负责可运行的非浏览器检查，界面与交互统一写入 `manual-acceptance.md` 由人工验证。
+
+### 命令结束了，但状态仍是 running
+
+通常表示收到了安全中断，或 Claude Code 子进程在初始化前发生基础设施故障。先修复终端中显示的问题，再运行 `apex-coding-agent resume`。
+
+## 本项目开发
 
 ```powershell
 pnpm typecheck
@@ -208,3 +443,5 @@ pnpm build
 ```
 
 自动化测试使用 Fake Agent 或临时 Git 仓库，不调用真实 Claude，也不启动浏览器。
+
+更完整的内部状态机、模块边界和持久化协议见 [源码功能说明](SOURCE_FUNCTIONAL_DOCUMENTATION.md)。维护者发布 npm 包时请参阅 [npm 包发布手册](docs/NpmPublishing.md)。
