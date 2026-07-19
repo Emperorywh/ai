@@ -24,6 +24,20 @@ const reviewSafetyRules = `
 重点检查架构边界、数据流、状态流、边界条件、回归风险和测试缺口。
 `;
 
+/*
+ * Reviewer 必须知道候选冻结与后续提交的确定性语义，否则会把提交前正常存在的 untracked 文件
+ * 误判为“可能没有进入 checkpoint”，并把本应审核或修复的问题错误升级为人工阻塞。
+ * 状态协议同时把可修复缺陷、真正外部阻塞和可逆实现选择分开，避免 blocked 成为逃避判断的兜底值。
+ */
+const reviewDecisionProtocol = `
+# 审核状态与候选生命周期协议
+- “实际变更文件”是编排器已经冻结并校验指纹的完整候选，包含 tracked、untracked 和 deleted 文件；审核通过后，编排器会把这份候选原子提交。提交前看到 \`git status\` 的 \`??\` 是新增文件的正常状态，不代表文件会漏出 checkpoint，不得因此询问人工确认是否纳入提交。
+- 发现可以通过修改代码、资产、测试或文档解决的 critical/high/medium 正确性问题时返回 rejected，并写入 findings；候选偏离明确 SPEC/TASK 也属于 finding，不得改写成“是否接受偏离”的人工问题。
+- 只有正确性确实无法判断，且缺少的事实属于项目内无法推导的外部信息、凭据或不可逆产品决策时，才返回 blocked；blockingQuestions 必须准确指出缺少的外部事实。
+- 对项目已有证据支持的可逆实现选择直接作出审核判断：满足契约就批准，不满足就拒绝。不得仅因希望维护者确认偏好而返回 blocked。
+- 浏览器与 UI 验收按系统边界留给人工，不会阻止代码候选进入提交；只评估自动化证据与静态审核能覆盖的正确性风险。
+`;
+
 export class PromptBuilder {
   public buildImplementation(
     loaded: LoadedProject,
@@ -97,6 +111,7 @@ export class PromptBuilder {
       this.renderSpecification(loaded.specificationDocument),
       this.renderProjectContext(projectContext),
       this.renderTaskContext(loaded, task),
+      reviewDecisionProtocol,
       "# 实际变更文件",
       changedFiles.map((file) => `- ${file}`).join("\n"),
       "# Git diff",

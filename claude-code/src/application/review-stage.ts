@@ -164,8 +164,11 @@ export class ReviewStage {
     const hasMaterialFindings = outcome.data.findings.some(
       (finding) => finding.severity !== "low",
     );
-    const normalizedOutcome = outcome.data.status === "approved"
-      && hasMaterialFindings
+    /*
+     * critical/high/medium finding 是“候选存在可修复缺陷”的确定性事实，优先级高于模型给出的状态标签。
+     * 即使 Reviewer 误把同一结果标成 blocked，也应进入 repair，而不是终止整个 Run 等待人工裁决。
+     */
+    const normalizedOutcome = hasMaterialFindings
       ? "rejected" as const
       : outcome.data.status;
     const finishedState = this.finishAttempt(
@@ -174,7 +177,18 @@ export class ReviewStage {
       outcome,
       normalizedOutcome,
     );
-    if (outcome.data.status === "blocked") {
+    if (normalizedOutcome === "rejected") {
+      const retry = this.support.scheduleRetry(input, finishedState, {
+        kind: "repair",
+        reason: "独立审核未通过",
+        feedback: formatReviewFeedback(outcome.data),
+      });
+      return {
+        ...retry,
+        details: this.support.createOutcomeDetails(outcome),
+      };
+    }
+    if (normalizedOutcome === "blocked") {
       const reason = outcome.data.blockingQuestions.join("；")
         || outcome.data.summary;
       return {
@@ -186,17 +200,6 @@ export class ReviewStage {
           { failureReason: reason },
         ),
         message: `审核需要人工决策：${reason}`,
-        details: this.support.createOutcomeDetails(outcome),
-      };
-    }
-    if (outcome.data.status === "rejected" || hasMaterialFindings) {
-      const retry = this.support.scheduleRetry(input, finishedState, {
-        kind: "repair",
-        reason: "独立审核未通过",
-        feedback: formatReviewFeedback(outcome.data),
-      });
-      return {
-        ...retry,
         details: this.support.createOutcomeDetails(outcome),
       };
     }

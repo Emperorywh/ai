@@ -1,6 +1,6 @@
 {
   "name": "apex-coding-agent",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "基于 Claude Agent SDK 的严格线性、单并发、可恢复编码任务代理",
   "type": "module",
   "bin": {

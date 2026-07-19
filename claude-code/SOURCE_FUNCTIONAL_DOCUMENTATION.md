@@ -234,9 +234,11 @@ Reviewer 启动前才组合：
 - 有界的 untracked 文件预览；
 - Worker 结构化验证证据。
 
+“实际变更文件”就是已冻结并经过指纹校验的完整候选，覆盖 tracked、untracked 和 deleted 文件；审核通过后提交阶段会原子提交同一候选。因此提交前 `git status` 中的 `??` 只是新增文件的正常状态，不能被 Reviewer 当作 checkpoint 范围不确定。
+
 Reviewer 使用 `Read/Glob/Grep`、`dontAsk`、空 MCP、空 skills、空 setting sources。每次审核都创建全新 session，不继承 Worker、项目设置或用户权限设置；基础设施通过 Claude SDK 重新解析当前用户级/托管级配置，并投影连接环境与认证辅助命令。该读取路径与 CC Switch 切换后 Claude Code 使用的实时配置一致，不访问 `cc-switch.db`，也不在 Apex 中维护凭据副本。令牌通过合并后的子进程环境传递，不进入命令行参数；用户设置环境覆盖宿主终端同名变量，认证/网关连接和工具权限保持解耦。
 
-审核通过且没有 critical/high/medium finding 才进入提交；拒绝或实质 finding 进入 repair；人工决策进入 blocked；会话已建立后的可恢复 Agent 错误按 Reviewer 预算新建会话重试；会话初始化前的子进程启动故障属于 Run 基础设施中断，保留 `running` 状态且不消耗 Reviewer/Worker 预算；认证失败属于需要修复外部配置的不可重试错误并立即终止。
+审核通过且没有 critical/high/medium finding 才进入提交；拒绝或实质 finding 进入 repair，即使模型把带实质 finding 的结果误标为 blocked，应用层也以 finding 为准进入 repair。只有正确性依赖项目内无法推导的外部信息、凭据或不可逆产品决策时才允许进入 blocked；明确契约偏差必须形成 finding，可逆实现选择必须由 Reviewer 直接批准或拒绝。会话已建立后的可恢复 Agent 错误按 Reviewer 预算新建会话重试；会话初始化前的子进程启动故障属于 Run 基础设施中断，保留 `running` 状态且不消耗 Reviewer/Worker 预算；认证失败属于需要修复外部配置的不可重试错误并立即终止。
 
 ## 10. Git 候选、账本与隔离区
 

@@ -494,6 +494,54 @@ describe("QueueOrchestrator", () => {
       .toEqual(["implementation", "repair"]);
   });
 
+  it("Reviewer 将可修复缺陷误标为 blocked 时仍进入 repair", async () => {
+    let reviewRuns = 0;
+    const agent = new RecordingAgent((request) => {
+      if (request.attemptKind !== "review") {
+        return completedBehavior(request);
+      }
+      reviewRuns += 1;
+      if (reviewRuns > 1) {
+        return completedBehavior(request);
+      }
+      return {
+        ok: true,
+        sessionId: request.sessionId ?? "missing-review-session",
+        data: {
+          status: "blocked",
+          summary: "存在可以由 Worker 修复的契约偏差",
+          findings: [{
+            severity: "medium",
+            message: "新增资产未满足任务契约",
+          }],
+          blockingQuestions: ["是否接受当前资产"],
+        },
+        costUsd: 0.01,
+        turns: 1,
+      };
+    });
+    const fixture = createFixture(new RecordingWorkspace(), agent);
+
+    /*
+     * finding 表明问题可由候选修改解决，必须覆盖模型误给的 blocked 标签并继续 repair。
+     * 第二次审核通过后 Run 正常提交，证明人工阻塞不会吞掉已有的可操作修复反馈。
+     */
+    const result = await fixture.orchestrator.start(
+      createLoadedProject([{ id: "TASK-001" }]),
+    );
+
+    expect(result.state.status).toBe("completed");
+    expect(result.state.tasks["TASK-001"]?.reviewAttempts.map(
+      (attempt) => attempt.outcome,
+    )).toEqual(["rejected", "approved"]);
+    expect(agent.requests.map((request) => request.attemptKind)).toEqual([
+      "implementation",
+      "review",
+      "repair",
+      "review",
+    ]);
+  });
+
   it("达到 TASK Worker 会话预算后停止 repair 并转为可解释阻塞", async () => {
     const agent = new RecordingAgent((request) => ({
       ok: true,
@@ -803,6 +851,19 @@ describe("QueueOrchestrator", () => {
     expect(modelResolver.resolvedDirectories).toEqual(["/project", "/project"]);
     expect(agent.requests[1]?.sessionId).not.toBe(agent.requests[0]?.sessionId);
     expect(agent.requests[1]?.prompt).toContain("# 实际变更文件");
+    /*
+     * Reviewer 必须收到冻结候选、原子提交和状态分流事实，不能再从工作区的 ?? 状态猜测提交范围。
+     * 这些断言防止未来精简提示词时重新引入本次误阻塞根因。
+     */
+    expect(agent.requests[1]?.prompt).toContain(
+      "是编排器已经冻结并校验指纹的完整候选",
+    );
+    expect(agent.requests[1]?.prompt).toContain(
+      "不得改写成“是否接受偏离”的人工问题",
+    );
+    expect(agent.requests[1]?.prompt).toContain(
+      "不得仅因希望维护者确认偏好而返回 blocked",
+    );
     expect(agent.requests[1]?.prompt).not.toContain("# 外部门禁结果");
   });
 });
