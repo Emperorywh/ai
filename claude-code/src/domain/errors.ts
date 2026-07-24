@@ -51,3 +51,43 @@ export class CandidateChangedError extends Error {
     this.name = "CandidateChangedError";
   }
 }
+
+/*
+ * 内容寻址证据存储的错误分类按调用方可处置语义拆分：
+ * 引用形状非法沿用 CanonicalViolationError；以下四类覆盖寻址、缺失、完整性与协议冲突。
+ */
+export class ArtifactNamespaceError extends Error {
+  public constructor(message: string) {
+    super(message);
+    this.name = "ArtifactNamespaceError";
+  }
+}
+
+export class ArtifactNotFoundError extends Error {
+  public constructor(message: string) {
+    super(message);
+    this.name = "ArtifactNotFoundError";
+  }
+}
+
+/*
+ * ArtifactIntegrityError 表示已持久化字节与引用摘要不符：截断、腐化或同 hash 不同内容。
+ * 它永远 fail closed，不存在自动修复或自动覆盖已落盘对象的路径。
+ */
+export class ArtifactIntegrityError extends Error {
+  public constructor(message: string) {
+    super(message);
+    this.name = "ArtifactIntegrityError";
+  }
+}
+
+/*
+ * ArtifactConflictError 专用于确定性 receipt：同一稳定协议键写入了不同内容，属于协议冲突。
+ * 同键同内容重试是合法幂等，不进入本错误。
+ */
+export class ArtifactConflictError extends Error {
+  public constructor(message: string) {
+    super(message);
+    this.name = "ArtifactConflictError";
+  }
+}

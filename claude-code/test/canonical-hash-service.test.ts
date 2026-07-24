@@ -192,6 +192,48 @@ describe("NodeCanonicalHashService.digestBytes", () => {
   });
 });
 
+describe("NodeCanonicalHashService.encodeStructured", () => {
+  it("与 digestStructured 共享同一规范字节管道", () => {
+    const service = new NodeCanonicalHashService();
+    const value = { schemaVersion: 1, a: 1, b: "x" };
+
+    const bytes = service.encodeStructured(demoSchema, value);
+
+    expect(new TextDecoder().decode(bytes)).toBe(
+      '{"a":1,"b":"x","schemaVersion":1}',
+    );
+    expect(service.digestBytes(bytes)).toBe(
+      service.digestStructured(demoSchema, value),
+    );
+  });
+
+  it("编码产物为无 BOM 的 UTF-8，拒绝路径与摘要完全一致", () => {
+    const service = new NodeCanonicalHashService();
+    const bytes = service.encodeStructured(demoSchema, {
+      schemaVersion: 1,
+      a: 1,
+      b: "中文",
+    });
+
+    expect(bytes[0]).not.toBe(0xef);
+    expect(() =>
+      service.encodeStructured(demoSchema, {
+        schemaVersion: 1,
+        a: Number.POSITIVE_INFINITY,
+        b: "x",
+      })
+    ).toThrow(CanonicalViolationError);
+    expect(() =>
+      service.encodeStructured(demoSchema, {
+        schemaVersion: 1,
+        a: 1,
+        b: "x",
+        extra: true,
+      })
+    ).toThrow(CanonicalViolationError);
+  });
+});
+
 describe("defineCanonicalSchema", () => {
   it("拒绝非正整数版本与重复 schemaVersion 声明", () => {
     for (const version of [0, -1, 1.5, Number.NaN]) {

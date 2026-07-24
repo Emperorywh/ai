@@ -7,6 +7,11 @@
 import type { CanonicalSchema } from "../domain/canonical-schema.js";
 
 export interface CanonicalHashService {
+  /*
+   * encodeStructured 与 digestStructured 共享同一条管道，产物是同一批规范字节：
+   * 内容寻址存储由此保存结构化 artifact，digestBytes(encodeStructured(x)) 恒等于 digestStructured(x)。
+   */
+  encodeStructured<T>(schema: CanonicalSchema<T>, value: unknown): Uint8Array;
   digestStructured<T>(schema: CanonicalSchema<T>, value: unknown): string;
   digestBytes(bytes: Uint8Array): string;
 }

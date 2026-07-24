@@ -4,6 +4,7 @@
  */
 import { resolve } from "node:path";
 import type { LoadedProject } from "../domain/project.js";
+import { ArtifactReferenceGuard } from "../application/artifact-reference-guard.js";
 import { PromptBuilder } from "../application/prompt-builder.js";
 import { QueueOrchestrator } from "../application/queue-orchestrator.js";
 import { RunArtifactWriter } from "../application/run-artifact-writer.js";
@@ -34,6 +35,7 @@ import {
   JsonlEventLogger,
 } from "../infrastructure/logging/event-loggers.js";
 import { FileRunLock } from "../infrastructure/persistence/file-run-lock.js";
+import { FileArtifactStore } from "../infrastructure/persistence/file-artifact-store.js";
 import { FileStateStore } from "../infrastructure/persistence/file-state-store.js";
 import { SystemClock } from "../infrastructure/system-clock.js";
 import { FileProjectRepository } from "../infrastructure/tasks/file-project-repository.js";
@@ -43,12 +45,15 @@ import {
   resolveDefaultHostExecutionPolicyPath,
 } from "../infrastructure/host/file-host-execution-policy-source.js";
 import { BeijingTimeFormatter } from "../infrastructure/time/beijing-time-formatter.js";
+import type { ArtifactStore } from "../ports/artifact-store.js";
 import type { TimeFormatter } from "../ports/time-formatter.js";
 
 export interface OrchestratorRuntime {
   readonly loaded: LoadedProject;
   readonly orchestrator: QueueOrchestrator;
   readonly stateDirectory: string;
+  readonly artifactStore: ArtifactStore;
+  readonly artifactReferences: ArtifactReferenceGuard;
   readonly timeFormatter: TimeFormatter;
 }
 
@@ -78,6 +83,15 @@ export async function createOrchestratorRuntime(
    * 组合根显式装配两种作用域，持久化实现不再猜测 Git 资源所有权。
    */
   const stateStore = new FileStateStore(stateDirectory);
+  /*
+   * 内容寻址证据存储与状态快照共享同一项目级状态目录，但以独立 artifacts 子根隔离。
+   * 它是唯一不可变事实源：后续证据链写入必须先落盘 artifact，再由引用守卫放行状态引用。
+   */
+  const artifactStore = new FileArtifactStore(
+    resolve(stateDirectory, "artifacts"),
+    canonicalHash,
+  );
+  const artifactReferences = new ArtifactReferenceGuard(artifactStore);
   const clock = new SystemClock();
   const timeFormatter = new BeijingTimeFormatter();
   const logger = new CompositeEventLogger([
@@ -143,6 +157,8 @@ export async function createOrchestratorRuntime(
   return {
     loaded,
     stateDirectory,
+    artifactStore,
+    artifactReferences,
     timeFormatter,
     orchestrator: new QueueOrchestrator({
       taskExecution,

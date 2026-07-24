@@ -17,10 +17,10 @@ import { CanonicalViolationError } from "../../domain/errors.js";
 import type { CanonicalHashService } from "../../ports/canonical-hash.js";
 
 export class NodeCanonicalHashService implements CanonicalHashService {
-  public digestStructured<T>(
+  public encodeStructured<T>(
     schema: CanonicalSchema<T>,
     value: unknown,
-  ): string {
+  ): Uint8Array {
     assertCanonicalSchemaDefinition(schema);
     const parsed = schema.schema.safeParse(value);
     if (!parsed.success) {
@@ -29,7 +29,14 @@ export class NodeCanonicalHashService implements CanonicalHashService {
       );
     }
     assertSchemaPreservesValue(value, parsed.data);
-    return this.digestBytes(encodeCanonicalUtf8(encodeCanonicalJson(parsed.data)));
+    return encodeCanonicalUtf8(encodeCanonicalJson(parsed.data));
+  }
+
+  public digestStructured<T>(
+    schema: CanonicalSchema<T>,
+    value: unknown,
+  ): string {
+    return this.digestBytes(this.encodeStructured(schema, value));
   }
 
   public digestBytes(bytes: Uint8Array): string {

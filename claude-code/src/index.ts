@@ -2,6 +2,7 @@
  * 公共入口只导出稳定领域契约、应用服务与可替换端口，不暴露 CLI 的参数解析副作用。
  * 高级使用者可以自行装配端口，默认命令行用户则通过内置组合根获得文件与 Git 实现。
  */
+export * from "./application/artifact-reference-guard.js";
 export * from "./application/prompt-builder.js";
 export * from "./application/queue-orchestrator.js";
 export * from "./application/commit-stage.js";
@@ -25,6 +26,8 @@ export * from "./application/workspace-baseline-resolver.js";
 export * from "./application/orchestrator-policy.js";
 export * from "./domain/acceptance-contract.js";
 export * from "./domain/agent-result.js";
+export * from "./domain/artifact-ref.js";
+export * from "./domain/attachment-digest.js";
 export * from "./domain/errors.js";
 export * from "./domain/host-capability-validation.js";
 export * from "./domain/host-execution-policy.js";
@@ -36,6 +39,8 @@ export * from "./domain/run-state-invariants.js";
 export * from "./domain/task-completion.js";
 export * from "./domain/task-sequence.js";
 export * from "./ports/agent-executor.js";
+export * from "./ports/artifact-store.js";
+export * from "./ports/canonical-hash.js";
 export * from "./ports/clock.js";
 export * from "./ports/event-logger.js";
 export * from "./ports/host-execution-policy-source.js";

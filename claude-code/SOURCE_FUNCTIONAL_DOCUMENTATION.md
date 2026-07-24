@@ -37,6 +37,7 @@
 - `infrastructure/host/file-host-execution-policy-source.ts`：只读取固定用户配置目录的 `host-execution-policy.yaml`，项目与 CLI 不能覆盖路径。
 - `domain/canonical-json.ts`、`domain/canonical-schema.ts`、`domain/canonical-text.ts`、`domain/canonical-paths.ts`：JCS 规范编码、版本化 strict Schema、源文本 LF 归一化与 Git 路径校验。
 - `domain/attachment-digest.ts`：附件原始字节摘要契约。
+- `domain/artifact-ref.ts`：内容寻址证据引用与 deterministic receipt 键契约；`ArtifactRef` 与附件摘要共享同一 strict Schema，namespace/键白名单在这里统一定义。
 - `domain/agent-result.ts`：Worker、Reviewer、验证证据和 Agent 遥测的结构化协议。
 
 领域层不读取文件、不执行 Git，也不依赖 Claude SDK。
@@ -58,6 +59,7 @@
 - `run-artifact-writer.ts`：人工验收清单与运行摘要投影。
 - `run-metrics.ts`：从 RunState 聚合统一可观测指标。
 - `task-progress-reconciler.ts`：跨 Run 完成证据核验与复用计划。
+- `artifact-reference-guard.ts`：“artifact 先落盘、状态后引用”的应用边界；RunState 只允许引用重算校验通过的内容或与状态记录逐字段一致的 receipt。
 - `prompt-builder.ts`：项目清单、验证协议、实现、恢复、修复和审核提示词。
 
 各阶段不共享隐式可变状态。应用服务只依赖实际使用的最小端口。
@@ -70,6 +72,7 @@
 - `project-context-provider.ts`：确定性项目导航清单编译边界。
 - `workspace.ts`：拆分为仓库身份、控制路径、历史检查、候选存储、隔离区、提交器、提交恢复和完成账本端口；`Workspace` 只是默认聚合门面。
 - `state-store.ts`、`project-repository.ts`、`run-lock.ts`：状态、静态项目输入与单实例锁。
+- `artifact-store.ts`：不可变内容寻址证据存储端口；只有写入、读取、存在性与完整性校验和确定性 receipt 定位，没有枚举、扫描、覆盖或删除能力。
 - `event-logger.ts`、`clock.ts`、`time-formatter.ts`：观察与时间边界。
 
 ### 2.4 基础设施层
@@ -90,7 +93,7 @@
 - `markdown-contract-section.ts`：Markdown 固定章节提取边界，只识别围栏外精确标题行与唯一 yaml 代码块。
 - `node-canonical-hash-service.ts`：唯一规范哈希实现（strict Schema + JCS + SHA-256）。
 - `file-project-context-provider.ts`：有界、稳定排序的项目文件树和 package scripts 编译。
-- `persistence/*`、`logging/*`：原子状态库、锁和事件日志。
+- `persistence/*`、`logging/*`：原子状态库、内容寻址证据存储（fsync + atomic rename、逐字节幂等、冲突 fail closed）、锁和事件日志。
 
 `cli/composition-root.ts` 是具体实现的唯一装配位置。
 
@@ -320,6 +323,7 @@ RunState v6 不迁移旧状态。每次 checkpoint 和 resume 都调用同一语
 - 项目上下文稳定排序、忽略策略和脚本发现；
 - RunState 跨字段语义不变量；
 - Git 指纹、紧凑审核材料、空提交、父仓库边界和隔离区；
+- 内容寻址证据存储的幂等写入、重算校验、崩溃临时文件、截断/冲突 fail closed、寻址安全与孤立 receipt 不提升；
 - checkpoint、锁、摘要指标与北京时间展示。
 
 测试使用 Fake Agent 或临时 Git 仓库，不调用真实 Claude，也不启动浏览器。

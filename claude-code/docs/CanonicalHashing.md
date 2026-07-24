@@ -6,9 +6,10 @@
 
 `ports/canonical-hash.ts` 的 `CanonicalHashService` 是所有证书、manifest、结构化 evidence、契约投影和 trailer 引用的唯一哈希端口；`infrastructure/canonical/node-canonical-hash-service.ts` 的 `NodeCanonicalHashService` 是唯一生产实现，由组合根创建并注入项目仓储、进度协调器与提交阶段。
 
-端口只暴露两个方法：
+端口只暴露三个方法：
 
-- `digestStructured(schema, value)`：结构化对象摘要。`schema` 必须是 `defineCanonicalSchema` 构造的品牌化 `CanonicalSchema`，不存在“不传 Schema 直接对任意对象签发摘要”的方法。
+- `encodeStructured(schema, value)`：结构化对象规范编码。与 `digestStructured` 共享同一条管道，产物是同一批 UTF-8 规范字节；内容寻址证据存储（见 `ArtifactStore.md`）由此保存结构化 artifact，不存在第二条结构化编码路径。
+- `digestStructured(schema, value)`：结构化对象摘要，恒等于 `digestBytes(encodeStructured(...))`。`schema` 必须是 `defineCanonicalSchema` 构造的品牌化 `CanonicalSchema`，不存在“不传 Schema 直接对任意对象签发摘要”的方法。
 - `digestBytes(bytes)`：原始字节摘要，用于规范化后的源文本和附件字节，不做任何隐式文本或换行归一化。
 
 领域与应用层只依赖规范 DTO 和该端口，不依赖文件系统、Git 或 SDK 类型；摘要算法没有第二套实现，也没有旧算法 fallback。
