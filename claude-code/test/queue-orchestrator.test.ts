@@ -26,6 +26,7 @@ import {
   type RunState,
 } from "../src/domain/run-state.js";
 import { BeijingTimeFormatter } from "../src/infrastructure/time/beijing-time-formatter.js";
+import { NodeCanonicalHashService } from "../src/infrastructure/canonical/node-canonical-hash-service.js";
 import type { AgentRunRequest } from "../src/ports/agent-executor.js";
 import {
   FakeClock,
@@ -1260,6 +1261,7 @@ function createFixture(
   const resourceBudget = new TaskResourceBudget();
   const stageSupport = new TaskStageSupport(clock);
   const baselineResolver = new WorkspaceBaselineResolver(workspace);
+  const canonicalHash = new NodeCanonicalHashService();
   const taskExecution = new TaskExecutionService(
     new ImplementationStage(
       agent,
@@ -1281,12 +1283,12 @@ function createFixture(
       resourceBudget,
       stageSupport,
     ),
-    new CommitStage(workspace, stageSupport, baselineResolver),
+    new CommitStage(workspace, stageSupport, baselineResolver, canonicalHash),
   );
   const checkpoints = new RunCheckpointWriter(stateStore, logger, clock);
   const orchestrator = new QueueOrchestrator({
     taskExecution,
-    taskProgress: new TaskProgressReconciler(workspace),
+    taskProgress: new TaskProgressReconciler(workspace, canonicalHash),
     stateStore,
     runLock: lock,
     workspace,

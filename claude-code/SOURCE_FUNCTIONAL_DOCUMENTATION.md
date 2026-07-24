@@ -27,7 +27,10 @@
 - `domain/task-sequence.ts`：数字线性排序、序号唯一性和直接前驱推导。
 - `domain/run-state.ts`：RunState v6、TASK 状态和合法转换。
 - `domain/run-state-invariants.ts`：TASK 集合、线性前缀、尝试时间线、候选与审核的跨字段语义校验。
-- `domain/task-completion.ts`：任务契约指纹和直接前驱完成指纹。
+- `domain/task-completion.ts`：直接前驱完成指纹的规范投影。
+- `domain/project-contract.ts`：SPEC/TASK 契约投影与项目源集合投影，全部经唯一规范哈希入口计算。
+- `domain/canonical-json.ts`、`domain/canonical-schema.ts`、`domain/canonical-text.ts`、`domain/canonical-paths.ts`：JCS 规范编码、版本化 strict Schema、源文本 LF 归一化与 Git 路径校验。
+- `domain/attachment-digest.ts`：附件原始字节摘要契约。
 - `domain/agent-result.ts`：Worker、Reviewer、验证证据和 Agent 遥测的结构化协议。
 
 领域层不读取文件、不执行 Git，也不依赖 Claude SDK。
@@ -78,6 +81,7 @@
 - `git-candidate-quarantine.ts`：终态候选的可重入归档。
 - `git-workspace.ts`：以上 Git 组件的薄门面。
 - `file-project-repository.ts`：唯一规格与 TASK Markdown 编译。
+- `node-canonical-hash-service.ts`：唯一规范哈希实现（strict Schema + JCS + SHA-256）。
 - `file-project-context-provider.ts`：有界、稳定排序的项目文件树和 package scripts 编译。
 - `persistence/*`、`logging/*`：原子状态库、锁和事件日志。
 
@@ -122,6 +126,8 @@ title: 实现用户列表
 ```
 
 前置元数据只允许 `id` 和 `title`。`dependsOn`、资源限制、状态、路径范围、外部门禁及其他未知字段都会被严格拒绝。目录中的全部 Markdown 都会加载并按数字值排序，不存在配置索引与目录内容漂移。
+
+源文本先经 UTF-8、BOM 与 NUL 校验，再统一做 CRLF/CR → LF 归一化；其他正文字符逐字节保留。全部项目与契约摘要都由唯一 `CanonicalHashService` 计算：版本化 strict Schema + JCS + SHA-256，不存在第二套算法或旧算法 fallback。Git 路径在加载时校验 NFC、规范化/大小写折叠碰撞和平台可表示性。详见 `docs/CanonicalHashing.md`。
 
 ## 5. 队列与职责化阶段
 
@@ -272,7 +278,7 @@ Git 基础设施分为：
 
 `--fresh` 只禁止本次复用，不删除历史。
 
-完成契约版本为 v6；旧执行模型产生的契约哈希不会被当前系统复用，也没有迁移或降级分支。
+完成契约以规范投影（`schemaVersion: 1`）经唯一规范哈希入口计算；旧执行模型产生的契约哈希不会被当前系统复用，也没有迁移或降级分支。
 
 恢复前统一核验项目哈希、项目根、RunState 语义、仓库根、分支与 HEAD。Worker init 已落盘时使用 SDK resume；未 init 时替换 sessionId 并复用同一 attempt，基础设施启动故障不会制造 repair 历史；Reviewer 崩溃后结束旧尝试并创建全新只读会话。HEAD 变化只接受两条可推导路径：精确 trailer 证明的“任务提交成功、状态未落盘”，或旧 HEAD 为当前 HEAD 祖先且当前项目端点树完全一致的项目外快进；后者必须先更新 checkpoint 才能继续。
 

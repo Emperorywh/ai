@@ -25,6 +25,7 @@ import { SdkClaudeConnectionSettingsResolver } from "../infrastructure/claude/cl
 import { SdkClaudeModelResolver } from "../infrastructure/claude/claude-model-resolver.js";
 import { SdkClaudeUserSettingsSource } from "../infrastructure/claude/claude-user-settings-source.js";
 import { ConsoleClaudeMessageObserver } from "../infrastructure/claude/console-claude-message-observer.js";
+import { NodeCanonicalHashService } from "../infrastructure/canonical/node-canonical-hash-service.js";
 import { GitWorkspace } from "../infrastructure/git/git-workspace.js";
 import {
   CompositeEventLogger,
@@ -49,13 +50,21 @@ export interface OrchestratorRuntime {
 export async function loadProject(
   projectRoot: string,
 ): Promise<LoadedProject> {
-  return new FileProjectRepository().load(resolve(projectRoot));
+  return new FileProjectRepository(new NodeCanonicalHashService()).load(
+    resolve(projectRoot),
+  );
 }
 
 export async function createOrchestratorRuntime(
   projectRoot: string,
 ): Promise<OrchestratorRuntime> {
-  const loaded = await loadProject(projectRoot);
+  /*
+   * 规范哈希服务在组合根创建唯一实例，项目加载、进度协调与提交阶段共享同一摘要边界。
+   */
+  const canonicalHash = new NodeCanonicalHashService();
+  const loaded = await new FileProjectRepository(canonicalHash).load(
+    resolve(projectRoot),
+  );
   const workspace = new GitWorkspace(loaded.projectRoot);
   const stateDirectory = await workspace.getStateDirectory();
   const lockDirectory = await workspace.getLockDirectory();
@@ -112,7 +121,7 @@ export async function createOrchestratorRuntime(
       resourceBudget,
       stageSupport,
     ),
-    new CommitStage(workspace, stageSupport, baselineResolver),
+    new CommitStage(workspace, stageSupport, baselineResolver, canonicalHash),
   );
   const checkpoints = new RunCheckpointWriter(stateStore, logger, clock);
 
@@ -122,7 +131,7 @@ export async function createOrchestratorRuntime(
     timeFormatter,
     orchestrator: new QueueOrchestrator({
       taskExecution,
-      taskProgress: new TaskProgressReconciler(workspace),
+      taskProgress: new TaskProgressReconciler(workspace, canonicalHash),
       stateStore,
       runLock: new FileRunLock(lockDirectory),
       workspace,

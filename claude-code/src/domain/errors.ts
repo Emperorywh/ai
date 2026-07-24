@@ -31,6 +31,17 @@ export class RunLockedError extends Error {
 }
 
 /*
+ * CanonicalViolationError 是唯一规范编码边界的 fail-closed 拒绝信号。
+ * 未知字段、非规范文本、非法 Unicode、非有限数字和非法路径都通过它拒绝，不允许清洗后继续。
+ */
+export class CanonicalViolationError extends Error {
+  public constructor(message: string) {
+    super(message);
+    this.name = "CanonicalViolationError";
+  }
+}
+
+/*
  * CandidateChangedError 表达冻结候选与当前文件树不一致的稳定业务语义。
  * 应用层可将其收敛为 blocked，其他 Git 或文件系统故障仍按基础设施错误传播。
  */

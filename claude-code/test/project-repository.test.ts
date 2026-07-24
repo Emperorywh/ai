@@ -7,7 +7,12 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { stringify } from "yaml";
+import { NodeCanonicalHashService } from "../src/infrastructure/canonical/node-canonical-hash-service.js";
 import { FileProjectRepository } from "../src/infrastructure/tasks/file-project-repository.js";
+
+function createRepository(): FileProjectRepository {
+  return new FileProjectRepository(new NodeCanonicalHashService());
+}
 
 const temporaryRoots: string[] = [];
 
@@ -66,7 +71,7 @@ afterEach(async () => {
 describe("FileProjectRepository", () => {
   it("按集中式项目结构加载唯一规格和完整 TASK 目录", async () => {
     const fixture = await createProjectFixture();
-    const loaded = await new FileProjectRepository().load(fixture.root);
+    const loaded = await createRepository().load(fixture.root);
 
     expect(loaded.projectRoot).toBe(resolve(fixture.root));
     expect(loaded.specificationDocument.path).toBe("orchestration/SPEC.md");
@@ -103,7 +108,7 @@ describe("FileProjectRepository", () => {
       ),
     ]);
 
-    const loaded = await new FileProjectRepository().load(fixture.root);
+    const loaded = await createRepository().load(fixture.root);
 
     expect(loaded.tasks.map((task) => task.id)).toEqual([
       "TASK-001",
@@ -144,10 +149,10 @@ describe("FileProjectRepository", () => {
      * 两类错误都必须在启动 Agent 前由仓储拒绝，不能依赖提示词阶段猜测文档结构。
      */
     await expect(
-      new FileProjectRepository().load(duplicateHeadingFixture.root),
+      createRepository().load(duplicateHeadingFixture.root),
     ).rejects.toThrow("TASK 正文必须使用");
     await expect(
-      new FileProjectRepository().load(emptyBodyFixture.root),
+      createRepository().load(emptyBodyFixture.root),
     ).rejects.toThrow("TASK 正文必须使用");
   });
 
@@ -169,7 +174,7 @@ describe("FileProjectRepository", () => {
       original.replaceAll("TASK-001", "TASK-002"),
       "utf8",
     );
-    const repository = new FileProjectRepository();
+    const repository = createRepository();
 
     await expect(repository.load(missingTemplateFixture.root)).rejects.toThrow(
       "orchestration/SPEC.md 无法读取",
@@ -192,13 +197,13 @@ describe("FileProjectRepository", () => {
     );
 
     await expect(
-      new FileProjectRepository().load(fixture.root),
+      createRepository().load(fixture.root),
     ).rejects.toThrow("Unrecognized key");
   });
 
   it("任一 TASK 内容变化都会改变项目和任务契约指纹", async () => {
     const fixture = await createProjectFixture();
-    const repository = new FileProjectRepository();
+    const repository = createRepository();
     const initial = await repository.load(fixture.root);
     const taskPath = join(
       fixture.root,
@@ -227,7 +232,7 @@ describe("FileProjectRepository", () => {
       }),
       "utf8",
     );
-    const repository = new FileProjectRepository();
+    const repository = createRepository();
     const initial = await repository.load(fixture.root);
 
     /*
@@ -271,13 +276,13 @@ describe("FileProjectRepository", () => {
      * 严格 Schema 必须一次拒绝所有旧入口，不能静默忽略并形成灰度契约。
      */
     await expect(
-      new FileProjectRepository().load(fixture.root),
+      createRepository().load(fixture.root),
     ).rejects.toThrow("Unrecognized keys");
   });
 
   it("忽略任意同名 YAML 文件，不提供文件配置入口", async () => {
     const fixture = await createProjectFixture();
-    const repository = new FileProjectRepository();
+    const repository = createRepository();
     const initial = await repository.load(fixture.root);
     await writeFile(
       join(fixture.root, "orchestrator.yaml"),
@@ -311,7 +316,100 @@ describe("FileProjectRepository", () => {
     );
 
     await expect(
-      new FileProjectRepository().load(fixture.root),
+      createRepository().load(fixture.root),
     ).rejects.toThrow("Unrecognized keys");
+  });
+
+  it("等价 LF/CRLF 源文本得到相同 source/contract/project 摘要", async () => {
+    const lfFixture = await createProjectFixture();
+    const crlfFixture = await createProjectFixture();
+    const repository = createRepository();
+    const lfLoaded = await repository.load(lfFixture.root);
+    /*
+     * 等价换行的同一项目在任何受支持平台上必须得到同一组规范摘要。
+     * 正文其他字符不参与归一化，CRLF 与 LF 在加载边界统一为 LF。
+     */
+    for (const relativePath of [
+      "orchestration/SPEC.md",
+      "orchestration/tasks/TASK-001.md",
+    ]) {
+      const path = join(crlfFixture.root, ...relativePath.split("/"));
+      const content = await readFile(path, "utf8");
+      await writeFile(path, content.replaceAll("\n", "\r\n"), "utf8");
+    }
+    const crlfLoaded = await repository.load(crlfFixture.root);
+
+    expect(crlfLoaded.projectHash).toBe(lfLoaded.projectHash);
+    expect(crlfLoaded.specificationContractHash).toBe(
+      lfLoaded.specificationContractHash,
+    );
+    expect(crlfLoaded.specificationDocument.sourceHash).toBe(
+      lfLoaded.specificationDocument.sourceHash,
+    );
+    expect(crlfLoaded.taskContractHashes.get("TASK-001")).toBe(
+      lfLoaded.taskContractHashes.get("TASK-001"),
+    );
+    expect(crlfLoaded.specificationDocument.content).not.toContain("\r");
+  });
+
+  it("拒绝携带 BOM 或 NUL 的源文本", async () => {
+    const bomFixture = await createProjectFixture();
+    const nulFixture = await createProjectFixture();
+    const bomPath = join(bomFixture.root, "orchestration", "SPEC.md");
+    const nulPath = join(nulFixture.root, "orchestration", "SPEC.md");
+    const bomContent = await readFile(bomPath);
+    await writeFile(
+      bomPath,
+      Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), bomContent]),
+    );
+    const nulContent = await readFile(nulPath);
+    await writeFile(
+      nulPath,
+      Buffer.concat([nulContent, Buffer.from([0x00])]),
+    );
+
+    await expect(createRepository().load(bomFixture.root)).rejects.toThrow(
+      "BOM",
+    );
+    await expect(createRepository().load(nulFixture.root)).rejects.toThrow(
+      "NUL",
+    );
+  });
+
+  it("拒绝前置元数据中的重复规范键", async () => {
+    const fixture = await createProjectFixture();
+    await writeFile(
+      join(fixture.root, "orchestration", "tasks", "TASK-001.md"),
+      "---\nid: TASK-001\nid: TASK-001\ntitle: 实现任务目录\n---\n\n## 任务描述\n\n任务正文。\n",
+      "utf8",
+    );
+
+    await expect(createRepository().load(fixture.root)).rejects.toThrow(
+      "无法解析",
+    );
+  });
+
+  it("前置元数据格式变化不改变契约哈希，但改变 source hash", async () => {
+    const fixture = await createProjectFixture();
+    const repository = createRepository();
+    const initial = await repository.load(fixture.root);
+    /*
+     * 契约哈希只绑定语义事实；前置元数据的 YAML 引号风格不属于契约。
+     * source hash 绑定规范化字节，因此仍会发现文档被编辑过。
+     */
+    await writeFile(
+      join(fixture.root, "orchestration", "tasks", "TASK-001.md"),
+      "---\nid: \"TASK-001\"\ntitle: \"实现任务目录\"\n---\n\n## 任务描述\n\n任务正文。\n",
+      "utf8",
+    );
+    const changed = await repository.load(fixture.root);
+
+    expect(changed.taskContractHashes.get("TASK-001")).toBe(
+      initial.taskContractHashes.get("TASK-001"),
+    );
+    expect(
+      changed.taskDocuments.get("TASK-001")?.sourceHash,
+    ).not.toBe(initial.taskDocuments.get("TASK-001")?.sourceHash);
+    expect(changed.projectHash).not.toBe(initial.projectHash);
   });
 });

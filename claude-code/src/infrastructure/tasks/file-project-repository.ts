@@ -1,11 +1,14 @@
 /*
  * 文件项目仓储把唯一规格文档与完整 TASK 目录编译成稳定的运行契约。
  * 每个 Markdown 文件既是任务正文也是机器元数据来源，目录中的任务不会被静默遗漏。
+ * 所有文档先经过 UTF-8/BOM/NUL 校验与 LF 归一化，再由唯一规范哈希入口计算 source/contract 摘要。
  */
-import { createHash } from "node:crypto";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { basename, relative, resolve } from "node:path";
 import { parse } from "yaml";
+import { encodeCanonicalUtf8 } from "../../domain/canonical-json.js";
+import { assertCanonicalGitPathSet } from "../../domain/canonical-paths.js";
+import { decodeCanonicalSourceText } from "../../domain/canonical-text.js";
 import { ConfigurationError } from "../../domain/errors.js";
 import {
   PROJECT_STRUCTURE,
@@ -15,18 +18,30 @@ import {
   type TaskDefinition,
   type TextDocument,
 } from "../../domain/project.js";
-import { createTaskContractHash } from "../../domain/task-completion.js";
+import {
+  createProjectHash,
+  createSpecContractHash,
+  createTaskContractHash,
+  splitTaskDocument,
+} from "../../domain/project-contract.js";
 import { createLinearTaskSequence } from "../../domain/task-sequence.js";
+import type { CanonicalHashService } from "../../ports/canonical-hash.js";
 import type { ProjectRepository } from "../../ports/project-repository.js";
 
-const TASK_FRONT_MATTER_PATTERN = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/u;
+const TASK_BODY_PATTERN = /^\n## 任务描述\n\n[\s\S]*\S\n?$/u;
 
 interface LoadedTaskDocument {
   readonly task: TaskDefinition;
   readonly document: TextDocument;
+  readonly body: string;
 }
 
 export class FileProjectRepository implements ProjectRepository {
+  /*
+   * 规范哈希服务由组合根注入，仓储不自行选择摘要算法。
+   */
+  public constructor(private readonly canonicalHash: CanonicalHashService) {}
+
   public async load(projectRoot: string): Promise<LoadedProject> {
     const absoluteProjectRoot = resolve(projectRoot);
     await this.assertDirectory(absoluteProjectRoot);
@@ -44,41 +59,72 @@ export class FileProjectRepository implements ProjectRepository {
     const taskDocuments = new Map(
       taskEntries.map((entry) => [entry.task.id, entry.document] as const),
     );
+
+    /*
+     * Git 路径在哈希前整体校验 NFC、碰撞与平台可表示性，非法路径直接拒绝项目。
+     */
+    assertCanonicalGitPathSet([
+      specificationDocument.path,
+      ...taskEntries.map((entry) => entry.document.path),
+    ]);
+
     /*
      * 整体 projectHash 服务于同一 Run 的精确恢复；逐 TASK 契约指纹服务于新 Run 的安全复用。
-     * 执行策略由程序版本固定，项目哈希只绑定用户可编辑的项目上下文与任务事实。
+     * SPEC 契约哈希绑定完整规范化正文，任一业务说明文字变化都会使全部 TASK 契约失效。
+     * 契约与源集合投影都按 TASK 数字线性顺序排列，不依赖文件系统枚举顺序。
      */
+    const specificationContractHash = createSpecContractHash(
+      specificationDocument.content,
+      this.canonicalHash,
+    );
+    const entriesByTaskId = new Map(
+      taskEntries.map((entry) => [entry.task.id, entry] as const),
+    );
     const taskContractHashes = new Map(tasks.map((task) => {
-      const taskDocument = taskDocuments.get(task.id);
-      if (taskDocument === undefined) {
+      const entry = entriesByTaskId.get(task.id);
+      if (entry === undefined) {
         throw new ConfigurationError(`缺少任务文档：${task.id}`);
       }
       return [
         task.id,
-        createTaskContractHash({
-          task,
-          taskDocument,
-          specificationDocument,
-        }),
+        createTaskContractHash(
+          {
+            task,
+            body: entry.body,
+            specContractHash: specificationContractHash,
+          },
+          this.canonicalHash,
+        ),
       ] as const;
     }));
+    const projectHash = createProjectHash(
+      {
+        specification: {
+          path: specificationDocument.path,
+          sourceHash: specificationDocument.sourceHash,
+        },
+        tasks: tasks.map((task) => {
+          const entry = entriesByTaskId.get(task.id);
+          if (entry === undefined) {
+            throw new ConfigurationError(`缺少任务文档：${task.id}`);
+          }
+          return {
+            path: entry.document.path,
+            sourceHash: entry.document.sourceHash,
+          };
+        }),
+      },
+      this.canonicalHash,
+    );
 
     return {
       tasks,
       projectRoot: absoluteProjectRoot,
-      projectHash: this.createContentHash(
-        specificationDocument,
-        tasks.map((task) => {
-          const document = taskDocuments.get(task.id);
-          if (document === undefined) {
-            throw new ConfigurationError(`缺少任务文档：${task.id}`);
-          }
-          return document;
-        }),
-      ),
+      projectHash,
       taskDocuments,
       taskContractHashes,
       specificationDocument,
+      specificationContractHash,
     };
   }
 
@@ -115,10 +161,11 @@ export class FileProjectRepository implements ProjectRepository {
         ...metadata,
         file: relativePath,
       });
-      this.validateTaskBody(task, content);
+      const body = this.validateTaskBody(task, content);
       return {
         task,
-        document: { path: relativePath, content },
+        document: { path: relativePath, content, sourceHash: this.hashText(content) },
+        body,
       };
     }));
   }
@@ -128,14 +175,14 @@ export class FileProjectRepository implements ProjectRepository {
    * TASK 状态不属于静态定义，诸如 status: pending 的字段会由严格 Schema 明确拒绝。
    */
   private parseTaskMetadata(path: string, content: string) {
-    const match = TASK_FRONT_MATTER_PATTERN.exec(content);
-    if (match?.[1] === undefined) {
+    const split = splitTaskDocument(content);
+    if (split === undefined) {
       throw new ConfigurationError(`TASK 缺少 YAML 前置元数据：${path}`);
     }
 
     let parsedYaml: unknown;
     try {
-      parsedYaml = parse(match[1]);
+      parsedYaml = parse(split.frontMatter);
     } catch (error) {
       throw new ConfigurationError(
         `TASK 前置元数据无法解析：${path}（${this.describeError(error)}）`,
@@ -154,14 +201,14 @@ export class FileProjectRepository implements ProjectRepository {
    * TASK 正文只有一个固定入口，标题身份不再复制到 Markdown 一级标题中。
    * 任务描述必须包含实际内容，避免合法元数据包裹空任务后进入 Agent 执行阶段。
    */
-  private validateTaskBody(task: TaskDefinition, content: string): void {
-    const metadata = TASK_FRONT_MATTER_PATTERN.exec(content);
-    const body = metadata === null ? "" : content.slice(metadata[0].length);
-    if (!/^\r?\n## 任务描述\r?\n\r?\n[\s\S]*\S(?:\r?\n)?$/u.test(body)) {
+  private validateTaskBody(task: TaskDefinition, content: string): string {
+    const body = splitTaskDocument(content)?.body ?? "";
+    if (!TASK_BODY_PATTERN.test(body)) {
       throw new ConfigurationError(
         `TASK 正文必须使用“## 任务描述”且内容不能为空：${task.file}`,
       );
     }
+    return body;
   }
 
   private async loadDocument(
@@ -170,24 +217,35 @@ export class FileProjectRepository implements ProjectRepository {
   ): Promise<TextDocument> {
     const absolutePath = resolve(projectRoot, declaredPath);
     const content = await this.readRequiredFile(absolutePath, declaredPath);
-    return { path: normalize(relative(projectRoot, absolutePath)), content };
+    return {
+      path: normalize(relative(projectRoot, absolutePath)),
+      content,
+      sourceHash: this.hashText(content),
+    };
   }
 
+  /*
+   * 源文本先按字节校验 UTF-8、BOM 和 NUL，再做唯一的 CRLF/CR → LF 归一化。
+   * 归一化正文是提示词、source hash 与 contract hash 的共同输入，不存在第二份原文。
+   */
   private async readRequiredFile(path: string, label: string): Promise<string> {
+    let bytes: Uint8Array;
     try {
-      const content = await readFile(path, "utf8");
-      if (content.trim().length === 0) {
-        throw new ConfigurationError(`${label} 不能为空：${path}`);
-      }
-      return content;
+      bytes = await readFile(path);
     } catch (error) {
-      if (error instanceof ConfigurationError) {
-        throw error;
-      }
       throw new ConfigurationError(
         `${label} 无法读取：${path}（${this.describeError(error)}）`,
       );
     }
+    const content = decodeCanonicalSourceText(bytes, label);
+    if (content.trim().length === 0) {
+      throw new ConfigurationError(`${label} 不能为空：${path}`);
+    }
+    return content;
+  }
+
+  private hashText(normalizedText: string): string {
+    return this.canonicalHash.digestBytes(encodeCanonicalUtf8(normalizedText));
   }
 
   private async assertDirectory(path: string): Promise<void> {
@@ -204,24 +262,6 @@ export class FileProjectRepository implements ProjectRepository {
         `目录无法访问：${path}（${this.describeError(error)}）`,
       );
     }
-  }
-
-  private createContentHash(
-    specificationDocument: TextDocument,
-    taskDocuments: readonly TextDocument[],
-  ): string {
-    const hash = createHash("sha256");
-    /*
-     * 项目快照先绑定唯一规格，再按稳定文件名顺序绑定所有任务。
-     * 显式顺序让恢复判断不依赖文件系统枚举行为，也不会混入运行状态文件。
-     */
-    for (const document of [specificationDocument, ...taskDocuments]) {
-      hash.update(document.path);
-      hash.update("\0");
-      hash.update(document.content);
-      hash.update("\0");
-    }
-    return hash.digest("hex");
   }
 
   private describeIssues(

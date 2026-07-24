@@ -6,6 +6,7 @@ import { ConfigurationError } from "../domain/errors.js";
 import type { LoadedProject } from "../domain/project.js";
 import type { InitialTaskRunState } from "../domain/run-state.js";
 import { createPredecessorCompletionFingerprint } from "../domain/task-completion.js";
+import type { CanonicalHashService } from "../ports/canonical-hash.js";
 import type {
   TaskCompletionEvidence,
   TaskCompletionLedger,
@@ -31,7 +32,10 @@ export interface TaskProgressPlan {
 }
 
 export class TaskProgressReconciler {
-  public constructor(private readonly workspace: TaskCompletionLedger) {}
+  public constructor(
+    private readonly workspace: TaskCompletionLedger,
+    private readonly canonicalHash: CanonicalHashService,
+  ) {}
 
   /*
    * fresh 明确绕过历史读取；默认模式只复用契约、前驱指纹均匹配且位于当前 HEAD 祖先链的提交。
@@ -87,6 +91,7 @@ export class TaskProgressReconciler {
         predecessor === undefined
           ? undefined
           : { taskId: predecessor.taskId, commitSha: predecessor.commitSha },
+        this.canonicalHash,
       );
       const latest = latestCompletionByTask.get(task.id);
       if (

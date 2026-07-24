@@ -3,16 +3,23 @@
  * 所有可观察副作用都记录为显式字段，使测试能够推导执行顺序、并发度、提交与恢复参数。
  */
 import type { AgentRunOutcome } from "../../src/domain/agent-result.js";
+import { encodeCanonicalUtf8 } from "../../src/domain/canonical-json.js";
 import {
   PROJECT_STRUCTURE,
   taskDefinitionSchema,
   type LoadedProject,
   type TaskDefinition,
+  type TextDocument,
 } from "../../src/domain/project.js";
+import {
+  createSpecContractHash,
+  createTaskContractHash,
+  splitTaskDocument,
+} from "../../src/domain/project-contract.js";
 import type { RunState } from "../../src/domain/run-state.js";
 import type { ProjectContextProvider } from "../../src/ports/project-context-provider.js";
-import { createTaskContractHash } from "../../src/domain/task-completion.js";
 import { createLinearTaskSequence } from "../../src/domain/task-sequence.js";
+import { NodeCanonicalHashService } from "../../src/infrastructure/canonical/node-canonical-hash-service.js";
 import type {
   AgentExecutor,
   AgentRunRequest,
@@ -245,7 +252,11 @@ export class RecordingWorkspace implements Workspace {
     this.commitExpectedHeads.push(input.expectedHead);
     this.commits.push(input.task.id);
     const parentHead = this.currentHead;
-    const commitSha = `${input.task.id.toLowerCase()}-${this.commits.length}-sha`;
+    /*
+     * Fake 提交 OID 使用合法完整十六进制格式，与生产 Git 对象身份共享同一契约约束。
+     * 计数器保证每个提交唯一，测试不会依赖可读字符串绕过 OID 校验。
+     */
+    const commitSha = this.commits.length.toString(16).padStart(40, "0");
     this.currentHead = commitSha;
     /*
      * 任务提交会改变当前项目树；恢复校验必须先走精确 trailer 证据，不能误当作安全项目外快进。
@@ -368,23 +379,31 @@ export function createLoadedProject(
    * 应用层夹具同样提供唯一规格文档，避免测试通过空上下文绕过生产不变量。
    * 所有任务契约共享该规格，contractRevision 仍只用于控制单个 TASK 的局部变化。
    */
-  const specificationDocument = {
+  const canonicalHash = new NodeCanonicalHashService();
+  const hashText = (text: string): string =>
+    canonicalHash.digestBytes(encodeCanonicalUtf8(text));
+  const specificationDocument: TextDocument = {
     path: PROJECT_STRUCTURE.specification,
     content: "# 规格说明\n\n测试项目规格。\n",
+    sourceHash: hashText("# 规格说明\n\n测试项目规格。\n"),
   };
+  const specificationContractHash = createSpecContractHash(
+    specificationDocument.content,
+    canonicalHash,
+  );
   const tasks = createLinearTaskSequence(taskInputs.map((input) => taskDefinitionSchema.parse({
       id: input.id,
       title: input.id,
       file: `${PROJECT_STRUCTURE.taskDirectory}/${input.id}.md`,
     })));
   const taskDocuments = new Map(
-    tasks.map((task) => [
-      task.id,
-      {
-        path: task.file,
-        content: `---\nid: ${task.id}\ntitle: ${task.title}\n---\n\n## 任务描述\n\n${taskInputs.find((input) => input.id === task.id)?.contractRevision ?? "测试任务正文"}\n`,
-      },
-    ]),
+    tasks.map((task) => {
+      const content = `---\nid: ${task.id}\ntitle: ${task.title}\n---\n\n## 任务描述\n\n${taskInputs.find((input) => input.id === task.id)?.contractRevision ?? "测试任务正文"}\n`;
+      return [
+        task.id,
+        { path: task.file, content, sourceHash: hashText(content) },
+      ] as const;
+    }),
   );
   /*
    * 测试夹具使用与生产仓储相同的契约哈希函数，跨 Run 复用测试不会依赖手写假哈希。
@@ -397,11 +416,14 @@ export function createLoadedProject(
     }
     return [
       task.id,
-      createTaskContractHash({
-        task,
-        taskDocument,
-        specificationDocument,
-      }),
+      createTaskContractHash(
+        {
+          task,
+          body: splitTaskDocument(taskDocument.content)?.body ?? "",
+          specContractHash: specificationContractHash,
+        },
+        canonicalHash,
+      ),
     ] as const;
   }));
 
@@ -412,6 +434,7 @@ export function createLoadedProject(
     taskDocuments,
     taskContractHashes,
     specificationDocument,
+    specificationContractHash,
   };
 }
 

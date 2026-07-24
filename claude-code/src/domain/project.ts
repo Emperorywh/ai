@@ -40,9 +40,14 @@ export const taskDefinitionSchema = taskDocumentMetadataSchema.extend({
 export type TaskDocumentMetadata = z.infer<typeof taskDocumentMetadataSchema>;
 export type TaskDefinition = z.infer<typeof taskDefinitionSchema>;
 
+/*
+ * TextDocument 保存已经完成 UTF-8 校验与 LF 归一化的正文。
+ * sourceHash 是规范化正文 UTF-8 字节的 SHA-256，等价 LF/CRLF 源文件得到相同摘要。
+ */
 export interface TextDocument {
   readonly path: string;
   readonly content: string;
+  readonly sourceHash: string;
 }
 
 /*
@@ -56,4 +61,5 @@ export interface LoadedProject {
   readonly taskDocuments: ReadonlyMap<string, TextDocument>;
   readonly taskContractHashes: ReadonlyMap<string, string>;
   readonly specificationDocument: TextDocument;
+  readonly specificationContractHash: string;
 }

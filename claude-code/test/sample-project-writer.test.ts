@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { writeSampleProject } from "../src/cli/sample-project-writer.js";
+import { NodeCanonicalHashService } from "../src/infrastructure/canonical/node-canonical-hash-service.js";
 import { FileProjectRepository } from "../src/infrastructure/tasks/file-project-repository.js";
 
 const temporaryRoots: string[] = [];
@@ -46,7 +47,7 @@ describe("writeSampleProject", () => {
      * 初始化成功不仅代表文件存在，集中式目录还必须能被生产仓储完整加载。
      * 该断言防止初始化器与严格项目契约在后续演进中形成两套不兼容结构。
      */
-    const loaded = await new FileProjectRepository().load(root);
+    const loaded = await new FileProjectRepository(new NodeCanonicalHashService()).load(root);
     expect(loaded.tasks.map((task) => task.id)).toEqual(["TASK-001"]);
     expect(loaded.specificationDocument.path).toBe("orchestration/SPEC.md");
     const taskTemplate = await readFile(

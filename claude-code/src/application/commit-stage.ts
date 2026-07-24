@@ -13,6 +13,7 @@ import {
 } from "../domain/run-state.js";
 import { createPredecessorCompletionFingerprint } from "../domain/task-completion.js";
 import { findTaskPredecessor } from "../domain/task-sequence.js";
+import type { CanonicalHashService } from "../ports/canonical-hash.js";
 import type {
   TaskCommitRecovery,
   TaskCommitter,
@@ -36,6 +37,7 @@ export class CommitStage {
       & Pick<WorkspaceIdentityStore, "assertClean">,
     private readonly support: TaskStageSupport,
     private readonly baselineResolver: WorkspaceBaselineResolver,
+    private readonly canonicalHash: CanonicalHashService,
   ) {}
 
   public async step(input: TaskStepInput): Promise<TaskStepResult> {
@@ -168,6 +170,7 @@ export class CommitStage {
       contractHash,
       predecessorFingerprint: createPredecessorCompletionFingerprint(
         predecessorCompletion,
+        this.canonicalHash,
       ),
     };
   }
