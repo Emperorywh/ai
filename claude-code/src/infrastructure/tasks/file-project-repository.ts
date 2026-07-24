@@ -43,6 +43,10 @@ import {
   createTaskSetHash,
   splitTaskDocument,
 } from "../../domain/project-contract.js";
+import {
+  assertMandatoryIntegrationCoverage,
+  evaluateRequirementCoverage,
+} from "../../domain/requirement-coverage.js";
 import { createLinearTaskSequence } from "../../domain/task-sequence.js";
 import type { CanonicalHashService } from "../../ports/canonical-hash.js";
 import type { ProjectRepository } from "../../ports/project-repository.js";
@@ -130,6 +134,18 @@ export class FileProjectRepository implements ProjectRepository {
     });
 
     /*
+     * mandatory requirement 覆盖门禁：TASK criterion 只证明里程碑候选，
+     * 最终证明只能来自 integration scope 中满足 evidencePolicy 最低强度的 criterion；
+     * 弱证据、错误平台或缺失 integration 覆盖都在 Agent 启动前拒绝整个项目。
+     */
+    const requirementCoverage = evaluateRequirementCoverage({
+      requirements: specificationContracts.requirements,
+      integrationCriteria,
+      taskAcceptanceCriteria,
+    });
+    assertMandatoryIntegrationCoverage(requirementCoverage);
+
+    /*
      * 整体 projectHash 服务于同一 Run 的精确恢复；逐 TASK 契约指纹服务于新 Run 的安全复用。
      * SPEC 契约哈希绑定完整规范化正文与结构化项目契约，任一业务说明文字变化都会使全部 TASK 契约失效。
      * requirement 集合、平台矩阵与 task-set 身份随契约内容确定性重算，全部按 TASK 数字线性顺序排列。
@@ -202,6 +218,7 @@ export class FileProjectRepository implements ProjectRepository {
         })),
         this.canonicalHash,
       ),
+      requirementCoverage,
     };
   }
 

@@ -44,6 +44,7 @@ YAML 前置元数据与固定章节契约块的重复规范键都由 YAML 解析
 - `RequirementSetProjection`（`schemaVersion: 1`）：按 SPEC 声明顺序排列的 requirements，形成独立的 requirement 集合合同身份。
 - `PlatformMatrixProjection`（`schemaVersion: 1`）：按 SPEC 声明顺序排列的支持平台矩阵，形成独立的平台合同身份。
 - `TaskSetProjection`（`schemaVersion: 1`）：按 TASK 数字线性顺序排列的 `{id, contractHash}`，形成 task-set 合同身份。
+- `HostExecutionPolicyProjection`（`schemaVersion: 1`，`domain/host-execution-policy.ts`）：宿主执行策略快照的唯一可哈希形态，绑定 Runner/Sandbox capability、env/dependency profile 与 executable 策略；`hostExecutionPolicyHash` 在 Run 创建时冻结进 Run 契约。
 - `PredecessorCompletionProjection`（`schemaVersion: 1`，`domain/task-completion.ts`）：`"root"` 或 `{taskId, commitSha}` 联合分支，绑定直接前驱完成提交。
 
 投影中的结构化契约值来自 `domain/acceptance-contract.ts` 的 strict 领域 Schema（requirements、evidencePolicy、平台条目和四类 criterion）；契约 YAML 的可选字段先归一化为领域默认值（如 `allowNotApplicable: false`、空参数数组、项目根 cwd），再进入哈希，因此等价写法得到相同 contract hash。
@@ -82,6 +83,9 @@ YAML 前置元数据与固定章节契约块的重复规范键都由 YAML 解析
 | `domain/canonical-paths.ts` | Git 路径 NFC、碰撞与平台可表示性校验 |
 | `domain/project-contract.ts` | SPEC/TASK/项目源集合契约投影与摘要 |
 | `domain/acceptance-contract.ts` | requirements、平台矩阵与四类验收 criterion 的 strict 领域契约、规范键与跨引用校验 |
+| `domain/requirement-coverage.ts` | requirement→criterion 覆盖判定与 mandatory integration 启动门禁（规则见 `docs/HostExecutionPolicy.md`） |
+| `domain/host-execution-policy.ts` | 宿主执行策略快照的 strict 契约、内部完整性与规范哈希 |
+| `domain/host-capability-validation.ts` | Run 创建前 valid / unsupported_contract / configuration_missing 三态校验 |
 | `domain/task-completion.ts` | 前驱完成指纹投影 |
 | `domain/attachment-digest.ts` | 附件原始字节摘要契约 |
 | `ports/canonical-hash.ts` | 唯一哈希端口 |

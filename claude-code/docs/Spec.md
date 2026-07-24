@@ -159,6 +159,8 @@ requirements:
 - `requiredEvidence` 使用小写 snake_case evidence 种类；
 - `finalCandidateRequired` 声明该 requirement 是否必须在最终候选上重新证明。
 
+覆盖判定的最低强度规则（详见 `docs/HostExecutionPolicy.md`）：criterion 引用 requirement 不等于覆盖——只有 kind 命中 `allowedCriterionKinds`、平台命中 `requiredPlatformIds`（command 必须声明落在其中的 platformId，static 不能绑定平台）、`responseSchema` 命中 `requiredResponseSchemas` 且 `requiredEvidence` 完整覆盖的 criterion 才计入覆盖；错误 kind、弱证据或其他平台不能冒充覆盖。TASK criterion 只证明里程碑候选，每条 mandatory requirement 必须至少有一条满足强度的 integration criterion，否则项目在 Agent 启动前被拒绝。
+
 ## 13. 支持平台矩阵
 
 本章节为固定章节，内容必须是恰好一个 ```yaml 代码块。每个目标平台声明稳定 platformId、OS、架构、runtime/toolchain、包管理器和换行策略：
@@ -180,7 +182,7 @@ supportedPlatformMatrix:
 
 本章节为固定章节，内容必须是恰好一个 ```yaml 代码块，声明与 TASK 验收契约同构的 `criteria` 数组（规范键为 `integration/<criterion-id>`）。集成条款至少覆盖：项目可用的完整 lint、typecheck、test、build 门禁；跨模块架构和数据流验收；干净 checkout 或等价可移植性验证；项目要求的性能、视觉、数据来源和人工验收。
 
-criterion 的 kind、字段、执行描述和稳定 ID 规则与 TASK 验收契约完全一致（见 `docs/Task.md` 的验收契约章节）。每条 integration criterion 必须通过 `requirementRefs` 引用本 SPEC 中存在的 requirement，每条 mandatory requirement 至少要有一条 integration criterion。
+criterion 的 kind、字段、执行描述和稳定 ID 规则与 TASK 验收契约完全一致（见 `docs/Task.md` 的验收契约章节）。每条 integration criterion 必须通过 `requirementRefs` 引用本 SPEC 中存在的 requirement，每条 mandatory requirement 至少要有一条满足其 evidencePolicy 最低强度的 integration criterion；command 引用的 package manager、executable、env/dependency profile 和 platform 必须来自宿主 HostExecutionPolicySnapshot 中已有的稳定 ID，缺失时 Run 创建前校验会以“宿主 capability 缺失”失败，而不是把合同判为非法。
 
 ## 输出要求
 

@@ -15,8 +15,9 @@ const nonEmptyString = z.string().trim().min(1);
  * 规范 ID 只允许小写数字与连字符/下划线分隔，天然排除绝对路径、盘符、空白和 shell 元字符。
  * package manager、executable、env/dependency profile 和 platform 在项目文档中只是稳定 ID，
  * 其实现由宿主 HostExecutionPolicySnapshot 在 Run 启动时冻结，项目不得定义或覆盖。
+ * 宿主快照与项目文档共享同一稳定 ID 命名空间，因此该 Schema 对两个边界同时可见。
  */
-const stableIdSchema = z.string().regex(
+export const stableIdSchema = z.string().regex(
   /^[a-z0-9]+(?:[-_][a-z0-9]+)*$/u,
   "稳定 ID 必须是小写字母数字与连字符/下划线组合",
 );
@@ -28,7 +29,7 @@ const requirementIdSchema = z.string().regex(
   /^REQ-[A-Z0-9]+(?:-[A-Z0-9]+)*-\d{3,}$/u,
   "requirement id 必须是 REQ-大写片段-数字（至少三位）形式",
 );
-const platformIdSchema = z.string().regex(
+export const platformIdSchema = z.string().regex(
   /^[a-z0-9]+(?:-[a-z0-9]+)*$/u,
   "platformId 必须是小写字母数字与连字符组合",
 );

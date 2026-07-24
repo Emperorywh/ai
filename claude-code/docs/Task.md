@@ -147,7 +147,7 @@ criteria:
    - `external`：依赖项目外事实或凭据就绪声明，字段要求与 `human` 相同。
 3. `command` 不接受 raw shell 字符串；`execution` 只允许 `package_script`（packageManager、script、args、cwdRelative、timeoutMs、envProfile、dependencyProfile）或 `argv`（executable、args、cwdRelative、timeoutMs、envProfile）。参数逐项传递且不得包含 shell 拼接语义（`;`、`&&`、`|`、`>`、反引号、`$(`、`${` 等）；`cwdRelative` 只能是 `.` 或项目内相对 POSIX 路径。
 4. package manager、executable、env/dependency profile 和 platform 只引用宿主 HostExecutionPolicySnapshot 中已有的稳定 ID，TASK/SPEC 不得定义实现、绝对路径或凭据。
-5. 每条 criterion 必须通过 `requirementRefs` 引用 SPEC 中存在的 requirement；`id` 使用 `AC-数字`（至少三位）且在同一文档内唯一；`description` 不能为空；`allowNotApplicable` 默认 `false`，只有显式设为 `true` 才允许 Reviewer 给出带理由的 `not_applicable`。
+5. 每条 criterion 必须通过 `requirementRefs` 引用 SPEC 中存在的 requirement；`id` 使用 `AC-数字`（至少三位）且在同一文档内唯一；`description` 不能为空；`allowNotApplicable` 默认 `false`，只有显式设为 `true` 才允许 Reviewer 给出带理由的 `not_applicable`。引用不等于覆盖：criterion 的 kind、platform、responseSchema 和 requiredEvidence 必须满足被引用 requirement 的 evidencePolicy 最低强度才计入覆盖，且 TASK criterion 只证明里程碑候选，不能替代 integration criterion 的最终证明。
 6. 未知 kind、未知字段、重复规范键、空描述、非法执行描述、缺失必填字段或悬空稳定 ID 都会在 Agent 启动前拒绝整个项目；不要写自由文本验收描述，系统不会从旧正文推测或自动补全验收条款。
 
 ## 工作流程

@@ -8,6 +8,7 @@ import type {
   RequirementDefinition,
   ScopedAcceptanceCriterion,
 } from "./acceptance-contract.js";
+import type { RequirementCoverageReport } from "./requirement-coverage.js";
 
 const ORCHESTRATION_DIRECTORY = "orchestration";
 
@@ -79,4 +80,9 @@ export interface LoadedProject {
   readonly requirementSetHash: string;
   readonly platformMatrixHash: string;
   readonly taskSetHash: string;
+  /*
+   * requirement 覆盖判定随契约一起冻结：它是后续证据矩阵的可信合同根，
+   * 与加载输入确定性一致，不构成第二个覆盖事实源。
+   */
+  readonly requirementCoverage: RequirementCoverageReport;
 }

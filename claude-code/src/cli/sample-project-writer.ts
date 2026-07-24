@@ -49,6 +49,9 @@ ${YAML_FENCE}
 ## 集成验收契约
 
 ${YAML_FENCE}yaml
+# 每条 mandatory requirement 至少要有一条满足其 evidencePolicy 最低强度
+# （kind、platform、responseSchema、requiredEvidence）的 integration criterion；
+# TASK criterion 只证明里程碑候选，不能替代这里的最终证明。
 criteria:
   - id: AC-001
     requirementRefs: [REQ-FOUNDATION-001]

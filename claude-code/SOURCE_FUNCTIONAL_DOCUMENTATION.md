@@ -30,6 +30,9 @@
 - `domain/task-completion.ts`：直接前驱完成指纹的规范投影。
 - `domain/project-contract.ts`：SPEC/TASK 契约投影与项目源集合投影，全部经唯一规范哈希入口计算。
 - `domain/acceptance-contract.ts`：requirements、evidence policy、支持平台矩阵与四类验收 criterion 的 strict 领域契约；规范 criterion key、执行描述安全形状与悬空稳定 ID 都在这里 fail closed。
+- `domain/requirement-coverage.ts`：requirement→criterion 覆盖判定；criterion 必须满足 evidencePolicy 的 kind、platform、responseSchema、requiredEvidence 最低强度才计入覆盖，mandatory requirement 缺 integration 覆盖时项目在 Agent 启动前被拒绝。
+- `domain/host-execution-policy.ts`：产品级只读 HostExecutionPolicySnapshot 的 strict 契约、内部完整性与规范哈希；项目只能引用其中已有的稳定 ID。
+- `domain/host-capability-validation.ts`：Run 创建前的三态校验，区分 valid、unsupported_contract（合同非法）与 configuration_missing（宿主缺能力），诊断是结构化事实，不生成人工替代请求。
 - `domain/canonical-json.ts`、`domain/canonical-schema.ts`、`domain/canonical-text.ts`、`domain/canonical-paths.ts`：JCS 规范编码、版本化 strict Schema、源文本 LF 归一化与 Git 路径校验。
 - `domain/attachment-digest.ts`：附件原始字节摘要契约。
 - `domain/agent-result.ts`：Worker、Reviewer、验证证据和 Agent 遥测的结构化协议。
@@ -101,7 +104,7 @@
       <task-id>.md
 ```
 
-`SPEC.md` 是唯一用户维护的项目级执行契约。系统不读取额外项目级 YAML/JSON 配置，也不允许 TASK、项目配置或 CLI 覆盖模型、资源和 Git 策略；模型只来自 Claude 用户配置这一运行时事实源。除自由正文外，`SPEC.md` 必须包含三个固定章节，每个章节只携带一个 ```yaml 代码块：`## 需求契约`（requirements 及各自最低证据强度 evidencePolicy）、`## 支持平台矩阵`（supportedPlatformMatrix，声明稳定 platformId、OS、架构、runtime/toolchain、包管理器和换行策略，允许显式空数组）和 `## 集成验收契约`（与 TASK 验收契约同构的 integration criteria）。
+`SPEC.md` 是唯一用户维护的项目级执行契约。系统不读取额外项目级 YAML/JSON 配置，也不允许 TASK、项目配置或 CLI 覆盖模型、资源和 Git 策略；模型只来自 Claude 用户配置这一运行时事实源。除自由正文外，`SPEC.md` 必须包含三个固定章节，每个章节只携带一个 ```yaml 代码块：`## 需求契约`（requirements 及各自最低证据强度 evidencePolicy）、`## 支持平台矩阵`（supportedPlatformMatrix，声明稳定 platformId、OS、架构、runtime/toolchain、包管理器和换行策略，允许显式空数组）和 `## 集成验收契约`（与 TASK 验收契约同构的 integration criteria）。每条 mandatory requirement 必须至少被一条满足 evidencePolicy 最低强度的 integration criterion 覆盖，缺失或弱证据都会在加载时拒绝项目；command 引用的宿主稳定 ID 由产品级只读 HostExecutionPolicySnapshot 提供，Run 创建前的三态校验区分合同非法与宿主 capability 缺失（见 `docs/HostExecutionPolicy.md`）。
 
 固定策略：
 

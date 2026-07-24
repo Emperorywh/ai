@@ -25,6 +25,7 @@ import {
   createTaskSetHash,
   splitTaskDocument,
 } from "../../src/domain/project-contract.js";
+import { evaluateRequirementCoverage } from "../../src/domain/requirement-coverage.js";
 import type { RunState } from "../../src/domain/run-state.js";
 import type { ProjectContextProvider } from "../../src/ports/project-context-provider.js";
 import { createLinearTaskSequence } from "../../src/domain/task-sequence.js";
@@ -503,6 +504,17 @@ export function createLoadedProject(
       attachCriterionKeys(acceptanceCriteria, { kind: "task", taskId: task.id }),
     ] as const;
   }));
+  const integrationCriteria = attachCriterionKeys(integrationCriteriaRaw, {
+    kind: "integration",
+  });
+  /*
+   * 覆盖判定与生产仓储走同一确定性入口，夹具不组装第二份覆盖事实。
+   */
+  const requirementCoverage = evaluateRequirementCoverage({
+    requirements,
+    integrationCriteria,
+    taskAcceptanceCriteria,
+  });
 
   return {
     tasks,
@@ -514,9 +526,7 @@ export function createLoadedProject(
     specificationContractHash,
     requirements,
     supportedPlatformMatrix,
-    integrationCriteria: attachCriterionKeys(integrationCriteriaRaw, {
-      kind: "integration",
-    }),
+    integrationCriteria,
     taskAcceptanceCriteria,
     requirementSetHash: createRequirementSetHash(requirements, canonicalHash),
     platformMatrixHash: createPlatformMatrixHash(
@@ -533,6 +543,7 @@ export function createLoadedProject(
       }),
       canonicalHash,
     ),
+    requirementCoverage,
   };
 }
 

@@ -137,6 +137,8 @@ orchestration/
 - `## 支持平台矩阵`：`supportedPlatformMatrix` 数组，为每个目标平台声明稳定 platformId、OS、架构、runtime/toolchain、包管理器和换行策略，没有目标平台时使用 `supportedPlatformMatrix: []`；
 - `## 集成验收契约`：与 TASK 验收契约同构的 `criteria` 数组，覆盖完整 lint、typecheck、test、build 门禁和项目要求的其他集成验收。
 
+覆盖判定是确定性领域规则：criterion 引用 requirement 不等于覆盖，只有 kind、platform、responseSchema 和 requiredEvidence 都满足 `evidencePolicy` 最低强度的 criterion 才算数；TASK criterion 只证明里程碑候选，每条 mandatory requirement 必须至少有一条满足强度的 integration criterion，否则项目在 Agent 启动前被拒绝。command 引用的 package manager、executable、env/dependency profile 和 platform 只是宿主 `HostExecutionPolicySnapshot` 中的稳定 ID；合同有效但宿主缺少能力时，Run 创建前校验会以结构化“capability 缺失”诊断失败，详见 `docs/HostExecutionPolicy.md`。
+
 SPEC 应描述“最终必须满足什么”，不必提前指定每个函数、类名或待修改文件。Worker 会在执行 TASK 时读取当前代码，自行选择合理的实现位置。完整格式见 `docs/Spec.md`。
 
 ### 5. 编写 TASK

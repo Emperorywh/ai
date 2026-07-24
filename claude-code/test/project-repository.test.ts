@@ -11,12 +11,36 @@ import { afterEach, describe, expect, it } from "vitest";
 import { stringify } from "yaml";
 import { NodeCanonicalHashService } from "../src/infrastructure/canonical/node-canonical-hash-service.js";
 import { FileProjectRepository } from "../src/infrastructure/tasks/file-project-repository.js";
+import { createRequirementSetHash } from "../src/domain/project-contract.js";
 
 function createRepository(): FileProjectRepository {
   return new FileProjectRepository(new NodeCanonicalHashService());
 }
 
 const temporaryRoots: string[] = [];
+
+/*
+ * mandatory 的 REQ-UX-4K-001 必须在 integration scope 拥有满足 evidencePolicy
+ * 最低强度的 criterion：human kind、版本化 responseSchema、requiredEvidence 覆盖
+ * environment_manifest 与 metric_samples；该条款同时绑定 windows-4k 平台验收。
+ * 独立常量便于覆盖门禁用例精确移除或替换它。
+ */
+const UX_INTEGRATION_CRITERION = `  - id: AC-002
+    requirementRefs: [REQ-UX-4K-001]
+    kind: human
+    description: 人工在目标平台完成 4K 性能验收
+    procedure:
+      - 在 windows-4k 目标设备按场景清单执行交互并采集帧时间
+    expected:
+      metric: frame_time_p95_ms
+      operator: less_than_or_equal
+      value: 16.7
+    requiredEvidence:
+      - environment_manifest
+      - metric_samples
+    responseSchema: performance_acceptance_v1
+    allowNotApplicable: false
+`;
 
 const DEFAULT_SPEC = `# SPEC
 
@@ -77,7 +101,7 @@ criteria:
     success: exit_code_zero
     allowNotApplicable: false
     description: 集成全量测试通过
-\`\`\`
+${UX_INTEGRATION_CRITERION}\`\`\`
 `;
 
 const DEFAULT_TASK_CONTRACT = `criteria:
@@ -178,7 +202,7 @@ describe("FileProjectRepository", () => {
     expect(loaded.supportedPlatformMatrix.map((platform) => platform.platformId))
       .toEqual(["windows-4k"]);
     expect(loaded.integrationCriteria.map((criterion) => criterion.key))
-      .toEqual(["integration/AC-001"]);
+      .toEqual(["integration/AC-001", "integration/AC-002"]);
     const taskCriteria = loaded.taskAcceptanceCriteria.get("TASK-001");
     expect(taskCriteria?.map((criterion) => criterion.key)).toEqual([
       "task:TASK-001/AC-001",
@@ -722,6 +746,88 @@ describe("FileProjectRepository", () => {
       .rejects.toThrow("引用不存在的 requirement：task:TASK-001/AC-001");
     await expect(createRepository().load(platformFixture.root))
       .rejects.toThrow("引用不存在的 platformId：task:TASK-001/AC-001");
+  });
+
+  it("mandatory requirement 缺少 integration criterion 时拒绝启动", async () => {
+    const fixture = await createProjectFixture();
+    await writeFile(
+      join(fixture.root, "orchestration", "SPEC.md"),
+      DEFAULT_SPEC.replace(UX_INTEGRATION_CRITERION, ""),
+      "utf8",
+    );
+
+    /*
+     * TASK criterion 只证明里程碑候选；mandatory requirement 在 integration scope
+     * 没有任何候选时，项目必须在 Agent 启动前被拒绝。
+     */
+    await expect(createRepository().load(fixture.root)).rejects.toThrow(
+      "mandatory requirement 缺少满足最低证据强度的 integration criterion：REQ-UX-4K-001",
+    );
+  });
+
+  it("弱 kind 或弱证据的 integration criterion 不能冒充覆盖", async () => {
+    const wrongKindFixture = await createProjectFixture();
+    const weakEvidenceFixture = await createProjectFixture();
+    await writeFile(
+      join(wrongKindFixture.root, "orchestration", "SPEC.md"),
+      DEFAULT_SPEC.replace(
+        UX_INTEGRATION_CRITERION,
+        `  - id: AC-002
+    requirementRefs: [REQ-UX-4K-001]
+    kind: static
+    allowNotApplicable: false
+    description: 静态审核不能冒充人工性能验收
+`,
+      ),
+      "utf8",
+    );
+    await writeFile(
+      join(weakEvidenceFixture.root, "orchestration", "SPEC.md"),
+      DEFAULT_SPEC.replace(
+        "      - environment_manifest\n      - metric_samples\n    responseSchema: performance_acceptance_v1",
+        "      - environment_manifest\n    responseSchema: performance_acceptance_v1",
+      ),
+      "utf8",
+    );
+
+    /*
+     * 覆盖判定是确定性领域规则：错误 kind 与缺失 requiredEvidence 的候选只会被驳回，
+     * 诊断携带稳定机器码，不能把弱证据当成有效覆盖放行。
+     */
+    await expect(createRepository().load(wrongKindFixture.root))
+      .rejects.toThrow("kind_not_allowed");
+    await expect(createRepository().load(weakEvidenceFixture.root))
+      .rejects.toThrow("required_evidence_missing");
+  });
+
+  it("覆盖报告使用规范键，requirement 集合身份可从解析结果重算", async () => {
+    const fixture = await createProjectFixture();
+    const loaded = await createRepository().load(fixture.root);
+
+    const build = loaded.requirementCoverage.entries.find(
+      (entry) => entry.requirementId === "REQ-BUILD-001",
+    );
+    const ux = loaded.requirementCoverage.entries.find(
+      (entry) => entry.requirementId === "REQ-UX-4K-001",
+    );
+    expect(build?.integration.coveringCriterionKeys).toEqual([
+      "integration/AC-001",
+    ]);
+    expect(build?.milestone.coveringCriterionKeys).toEqual([
+      "task:TASK-001/AC-001",
+    ]);
+    expect(ux?.integration.coveringCriterionKeys).toEqual([
+      "integration/AC-002",
+    ]);
+    expect(ux?.integration.uncoveredPlatformIds).toEqual([]);
+    expect(ux?.milestone.coveringCriterionKeys).toEqual([]);
+    /*
+     * 覆盖判定与合同身份共享同一冻结输入：evidence policy 变化会改变
+     * requirementSetHash，覆盖报告也随之确定性变化。
+     */
+    expect(
+      createRequirementSetHash(loaded.requirements, new NodeCanonicalHashService()),
+    ).toBe(loaded.requirementSetHash);
   });
 
   it("项目文档不能通过内嵌路径、命令或凭据扩大宿主执行能力", async () => {
