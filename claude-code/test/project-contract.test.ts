@@ -35,7 +35,8 @@ const demoTask: TaskDefinition = {
 };
 
 /*
- * 投影测试复用生产解析入口构造契约值，省略的可选字段与显式默认值必须得到同一规范身份。
+ * 投影测试复用生产解析入口构造契约值，只有协议明确可省略的字段
+ * 与其显式默认值才能得到同一规范身份。
  */
 const demoRequirements = parseRequirementsDocument(
   {
@@ -80,6 +81,8 @@ const demoCriteria = parseAcceptanceCriteriaDocument(
         kind: "package_script",
         packageManager: "pnpm",
         script: "test",
+        args: [],
+        cwdRelative: ".",
         timeoutMs: 900000,
         envProfile: "project_test",
         dependencyProfile: "pnpm_frozen",
@@ -193,7 +196,7 @@ describe("createSpecContractHash", () => {
     ).not.toBe(base);
   });
 
-  it("省略可选字段与显式默认值得到相同 contract hash", () => {
+  it("省略 allowNotApplicable 与显式 false 得到相同 contract hash", () => {
     const explicitCriteria = parseAcceptanceCriteriaDocument(
       {
         criteria: [{
@@ -320,6 +323,8 @@ describe("createTaskContractHash", () => {
             kind: "package_script",
             packageManager: "pnpm",
             script: "test",
+            args: [],
+            cwdRelative: ".",
             timeoutMs: 900000,
             envProfile: "project_test",
             dependencyProfile: "pnpm_frozen",

@@ -5,6 +5,7 @@
  * 禁止在哈希时静默改写路径。
  */
 import { CanonicalViolationError } from "./errors.js";
+import { assertUnicodeScalarText } from "./canonical-unicode.js";
 
 const WINDOWS_DRIVE_PATTERN = /^[A-Za-z]:/u;
 const WINDOWS_ILLEGAL_CHARACTER_PATTERN = /[<>:"|?*]/u;
@@ -14,6 +15,11 @@ export function assertCanonicalGitPath(
   path: string,
   platform: NodeJS.Platform = process.platform,
 ): void {
+  /*
+   * 路径必须能无损编码为 UTF-8；孤立代理项不能等到 TextEncoder 或文件系统边界
+   * 再被替换，否则校验身份与真实路径字节会发生漂移。
+   */
+  assertUnicodeScalarText(path, "Git 路径");
   if (path.length === 0) {
     throw new CanonicalViolationError("Git 路径不能为空");
   }

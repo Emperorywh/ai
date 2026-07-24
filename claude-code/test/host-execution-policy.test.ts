@@ -12,8 +12,9 @@ import { NodeCanonicalHashService } from "../src/infrastructure/canonical/node-c
 
 function createSnapshotInput() {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     id: "host-default",
+    currentPlatformId: "windows-4k",
     platformCapabilities: [{
       platformId: "windows-4k",
       runnerId: "runner-local-1",
@@ -58,6 +59,7 @@ describe("parseHostExecutionPolicySnapshot", () => {
     const snapshot = parse(createSnapshotInput());
 
     expect(snapshot.id).toBe("host-default");
+    expect(snapshot.currentPlatformId).toBe("windows-4k");
     expect(snapshot.platformCapabilities.map((c) => c.platformId)).toEqual([
       "windows-4k",
     ]);
@@ -74,7 +76,7 @@ describe("parseHostExecutionPolicySnapshot", () => {
   it("拒绝未知字段、旧 schemaVersion 和缺失必需字段", () => {
     expect(() => parse({ ...createSnapshotInput(), unknown: true }))
       .toThrow("宿主执行策略快照不符合契约");
-    expect(() => parse({ ...createSnapshotInput(), schemaVersion: 2 }))
+    expect(() => parse({ ...createSnapshotInput(), schemaVersion: 1 }))
       .toThrow("宿主执行策略快照不符合契约");
     const missing: Partial<ReturnType<typeof createSnapshotInput>> =
       createSnapshotInput();
@@ -199,6 +201,12 @@ describe("createHostExecutionPolicyHash", () => {
     capabilityAdded.sandboxCapabilities.push({ id: "sandbox-posix-group" });
     expect(
       createHostExecutionPolicyHash(parse(capabilityAdded), canonicalHash),
+    ).not.toBe(baseline);
+
+    const currentPlatformChanged = createSnapshotInput();
+    currentPlatformChanged.currentPlatformId = "linux-gpu";
+    expect(
+      createHostExecutionPolicyHash(parse(currentPlatformChanged), canonicalHash),
     ).not.toBe(baseline);
   });
 });

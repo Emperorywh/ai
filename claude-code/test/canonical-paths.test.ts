@@ -46,6 +46,18 @@ describe("assertCanonicalGitPath", () => {
     expect(() => assertCanonicalGitPath(withDelete)).toThrow("控制字符");
   });
 
+  it("拒绝无法无损编码为 UTF-8 的孤立代理项", () => {
+    const loneHigh = `docs/${String.fromCharCode(0xd800)}.md`;
+    const loneLow = `docs/${String.fromCharCode(0xdc00)}.md`;
+
+    expect(() => assertCanonicalGitPath(loneHigh, "linux")).toThrow(
+      "孤立高位代理",
+    );
+    expect(() => assertCanonicalGitPath(loneLow, "win32")).toThrow(
+      "孤立低位代理",
+    );
+  });
+
   it("拒绝非 NFC 路径", () => {
     expect(() => assertCanonicalGitPath(nfdPath)).toThrow(
       "不是 Unicode NFC 规范形式",

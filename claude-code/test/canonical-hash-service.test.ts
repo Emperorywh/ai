@@ -112,10 +112,10 @@ describe("NodeCanonicalHashService.digestStructured", () => {
   });
 
   /*
-   * 即使调用方伪造一个非 strict 的 Schema 包装，字段保留守卫也会拒绝
-   * “Schema 吞掉未知字段后继续哈希”的绕过路径。
+   * 运行时品牌与编译期品牌共同保护唯一入口，JavaScript 调用方或强制类型断言
+   * 不能注入任意 Zod Schema。
    */
-  it("拒绝会静默丢弃字段的非 strict Schema", () => {
+  it("拒绝伪造的非规范 Schema", () => {
     const service = new NodeCanonicalHashService();
     const forged = {
       schemaVersion: 1,
@@ -124,7 +124,31 @@ describe("NodeCanonicalHashService.digestStructured", () => {
 
     expect(() =>
       service.digestStructured(forged, { schemaVersion: 1, a: 1, extra: "x" })
-    ).toThrow("静默丢弃了字段");
+    ).toThrow("defineCanonicalSchema");
+  });
+
+  it("拒绝 Schema 静默改写标量或补全字段", () => {
+    const trimmingSchema = defineCanonicalSchema(1, {
+      value: z.string().trim(),
+    });
+    const defaultingSchema = defineCanonicalSchema(1, {
+      value: z.string(),
+      optional: z.string().default("default"),
+    });
+    const service = new NodeCanonicalHashService();
+
+    expect(() =>
+      service.digestStructured(trimmingSchema, {
+        schemaVersion: 1,
+        value: " x ",
+      })
+    ).toThrow("改变了标量值");
+    expect(() =>
+      service.digestStructured(defaultingSchema, {
+        schemaVersion: 1,
+        value: "x",
+      })
+    ).toThrow("静默补全了字段");
   });
 
   it("数组保持领域规定顺序", () => {

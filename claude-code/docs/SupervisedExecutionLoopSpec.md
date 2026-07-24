@@ -1405,8 +1405,9 @@ composition root 必须把产品级宿主配置编译为不可变 `HostExecution
  * Snapshot hash 进入 Run contract、VerificationEnvironment 和 RunnerAttestation。
  */
 interface HostExecutionPolicySnapshot {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 2;
   readonly id: string;
+  readonly currentPlatformId: string;
   readonly platformCapabilities: readonly PlatformRunnerCapability[];
   readonly envProfiles: readonly HostEnvironmentProfile[];
   readonly dependencyProfiles: readonly DependencyProfile[];

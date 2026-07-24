@@ -170,7 +170,7 @@ describe("parseAcceptanceCriteriaDocument", () => {
     ]);
   });
 
-  it("省略的可选字段应用契约默认值", () => {
+  it("只允许 allowNotApplicable 使用明确规定的默认值", () => {
     const [command] = parseCriteria([{
       id: "AC-001",
       requirementRefs: ["REQ-BUILD-001"],
@@ -180,6 +180,8 @@ describe("parseAcceptanceCriteriaDocument", () => {
         kind: "package_script",
         packageManager: "pnpm",
         script: "test",
+        args: [],
+        cwdRelative: ".",
         timeoutMs: 900000,
         envProfile: "project_test",
         dependencyProfile: "pnpm_frozen",
@@ -194,6 +196,26 @@ describe("parseAcceptanceCriteriaDocument", () => {
     });
   });
 
+  it("拒绝省略 command 参数数组或项目内 cwd", () => {
+    const withoutArgs = {
+      ...commandCriterion,
+      execution: {
+        ...commandCriterion.execution,
+        args: undefined,
+      },
+    };
+    const withoutCwd = {
+      ...commandCriterion,
+      execution: {
+        ...commandCriterion.execution,
+        cwdRelative: undefined,
+      },
+    };
+
+    expect(() => parseCriteria([withoutArgs])).toThrow("验收契约不符合契约");
+    expect(() => parseCriteria([withoutCwd])).toThrow("验收契约不符合契约");
+  });
+
   it("argv 执行描述只携带宿主稳定 ID", () => {
     const [command] = parseCriteria([{
       ...commandCriterion,
@@ -201,6 +223,7 @@ describe("parseAcceptanceCriteriaDocument", () => {
         kind: "argv",
         executable: "node",
         args: ["--version"],
+        cwdRelative: ".",
         timeoutMs: 60000,
         envProfile: "project_test",
       },

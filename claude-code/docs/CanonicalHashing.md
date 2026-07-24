@@ -17,8 +17,8 @@
 
 `digestStructured` 固定执行以下顺序，任一环节失败都以 `CanonicalViolationError` 拒绝，禁止清洗后继续：
 
-1. **版本化 strict Schema 校验**：每个规范对象必须携带 `schemaVersion` 字面量；未知字段、缺失字段、错误类型、Schema 外联合分支一律拒绝。
-2. **字段保留守卫**：逐层比对校验前后的自有键，任何被 Schema 静默丢弃的字段（包括伪造的非 strict Schema）都会拒绝；符号键同样拒绝。
+1. **版本化 strict Schema 校验**：每个规范对象必须携带 `schemaVersion` 字面量；运行时品牌保证 Schema 只能由 `defineCanonicalSchema` 创建，未知字段、缺失字段、错误类型、Schema 外联合分支一律拒绝。
+2. **值保留守卫**：双向、递归比对校验前后的自有键、数组形状和标量值；任何删字段、补默认值、trim、coerce 或 transform 都会拒绝，符号键同样拒绝。
 3. **JCS 规范编码**（`domain/canonical-json.ts`，遵循 RFC 8785）：对象键按 UTF-16 码元序排列；数字按 ECMAScript `Number::toString` 序列化；字符串最小转义。拒绝非有限数字、孤立代理对、非纯对象、`toJSON` 自定义序列化、符号键、稀疏数组、循环引用和 `undefined`。对象键必须已经是 Unicode NFC，保证规范键唯一且不受平台文本归一化影响。数组保持领域规定顺序，绝不为追求稳定而排序具有业务顺序的数组。
 4. **UTF-8 编码**：无 BOM，不附加平台换行。
 5. **SHA-256**：外部表示固定为小写十六进制。
@@ -44,10 +44,10 @@ YAML 前置元数据与固定章节契约块的重复规范键都由 YAML 解析
 - `RequirementSetProjection`（`schemaVersion: 1`）：按 SPEC 声明顺序排列的 requirements，形成独立的 requirement 集合合同身份。
 - `PlatformMatrixProjection`（`schemaVersion: 1`）：按 SPEC 声明顺序排列的支持平台矩阵，形成独立的平台合同身份。
 - `TaskSetProjection`（`schemaVersion: 1`）：按 TASK 数字线性顺序排列的 `{id, contractHash}`，形成 task-set 合同身份。
-- `HostExecutionPolicyProjection`（`schemaVersion: 1`，`domain/host-execution-policy.ts`）：宿主执行策略快照的唯一可哈希形态，绑定 Runner/Sandbox capability、env/dependency profile 与 executable 策略；`hostExecutionPolicyHash` 在 Run 创建时冻结进 Run 契约。
+- `HostExecutionPolicyProjection`（`schemaVersion: 2`，`domain/host-execution-policy.ts`）：宿主执行策略快照的唯一可哈希形态，绑定显式 `currentPlatformId`、Runner/Sandbox capability、env/dependency profile 与 executable 策略；无目标平台 command 同样必须进入受控 Runner。
 - `PredecessorCompletionProjection`（`schemaVersion: 1`，`domain/task-completion.ts`）：`"root"` 或 `{taskId, commitSha}` 联合分支，绑定直接前驱完成提交。
 
-投影中的结构化契约值来自 `domain/acceptance-contract.ts` 的 strict 领域 Schema（requirements、evidencePolicy、平台条目和四类 criterion）；契约 YAML 的可选字段先归一化为领域默认值（如 `allowNotApplicable: false`、空参数数组、项目根 cwd），再进入哈希，因此等价写法得到相同 contract hash。
+投影中的结构化契约值来自 `domain/acceptance-contract.ts` 的 strict 领域 Schema（requirements、evidencePolicy、平台条目和四类 criterion）；只有协议明确声明可省略的字段才允许归一化默认值（当前仅 `allowNotApplicable: false`）。command 的参数数组和项目内 cwd 必须显式声明，缺失时 fail closed。
 
 前置元数据的 YAML 引号风格等纯格式变化不属于契约：contract hash 不变，但 source hash 与 project hash 会改变。
 

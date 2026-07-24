@@ -144,8 +144,9 @@ function taskCriteria(): ReadonlyMap<
 
 function createSnapshotInput() {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     id: "host-default",
+    currentPlatformId: "windows-4k",
     platformCapabilities: [{
       platformId: "windows-4k",
       runnerId: "runner-local-1",
@@ -280,7 +281,11 @@ describe("validateRunStartupCapabilities", () => {
     withoutRunner.platformCapabilities = [];
     expect(
       issueKinds(issuesOf(validate({ snapshot: parseSnapshot(withoutRunner) }))),
-    ).toEqual(["missing_runner_capability@integration/AC-003"]);
+    ).toEqual([
+      "missing_runner_capability@integration/AC-001",
+      "missing_runner_capability@integration/AC-003",
+      "missing_runner_capability@task:TASK-001/AC-001",
+    ]);
 
     /*
      * 快照解析已经拒绝悬空 sandboxCapability 引用；校验器对绕过解析边界
@@ -291,7 +296,30 @@ describe("validateRunStartupCapabilities", () => {
       sandboxCapabilities: [],
     };
     expect(issueKinds(issuesOf(validate({ snapshot: tampered })))).toEqual([
+      "missing_sandbox_capability@integration/AC-001",
       "missing_sandbox_capability@integration/AC-003",
+      "missing_sandbox_capability@task:TASK-001/AC-001",
+    ]);
+  });
+
+  it("未声明 platformId 的 command 仍绑定 currentPlatformId Runner/Sandbox", () => {
+    const onlyFullCommands = integrationCriteria().filter(
+      (criterion) => criterion.id === "AC-001",
+    );
+    const withoutControlledExecution = createSnapshotInput();
+    withoutControlledExecution.platformCapabilities = [];
+    withoutControlledExecution.sandboxCapabilities = [];
+    const result = validate({
+      requirements: REQUIREMENTS.filter(
+        (requirement) => requirement.id === "REQ-BUILD-001",
+      ),
+      integration: onlyFullCommands,
+      tasks: new Map(),
+      snapshot: parseSnapshot(withoutControlledExecution),
+    });
+
+    expect(issueKinds(issuesOf(result))).toEqual([
+      "missing_runner_capability@integration/AC-001",
     ]);
   });
 

@@ -31,8 +31,10 @@
 - `domain/project-contract.ts`：SPEC/TASK 契约投影与项目源集合投影，全部经唯一规范哈希入口计算。
 - `domain/acceptance-contract.ts`：requirements、evidence policy、支持平台矩阵与四类验收 criterion 的 strict 领域契约；规范 criterion key、执行描述安全形状与悬空稳定 ID 都在这里 fail closed。
 - `domain/requirement-coverage.ts`：requirement→criterion 覆盖判定；criterion 必须满足 evidencePolicy 的 kind、platform、responseSchema、requiredEvidence 最低强度才计入覆盖，mandatory requirement 缺 integration 覆盖时项目在 Agent 启动前被拒绝。
-- `domain/host-execution-policy.ts`：产品级只读 HostExecutionPolicySnapshot 的 strict 契约、内部完整性与规范哈希；项目只能引用其中已有的稳定 ID。
+- `domain/host-execution-policy.ts`：产品级只读 HostExecutionPolicySnapshot v2 的 strict 契约、内部完整性与规范哈希；显式 `currentPlatformId` 保证无目标平台 command 也必须路由受控 Runner/Sandbox。
 - `domain/host-capability-validation.ts`：Run 创建前的三态校验，区分 valid、unsupported_contract（合同非法）与 configuration_missing（宿主缺能力），诊断是结构化事实，不生成人工替代请求。
+- `application/run-startup-capability-validator.ts`：Run 创建/恢复前唯一宿主能力门禁；在 Run ID、Git、状态或 Agent 副作用前加载并校验产品级策略。
+- `infrastructure/host/file-host-execution-policy-source.ts`：只读取固定用户配置目录的 `host-execution-policy.yaml`，项目与 CLI 不能覆盖路径。
 - `domain/canonical-json.ts`、`domain/canonical-schema.ts`、`domain/canonical-text.ts`、`domain/canonical-paths.ts`：JCS 规范编码、版本化 strict Schema、源文本 LF 归一化与 Git 路径校验。
 - `domain/attachment-digest.ts`：附件原始字节摘要契约。
 - `domain/agent-result.ts`：Worker、Reviewer、验证证据和 Agent 遥测的结构化协议。

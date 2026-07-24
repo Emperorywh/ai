@@ -94,8 +94,8 @@ export const packageScriptExecutionSchema = z.strictObject({
   kind: z.literal("package_script"),
   packageManager: stableIdSchema,
   script: packageScriptNameSchema,
-  args: z.array(z.string().min(1)).default([]),
-  cwdRelative: z.string().min(1).default("."),
+  args: z.array(z.string().min(1)),
+  cwdRelative: z.string().min(1),
   timeoutMs: z.number().int().positive(),
   envProfile: stableIdSchema,
   dependencyProfile: stableIdSchema,
@@ -103,8 +103,8 @@ export const packageScriptExecutionSchema = z.strictObject({
 export const argvExecutionSchema = z.strictObject({
   kind: z.literal("argv"),
   executable: stableIdSchema,
-  args: z.array(z.string().min(1)).default([]),
-  cwdRelative: z.string().min(1).default("."),
+  args: z.array(z.string().min(1)),
+  cwdRelative: z.string().min(1),
   timeoutMs: z.number().int().positive(),
   envProfile: stableIdSchema,
 });

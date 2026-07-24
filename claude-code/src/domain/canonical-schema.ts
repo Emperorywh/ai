@@ -7,6 +7,7 @@ import { z } from "zod";
 import { CanonicalViolationError } from "./errors.js";
 
 const canonicalSchemaBrand: unique symbol = Symbol("apex.canonical-schema");
+const canonicalSchemaDefinitions = new WeakSet();
 
 /*
  * CanonicalSchema 只能由 defineCanonicalSchema 构造。
@@ -48,11 +49,29 @@ export function defineCanonicalSchema<Shape extends z.ZodRawShape>(
     schemaVersion: z.literal(schemaVersion),
     ...shape,
   });
-  return {
+  const canonicalSchema = {
     [canonicalSchemaBrand]: true,
     schemaVersion,
     schema,
   } as CanonicalSchema<{ schemaVersion: number } & z.infer<z.ZodObject<Shape>>>;
+  canonicalSchemaDefinitions.add(canonicalSchema);
+  return canonicalSchema;
+}
+
+/*
+ * TypeScript 品牌在编译后仍需要运行时校验，防止 JavaScript 调用方或强制类型断言
+ * 把任意 Zod Schema 注入唯一规范哈希入口。
+ */
+export function assertCanonicalSchemaDefinition(
+  schema: unknown,
+): asserts schema is CanonicalSchema<unknown> {
+  if (
+    typeof schema !== "object"
+    || schema === null
+    || !canonicalSchemaDefinitions.has(schema)
+  ) {
+    throw new CanonicalViolationError("规范哈希只接受由 defineCanonicalSchema 创建的 Schema");
+  }
 }
 
 /*
@@ -67,22 +86,53 @@ export function assertSchemaPreservesValue(input: unknown, parsed: unknown): voi
     if (Object.getOwnPropertySymbols(input).length > 0) {
       throw new CanonicalViolationError("规范对象不允许携带符号键");
     }
-    for (const key of Object.keys(input)) {
-      if (!(key in parsed)) {
-        throw new CanonicalViolationError(
-          `规范 Schema 静默丢弃了字段：${key}`,
-        );
-      }
+    const inputKeys = Object.keys(input);
+    const parsedKeys = Object.keys(parsed);
+    assertSameOwnKeys(inputKeys, parsedKeys, "规范对象");
+    for (const key of inputKeys) {
       assertSchemaPreservesValue(input[key], parsed[key]);
     }
     return;
   }
   if (Array.isArray(parsed)) {
-    if (!Array.isArray(input) || input.length !== parsed.length) {
+    if (!Array.isArray(input)) {
       throw new CanonicalViolationError("规范 Schema 校验改变了数组形态");
     }
-    for (let index = 0; index < parsed.length; index += 1) {
-      assertSchemaPreservesValue(input[index], parsed[index]);
+    const inputKeys = Object.keys(input);
+    const parsedKeys = Object.keys(parsed);
+    assertSameOwnKeys(inputKeys, parsedKeys, "规范数组");
+    for (const key of inputKeys) {
+      assertSchemaPreservesValue(
+        (input as unknown as Record<string, unknown>)[key],
+        (parsed as unknown as Record<string, unknown>)[key],
+      );
+    }
+    return;
+  }
+  /*
+   * Schema 只能判定输入是否有效，不能通过 trim/default/coerce/transform 改写待签名值。
+   * Object.is 同时保留 NaN、-0 等 JavaScript 标量差异；非有限数字仍由 JCS 边界拒绝。
+   */
+  if (!Object.is(input, parsed)) {
+    throw new CanonicalViolationError("规范 Schema 校验改变了标量值");
+  }
+}
+
+function assertSameOwnKeys(
+  inputKeys: readonly string[],
+  parsedKeys: readonly string[],
+  label: string,
+): void {
+  const parsedKeySet = new Set(parsedKeys);
+  for (const key of inputKeys) {
+    if (!parsedKeySet.has(key)) {
+      throw new CanonicalViolationError(`${label}校验静默丢弃了字段：${key}`);
+    }
+  }
+  const inputKeySet = new Set(inputKeys);
+  for (const key of parsedKeys) {
+    if (!inputKeySet.has(key)) {
+      throw new CanonicalViolationError(`${label}校验静默补全了字段：${key}`);
     }
   }
 }

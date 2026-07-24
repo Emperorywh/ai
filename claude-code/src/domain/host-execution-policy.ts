@@ -89,9 +89,12 @@ export type PlatformRunnerCapability = z.infer<
 /*
  * 规范投影即宿主配置的唯一可哈希形态；快照 hash 进入 Run 契约、
  * VerificationEnvironment 和 RunnerAttestation，协议升级只能显式换代。
+ * schemaVersion 2 新增 currentPlatformId，使未显式声明目标平台的 command
+ * 也必须确定性路由到一个受控 Runner/Sandbox，不允许把“当前宿主”当作隐式能力。
  */
-export const hostExecutionPolicyProjectionSchema = defineCanonicalSchema(1, {
+export const hostExecutionPolicyProjectionSchema = defineCanonicalSchema(2, {
   id: stableIdSchema,
+  currentPlatformId: platformIdSchema,
   platformCapabilities: z.array(platformRunnerCapabilitySchema),
   sandboxCapabilities: z.array(sandboxCapabilitySchema),
   envProfiles: z.array(hostEnvironmentProfileSchema),
@@ -193,6 +196,7 @@ export function createHostExecutionPolicyHash(
   return canonicalHash.digestStructured(hostExecutionPolicyProjectionSchema, {
     schemaVersion: hostExecutionPolicyProjectionSchema.schemaVersion,
     id: snapshot.id,
+    currentPlatformId: snapshot.currentPlatformId,
     platformCapabilities: [...snapshot.platformCapabilities],
     sandboxCapabilities: [...snapshot.sandboxCapabilities],
     envProfiles: [...snapshot.envProfiles],

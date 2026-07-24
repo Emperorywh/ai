@@ -6,6 +6,7 @@
  * 编码输出固定为 UTF-8、无 BOM，不附加平台换行。
  */
 import { CanonicalViolationError } from "./errors.js";
+import { assertUnicodeScalarText } from "./canonical-unicode.js";
 
 export function encodeCanonicalJson(value: unknown): string {
   return serializeValue(value, new Set());
@@ -16,7 +17,7 @@ export function encodeCanonicalJson(value: unknown): string {
  * 孤立代理对会被 UTF-8 编码静默替换为 U+FFFD，因此这里同样拒绝。
  */
 export function encodeCanonicalUtf8(text: string): Uint8Array {
-  assertNoLoneSurrogates(text, "规范文本");
+  assertUnicodeScalarText(text, "规范文本");
   return new TextEncoder().encode(text);
 }
 
@@ -36,7 +37,7 @@ function serializeValue(value: unknown, ancestors: Set<object>): string {
       return JSON.stringify(value);
     }
     case "string": {
-      assertNoLoneSurrogates(value, "规范 JSON 字符串");
+      assertUnicodeScalarText(value, "规范 JSON 字符串");
       return JSON.stringify(value);
     }
     case "object":
@@ -91,7 +92,7 @@ function serializeRecord(value: object, ancestors: Set<object>): string {
   }
   const keys = Object.keys(value).sort();
   const entries = keys.map((key) => {
-    assertNoLoneSurrogates(key, "规范 JSON 对象键");
+    assertUnicodeScalarText(key, "规范 JSON 对象键");
     if (key.normalize("NFC") !== key) {
       throw new CanonicalViolationError(`规范 JSON 对象键不是 NFC 规范形式：${key}`);
     }
@@ -102,21 +103,4 @@ function serializeRecord(value: object, ancestors: Set<object>): string {
     return property;
   });
   return `{${entries.join(",")}}`;
-}
-
-function assertNoLoneSurrogates(text: string, label: string): void {
-  for (let index = 0; index < text.length; index += 1) {
-    const code = text.charCodeAt(index);
-    if (code >= 0xd800 && code <= 0xdbff) {
-      const next = text.charCodeAt(index + 1);
-      if (Number.isNaN(next) || next < 0xdc00 || next > 0xdfff) {
-        throw new CanonicalViolationError(`${label} 包含孤立高位代理`);
-      }
-      index += 1;
-      continue;
-    }
-    if (code >= 0xdc00 && code <= 0xdfff) {
-      throw new CanonicalViolationError(`${label} 包含孤立低位代理`);
-    }
-  }
 }

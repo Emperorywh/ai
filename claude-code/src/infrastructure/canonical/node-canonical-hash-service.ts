@@ -9,6 +9,7 @@ import {
   encodeCanonicalUtf8,
 } from "../../domain/canonical-json.js";
 import {
+  assertCanonicalSchemaDefinition,
   assertSchemaPreservesValue,
   type CanonicalSchema,
 } from "../../domain/canonical-schema.js";
@@ -20,6 +21,7 @@ export class NodeCanonicalHashService implements CanonicalHashService {
     schema: CanonicalSchema<T>,
     value: unknown,
   ): string {
+    assertCanonicalSchemaDefinition(schema);
     const parsed = schema.schema.safeParse(value);
     if (!parsed.success) {
       throw new CanonicalViolationError(

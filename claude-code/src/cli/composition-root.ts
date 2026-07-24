@@ -10,6 +10,7 @@ import { RunArtifactWriter } from "../application/run-artifact-writer.js";
 import { RunCheckpointWriter } from "../application/run-checkpoint-writer.js";
 import { RunFinalizer } from "../application/run-finalizer.js";
 import { RunResumeValidator } from "../application/run-resume-validator.js";
+import { DefaultRunStartupCapabilityValidator } from "../application/run-startup-capability-validator.js";
 import { CommitStage } from "../application/commit-stage.js";
 import { ImplementationStage } from "../application/implementation-stage.js";
 import { ReviewStage } from "../application/review-stage.js";
@@ -37,6 +38,10 @@ import { FileStateStore } from "../infrastructure/persistence/file-state-store.j
 import { SystemClock } from "../infrastructure/system-clock.js";
 import { FileProjectRepository } from "../infrastructure/tasks/file-project-repository.js";
 import { FileProjectContextProvider } from "../infrastructure/tasks/file-project-context-provider.js";
+import {
+  FileHostExecutionPolicySource,
+  resolveDefaultHostExecutionPolicyPath,
+} from "../infrastructure/host/file-host-execution-policy-source.js";
 import { BeijingTimeFormatter } from "../infrastructure/time/beijing-time-formatter.js";
 import type { TimeFormatter } from "../ports/time-formatter.js";
 
@@ -99,6 +104,16 @@ export async function createOrchestratorRuntime(
   const resourceBudget = new TaskResourceBudget();
   const stageSupport = new TaskStageSupport(clock);
   const baselineResolver = new WorkspaceBaselineResolver(workspace);
+  /*
+   * 宿主策略只从产品级固定配置位置读取；项目根、CLI 参数和项目设置不能改变该路径。
+   * 启动与恢复共享同一个无状态校验服务，每次都会重新读取当前宿主事实。
+   */
+  const startupCapabilities = new DefaultRunStartupCapabilityValidator(
+    new FileHostExecutionPolicySource(
+      resolveDefaultHostExecutionPolicyPath(),
+    ),
+    canonicalHash,
+  );
   const projectContext = new FileProjectContextProvider();
   const taskExecution = new TaskExecutionService(
     new ImplementationStage(
@@ -137,6 +152,7 @@ export async function createOrchestratorRuntime(
       workspace,
       checkpoints,
       resumeValidator: new RunResumeValidator(workspace, baselineResolver),
+      startupCapabilities,
       finalizer: new RunFinalizer(),
       artifacts: new RunArtifactWriter(stateStore, timeFormatter),
       terminalCandidates: new TerminalCandidateService(

@@ -34,6 +34,7 @@ import type { RunArtifactWriter } from "./run-artifact-writer.js";
 import type { RunCheckpointWriter } from "./run-checkpoint-writer.js";
 import type { RunFinalizer } from "./run-finalizer.js";
 import type { RunResumeValidator } from "./run-resume-validator.js";
+import type { RunStartupCapabilityValidator } from "./run-startup-capability-validator.js";
 import type { TerminalCandidateService } from "./terminal-candidate-service.js";
 
 export interface OrchestratorResult {
@@ -62,6 +63,7 @@ export interface QueueOrchestratorDependencies {
   readonly workspace: WorkspaceIdentityStore & CandidateArchiveRestorer;
   readonly checkpoints: RunCheckpointWriter;
   readonly resumeValidator: RunResumeValidator;
+  readonly startupCapabilities: RunStartupCapabilityValidator;
   readonly finalizer: RunFinalizer;
   readonly artifacts: RunArtifactWriter;
   readonly terminalCandidates: TerminalCandidateService;
@@ -77,6 +79,7 @@ export class QueueOrchestrator {
   private readonly workspace: WorkspaceIdentityStore & CandidateArchiveRestorer;
   private readonly checkpoints: RunCheckpointWriter;
   private readonly resumeValidator: RunResumeValidator;
+  private readonly startupCapabilities: RunStartupCapabilityValidator;
   private readonly finalizer: RunFinalizer;
   private readonly artifacts: RunArtifactWriter;
   private readonly terminalCandidates: TerminalCandidateService;
@@ -91,6 +94,7 @@ export class QueueOrchestrator {
     this.workspace = dependencies.workspace;
     this.checkpoints = dependencies.checkpoints;
     this.resumeValidator = dependencies.resumeValidator;
+    this.startupCapabilities = dependencies.startupCapabilities;
     this.finalizer = dependencies.finalizer;
     this.artifacts = dependencies.artifacts;
     this.terminalCandidates = dependencies.terminalCandidates;
@@ -102,6 +106,11 @@ export class QueueOrchestrator {
     loaded: LoadedProject,
     options: StartRunOptions = {},
   ): Promise<OrchestratorResult> {
+    /*
+     * 宿主 capability 必须先于 Run ID、锁、Git 检查和任何 Agent 副作用完成验证。
+     * 即使全部 TASK 可复用，新 Run 也不能跳过当前策略快照校验。
+     */
+    const startupCapabilities = await this.startupCapabilities.validate(loaded);
     const runId = this.createRunId();
     const lock = await this.runLock.acquire(runId);
     try {
@@ -143,6 +152,8 @@ export class QueueOrchestrator {
           fresh: options.fresh === true,
           reusedTaskIds,
           pendingTaskIds,
+          hostExecutionPolicyHash:
+            startupCapabilities.hostExecutionPolicyHash,
           reuseDecisions: progressPlan.decisions,
         },
       );
@@ -180,6 +191,12 @@ export class QueueOrchestrator {
       return { state: existing, artifacts: [] };
     }
 
+    /*
+     * 只有确实需要继续执行的 Run 才重新读取产品级宿主快照；查询不存在或终态 Run
+     * 不依赖执行能力。校验仍早于锁、Git 恢复和 Agent 副作用，配置撤销后不能继续执行。
+     * RunState v7 的合同身份将在后续聚合任务中持久化该摘要；当前阶段不创建第二状态源。
+     */
+    await this.startupCapabilities.validate(loaded);
     const lock = await this.runLock.acquire(runId);
     try {
       const orderedTasks = loaded.tasks;

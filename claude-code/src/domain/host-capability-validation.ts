@@ -112,7 +112,9 @@ export function validateRunStartupCapabilities(
 
 /*
  * 每条 command criterion 的全部宿主引用都必须解析：env/dependency profile、
- * package manager、executable 与 platformId 绑定的 Runner/Sandbox capability。
+ * package manager、executable 与 effective platformId 绑定的 Runner/Sandbox capability。
+ * 未显式声明 platformId 的 targeted/full command 使用快照 currentPlatformId，
+ * 因而不存在绕过受控执行环境的“宿主本地直跑”分支。
  * 问题按 integration 文档序、再 TASK 数字线性序收集，相同输入得到相同诊断序列。
  */
 function collectHostCapabilityIssues(
@@ -144,6 +146,8 @@ function collectHostCapabilityIssues(
 
   const issues: HostCapabilityIssue[] = [];
   for (const criterion of commandCriteria) {
+    const effectivePlatformId =
+      criterion.platformId ?? snapshot.currentPlatformId;
     if (!envProfileIds.has(criterion.execution.envProfile)) {
       issues.push({
         kind: "missing_env_profile",
@@ -182,33 +186,30 @@ function collectHostCapabilityIssues(
           executableId: criterion.execution.executable,
         });
       } else if (
-        criterion.platformId !== undefined &&
-        !policy.allowedPlatformIds.includes(criterion.platformId)
+        !policy.allowedPlatformIds.includes(effectivePlatformId)
       ) {
         issues.push({
           kind: "executable_platform_not_allowed",
           criterionKey: criterion.key,
           executableId: policy.id,
-          platformId: criterion.platformId,
+          platformId: effectivePlatformId,
         });
       }
     }
-    if (criterion.platformId !== undefined) {
-      const capability = runnerCapabilities.get(criterion.platformId);
-      if (capability === undefined) {
-        issues.push({
-          kind: "missing_runner_capability",
-          criterionKey: criterion.key,
-          platformId: criterion.platformId,
-        });
-      } else if (!sandboxCapabilityIds.has(capability.sandboxCapabilityId)) {
-        issues.push({
-          kind: "missing_sandbox_capability",
-          criterionKey: criterion.key,
-          platformId: criterion.platformId,
-          sandboxCapabilityId: capability.sandboxCapabilityId,
-        });
-      }
+    const capability = runnerCapabilities.get(effectivePlatformId);
+    if (capability === undefined) {
+      issues.push({
+        kind: "missing_runner_capability",
+        criterionKey: criterion.key,
+        platformId: effectivePlatformId,
+      });
+    } else if (!sandboxCapabilityIds.has(capability.sandboxCapabilityId)) {
+      issues.push({
+        kind: "missing_sandbox_capability",
+        criterionKey: criterion.key,
+        platformId: effectivePlatformId,
+        sandboxCapabilityId: capability.sandboxCapabilityId,
+      });
     }
   }
   return issues;

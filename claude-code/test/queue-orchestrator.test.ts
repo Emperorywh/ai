@@ -11,6 +11,7 @@ import { RunArtifactWriter } from "../src/application/run-artifact-writer.js";
 import { RunCheckpointWriter } from "../src/application/run-checkpoint-writer.js";
 import { RunFinalizer } from "../src/application/run-finalizer.js";
 import { RunResumeValidator } from "../src/application/run-resume-validator.js";
+import type { RunStartupCapabilityValidator } from "../src/application/run-startup-capability-validator.js";
 import { ReviewStage } from "../src/application/review-stage.js";
 import { TaskExecutionService } from "../src/application/task-execution-service.js";
 import { TaskProgressReconciler } from "../src/application/task-progress-reconciler.js";
@@ -43,6 +44,31 @@ import {
 import type { CandidateSnapshot } from "../src/ports/workspace.js";
 
 describe("QueueOrchestrator", () => {
+  it("宿主 capability 校验失败时不创建 Run 或触发 Git/Agent 副作用", async () => {
+    let validationCalls = 0;
+    const startupCapabilities: RunStartupCapabilityValidator = {
+      validate: async () => {
+        validationCalls += 1;
+        throw new InfrastructureError("宿主缺少受控 Runner");
+      },
+    };
+    const fixture = createFixture(
+      new RecordingWorkspace(),
+      new RecordingAgent(),
+      new FixedAgentModelResolver(),
+      startupCapabilities,
+    );
+
+    await expect(
+      fixture.orchestrator.start(createLoadedProject([{ id: "TASK-001" }])),
+    ).rejects.toThrow("宿主缺少受控 Runner");
+    expect(validationCalls).toBe(1);
+    expect(fixture.lock.maxActive).toBe(0);
+    expect(fixture.workspace.cleanChecks).toBe(0);
+    expect(fixture.agent.requests).toEqual([]);
+    expect(fixture.stateStore.snapshots).toEqual([]);
+  });
+
   it("按数字线性顺序执行，且任意时刻最多只有一个 Agent", async () => {
     const fixture = createFixture();
     const loaded = createLoadedProject([
@@ -105,7 +131,10 @@ describe("QueueOrchestrator", () => {
      */
     expect(fixture.logger.events[0]).toMatchObject({
       type: "run_started",
-      details: { taskOrder: ["TASK-001", "TASK-002", "TASK-003"] },
+      details: {
+        taskOrder: ["TASK-001", "TASK-002", "TASK-003"],
+        hostExecutionPolicyHash: "a".repeat(64),
+      },
     });
     expect(fixture.logger.events[0]?.message).toContain(
       "TASK-001 → TASK-002 → TASK-003",
@@ -1251,6 +1280,11 @@ function createFixture(
   workspace = new RecordingWorkspace(),
   agent = new RecordingAgent(),
   modelResolver = new FixedAgentModelResolver(),
+  startupCapabilities: RunStartupCapabilityValidator = {
+    validate: async () => ({
+      hostExecutionPolicyHash: "a".repeat(64),
+    }),
+  },
 ) {
   const clock = new FakeClock();
   const stateStore = new MemoryStateStore();
@@ -1294,6 +1328,7 @@ function createFixture(
     workspace,
     checkpoints,
     resumeValidator: new RunResumeValidator(workspace, baselineResolver),
+    startupCapabilities,
     finalizer: new RunFinalizer(),
     artifacts: new RunArtifactWriter(stateStore, timeFormatter),
     terminalCandidates: new TerminalCandidateService(
