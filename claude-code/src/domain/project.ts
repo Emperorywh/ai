@@ -3,6 +3,11 @@
  * 初始化器与项目仓储共享同一组路径，保证生成模板和运行时加载不会形成两套约定。
  */
 import { z } from "zod";
+import type {
+  PlatformDefinition,
+  RequirementDefinition,
+  ScopedAcceptanceCriterion,
+} from "./acceptance-contract.js";
 
 const ORCHESTRATION_DIRECTORY = "orchestration";
 
@@ -53,6 +58,8 @@ export interface TextDocument {
 /*
  * LoadedProject 是文件系统项目经过严格校验后的不可变运行输入。
  * tasks 已经按 TASK 数字序号排列，应用层只能消费该线性序列，不能再次解释任务顺序。
+ * requirements、平台矩阵、integration 与 TASK 验收契约都已在加载时 strict 解析并冻结，
+ * 规范 criterion key 与各合同身份哈希随契约内容确定性重算。
  */
 export interface LoadedProject {
   readonly tasks: readonly TaskDefinition[];
@@ -62,4 +69,14 @@ export interface LoadedProject {
   readonly taskContractHashes: ReadonlyMap<string, string>;
   readonly specificationDocument: TextDocument;
   readonly specificationContractHash: string;
+  readonly requirements: readonly RequirementDefinition[];
+  readonly supportedPlatformMatrix: readonly PlatformDefinition[];
+  readonly integrationCriteria: readonly ScopedAcceptanceCriterion[];
+  readonly taskAcceptanceCriteria: ReadonlyMap<
+    string,
+    readonly ScopedAcceptanceCriterion[]
+  >;
+  readonly requirementSetHash: string;
+  readonly platformMatrixHash: string;
+  readonly taskSetHash: string;
 }

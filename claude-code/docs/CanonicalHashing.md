@@ -23,7 +23,7 @@
 4. **UTF-8 编码**：无 BOM，不附加平台换行。
 5. **SHA-256**：外部表示固定为小写十六进制。
 
-YAML 前置元数据的重复规范键由 YAML 解析器 fail closed（`Map keys must be unique`），不会进入哈希。
+YAML 前置元数据与固定章节契约块的重复规范键都由 YAML 解析器 fail closed（`Map keys must be unique`），不会进入哈希。
 
 ## 3. SPEC/TASK 源文本与 source hash
 
@@ -38,10 +38,15 @@ YAML 前置元数据的重复规范键由 YAML 解析器 fail closed（`Map keys
 
 `domain/project-contract.ts` 定义版本化投影，契约哈希只通过 `digestStructured` 计算：
 
-- `SpecContractProjection`（`schemaVersion: 1`）：完整规范化 SPEC 正文。
-- `TaskContractProjection`（`schemaVersion: 1`）：`id`、`title`、完整规范化 TASK 正文和 `specContractHash`。任何业务说明文字变化（包括 YAML 验收块之外的正文）都会改变 contract hash；SPEC 变化经由 `specContractHash` 使全部 TASK 契约失效。
+- `SpecContractProjection`（`schemaVersion: 2`）：完整规范化 SPEC 正文、requirements、supportedPlatformMatrix 和 integrationCriteria。任何业务说明文字或结构化项目契约变化都会改变 contract hash。
+- `TaskContractProjection`（`schemaVersion: 2`）：`id`、`title`、完整规范化 TASK 正文、解析后的验收契约和 `specContractHash`。任何业务说明文字变化（包括 YAML 验收块之外的正文）都会改变 contract hash；SPEC 变化经由 `specContractHash` 使全部 TASK 契约失效。规范 criterion key 由 TASK id 与 criterion id 推导，不作为投影字段重复参与哈希。
 - `ProjectSourceProjection`（`schemaVersion: 1`）：唯一 SPEC 与按 TASK 数字线性顺序排列的全部源文件 `{path, sourceHash}`，支撑同一 Run 的精确恢复。
+- `RequirementSetProjection`（`schemaVersion: 1`）：按 SPEC 声明顺序排列的 requirements，形成独立的 requirement 集合合同身份。
+- `PlatformMatrixProjection`（`schemaVersion: 1`）：按 SPEC 声明顺序排列的支持平台矩阵，形成独立的平台合同身份。
+- `TaskSetProjection`（`schemaVersion: 1`）：按 TASK 数字线性顺序排列的 `{id, contractHash}`，形成 task-set 合同身份。
 - `PredecessorCompletionProjection`（`schemaVersion: 1`，`domain/task-completion.ts`）：`"root"` 或 `{taskId, commitSha}` 联合分支，绑定直接前驱完成提交。
+
+投影中的结构化契约值来自 `domain/acceptance-contract.ts` 的 strict 领域 Schema（requirements、evidencePolicy、平台条目和四类 criterion）；契约 YAML 的可选字段先归一化为领域默认值（如 `allowNotApplicable: false`、空参数数组、项目根 cwd），再进入哈希，因此等价写法得到相同 contract hash。
 
 前置元数据的 YAML 引号风格等纯格式变化不属于契约：contract hash 不变，但 source hash 与 project hash 会改变。
 
@@ -64,7 +69,7 @@ YAML 前置元数据的重复规范键由 YAML 解析器 fail closed（`Map keys
 
 - 每个可哈希对象的 Schema 内嵌 `schemaVersion` 字面量；协议或 Schema 变更必须显式提升版本号，旧版本对象会被 strict 校验拒绝。
 - 不允许静默修改算法、不允许并存两套规范编码入口、不允许“去除未知字段后继续哈希”。
-- `TaskContractProjection`/`SpecContractProjection` 的结构化验收契约字段由 TASK-002 扩展，并按本规则显式升级 `schemaVersion`。
+- `TaskContractProjection`/`SpecContractProjection` 已在 TASK-002 升级为 `schemaVersion: 2`，绑定解析后的结构化验收契约；验收 criterion、requirement 或平台 Schema 的后续变更必须再次显式升级。
 - 候选内容身份（`CandidateManifest`/`CandidateIdentity`）由 TASK-005 在同一入口上重建；当前的 v6 候选工作树指纹、项目上下文导航指纹与 Git 身份键不属于本边界，分别由其所有任务处理。
 
 ## 8. 模块位置与依赖方向
@@ -76,8 +81,10 @@ YAML 前置元数据的重复规范键由 YAML 解析器 fail closed（`Map keys
 | `domain/canonical-text.ts` | 源文本 UTF-8/BOM/NUL 校验与 LF 归一化 |
 | `domain/canonical-paths.ts` | Git 路径 NFC、碰撞与平台可表示性校验 |
 | `domain/project-contract.ts` | SPEC/TASK/项目源集合契约投影与摘要 |
+| `domain/acceptance-contract.ts` | requirements、平台矩阵与四类验收 criterion 的 strict 领域契约、规范键与跨引用校验 |
 | `domain/task-completion.ts` | 前驱完成指纹投影 |
 | `domain/attachment-digest.ts` | 附件原始字节摘要契约 |
 | `ports/canonical-hash.ts` | 唯一哈希端口 |
 | `infrastructure/canonical/node-canonical-hash-service.ts` | 唯一生产实现（node:crypto） |
-| `infrastructure/tasks/file-project-repository.ts` | 加载边界接线：归一化、路径校验、投影与摘要 |
+| `infrastructure/tasks/markdown-contract-section.ts` | Markdown 固定章节提取边界 |
+| `infrastructure/tasks/file-project-repository.ts` | 加载边界接线：归一化、路径校验、契约解析、投影与摘要 |

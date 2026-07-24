@@ -11,6 +11,7 @@ TASK 应冻结：
 - 相关业务规则和状态不变量；
 - 必须遵守的模块边界和依赖方向；
 - 验证方式和完成标准；
+- `### 验收契约` 章节中的结构化验收 criteria（四类 kind、结构化执行描述、requirement 引用）；
 - Git checkpoint 和回退边界。
 
 TASK 不应冻结：
@@ -111,6 +112,43 @@ title: 简洁描述本任务交付的结果
 ### 回退边界
 
 说明回退本 TASK 的 Git checkpoint 时，只会移除本 TASK 新增的结果，不会破坏此前完成的能力。
+
+### 验收契约
+
+本 TASK 完成判定的唯一机器门禁，必须是恰好一个 ```yaml 代码块：
+
+```yaml
+criteria:
+  - id: AC-001
+    requirementRefs: [REQ-BUILD-001]
+    kind: command
+    scope: full
+    execution:
+      kind: package_script
+      packageManager: pnpm
+      script: test
+      args: []
+      cwdRelative: .
+      timeoutMs: 900000
+      envProfile: project_test
+      dependencyProfile: pnpm_frozen
+    success: exit_code_zero
+    allowNotApplicable: false
+    description: 全量测试通过
+```
+
+验收契约规则：
+
+1. 每个 TASK 必须有且仅有一个 `### 验收契约` 章节，章节内只允许一个 ```yaml 代码块，不允许散文或第二个代码块；`criteria` 必须是非空数组。
+2. criterion 只允许四类 kind：
+   - `command`：由宿主 VerificationRunner 真实执行，必须声明 `scope`（`targeted` / `full` / `clean_platform`）、结构化 `execution` 和 `success`（当前只支持 `exit_code_zero`）；`scope: clean_platform` 时必须额外声明存在于支持平台矩阵中的 `platformId`。
+   - `static`：由独立 Reviewer 逐条给出 disposition，只有基础字段。
+   - `human`：由操作者按规定 `procedure` 验收，必须包含非空 `procedure`、结构化 `expected`（`metric` / `operator` / `value`）、非空 `requiredEvidence` 和版本化 `responseSchema`（以 `_vN` 结尾）。
+   - `external`：依赖项目外事实或凭据就绪声明，字段要求与 `human` 相同。
+3. `command` 不接受 raw shell 字符串；`execution` 只允许 `package_script`（packageManager、script、args、cwdRelative、timeoutMs、envProfile、dependencyProfile）或 `argv`（executable、args、cwdRelative、timeoutMs、envProfile）。参数逐项传递且不得包含 shell 拼接语义（`;`、`&&`、`|`、`>`、反引号、`$(`、`${` 等）；`cwdRelative` 只能是 `.` 或项目内相对 POSIX 路径。
+4. package manager、executable、env/dependency profile 和 platform 只引用宿主 HostExecutionPolicySnapshot 中已有的稳定 ID，TASK/SPEC 不得定义实现、绝对路径或凭据。
+5. 每条 criterion 必须通过 `requirementRefs` 引用 SPEC 中存在的 requirement；`id` 使用 `AC-数字`（至少三位）且在同一文档内唯一；`description` 不能为空；`allowNotApplicable` 默认 `false`，只有显式设为 `true` 才允许 Reviewer 给出带理由的 `not_applicable`。
+6. 未知 kind、未知字段、重复规范键、空描述、非法执行描述、缺失必填字段或悬空稳定 ID 都会在 Agent 启动前拒绝整个项目；不要写自由文本验收描述，系统不会从旧正文推测或自动补全验收条款。
 
 ## 工作流程
 

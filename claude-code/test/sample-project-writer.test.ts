@@ -50,6 +50,17 @@ describe("writeSampleProject", () => {
     const loaded = await new FileProjectRepository(new NodeCanonicalHashService()).load(root);
     expect(loaded.tasks.map((task) => task.id)).toEqual(["TASK-001"]);
     expect(loaded.specificationDocument.path).toBe("orchestration/SPEC.md");
+    /*
+     * 模板内的结构化契约必须满足运行时 strict 解析，规范键与合同身份由同一边界产出。
+     */
+    expect(loaded.requirements.map((requirement) => requirement.id))
+      .toEqual(["REQ-FOUNDATION-001"]);
+    expect(loaded.integrationCriteria.map((criterion) => criterion.key))
+      .toEqual(["integration/AC-001"]);
+    expect(
+      loaded.taskAcceptanceCriteria.get("TASK-001")
+        ?.map((criterion) => criterion.key),
+    ).toEqual(["task:TASK-001/AC-001"]);
     const taskTemplate = await readFile(
       join(root, "orchestration", "tasks", "TASK-001.md"),
       "utf8",

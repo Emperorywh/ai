@@ -2,10 +2,26 @@
  * 文件项目仓储把唯一规格文档与完整 TASK 目录编译成稳定的运行契约。
  * 每个 Markdown 文件既是任务正文也是机器元数据来源，目录中的任务不会被静默遗漏。
  * 所有文档先经过 UTF-8/BOM/NUL 校验与 LF 归一化，再由唯一规范哈希入口计算 source/contract 摘要。
+ * SPEC 的 requirements、支持平台矩阵、integration criteria 与每个 TASK 的验收契约
+ * 都在 Agent 启动前 strict 解析并冻结；Markdown 分节与 YAML 解析只存在于本基础设施层，
+ * 领域层只接收已经解析的规范值，格式错误一律 fail closed。
  */
 import { readFile, readdir, stat } from "node:fs/promises";
 import { basename, relative, resolve } from "node:path";
 import { parse } from "yaml";
+import {
+  attachCriterionKeys,
+  CONTRACT_SECTIONS,
+  describeContractIssues,
+  parseAcceptanceCriteriaDocument,
+  parseRequirementsDocument,
+  parseSupportedPlatformMatrixDocument,
+  validateProjectContractReferences,
+  type AcceptanceCriterion,
+  type PlatformDefinition,
+  type RequirementDefinition,
+  type ScopedAcceptanceCriterion,
+} from "../../domain/acceptance-contract.js";
 import { encodeCanonicalUtf8 } from "../../domain/canonical-json.js";
 import { assertCanonicalGitPathSet } from "../../domain/canonical-paths.js";
 import { decodeCanonicalSourceText } from "../../domain/canonical-text.js";
@@ -19,21 +35,32 @@ import {
   type TextDocument,
 } from "../../domain/project.js";
 import {
+  createPlatformMatrixHash,
   createProjectHash,
+  createRequirementSetHash,
   createSpecContractHash,
   createTaskContractHash,
+  createTaskSetHash,
   splitTaskDocument,
 } from "../../domain/project-contract.js";
 import { createLinearTaskSequence } from "../../domain/task-sequence.js";
 import type { CanonicalHashService } from "../../ports/canonical-hash.js";
 import type { ProjectRepository } from "../../ports/project-repository.js";
+import { extractContractYamlSection } from "./markdown-contract-section.js";
 
 const TASK_BODY_PATTERN = /^\n## 任务描述\n\n[\s\S]*\S\n?$/u;
+
+interface SpecificationContracts {
+  readonly requirements: readonly RequirementDefinition[];
+  readonly supportedPlatformMatrix: readonly PlatformDefinition[];
+  readonly integrationCriteria: readonly AcceptanceCriterion[];
+}
 
 interface LoadedTaskDocument {
   readonly task: TaskDefinition;
   readonly document: TextDocument;
   readonly body: string;
+  readonly acceptanceCriteria: readonly AcceptanceCriterion[];
 }
 
 export class FileProjectRepository implements ProjectRepository {
@@ -54,6 +81,9 @@ export class FileProjectRepository implements ProjectRepository {
       absoluteProjectRoot,
       PROJECT_STRUCTURE.specification,
     );
+    const specificationContracts = this.parseSpecificationContracts(
+      specificationDocument,
+    );
     const taskEntries = await this.loadTaskDocuments(absoluteProjectRoot);
     const tasks = createLinearTaskSequence(taskEntries.map((entry) => entry.task));
     const taskDocuments = new Map(
@@ -69,28 +99,59 @@ export class FileProjectRepository implements ProjectRepository {
     ]);
 
     /*
-     * 整体 projectHash 服务于同一 Run 的精确恢复；逐 TASK 契约指纹服务于新 Run 的安全复用。
-     * SPEC 契约哈希绑定完整规范化正文，任一业务说明文字变化都会使全部 TASK 契约失效。
-     * 契约与源集合投影都按 TASK 数字线性顺序排列，不依赖文件系统枚举顺序。
+     * 规范 criterion key 由 scope 与 criterion id 唯一推导；
+     * 悬空 requirementRef 或 platformId 在任何 Agent 启动前拒绝整个项目。
      */
-    const specificationContractHash = createSpecContractHash(
-      specificationDocument.content,
-      this.canonicalHash,
-    );
     const entriesByTaskId = new Map(
       taskEntries.map((entry) => [entry.task.id, entry] as const),
     );
+    const integrationCriteria = attachCriterionKeys(
+      specificationContracts.integrationCriteria,
+      { kind: "integration" },
+    );
+    const taskAcceptanceCriteria = new Map<
+      string,
+      readonly ScopedAcceptanceCriterion[]
+    >(tasks.map((task) => {
+      const entry = this.requireTaskEntry(entriesByTaskId, task.id);
+      return [
+        task.id,
+        attachCriterionKeys(entry.acceptanceCriteria, {
+          kind: "task",
+          taskId: task.id,
+        }),
+      ] as const;
+    }));
+    validateProjectContractReferences({
+      requirements: specificationContracts.requirements,
+      supportedPlatformMatrix: specificationContracts.supportedPlatformMatrix,
+      integrationCriteria,
+      taskAcceptanceCriteria,
+    });
+
+    /*
+     * 整体 projectHash 服务于同一 Run 的精确恢复；逐 TASK 契约指纹服务于新 Run 的安全复用。
+     * SPEC 契约哈希绑定完整规范化正文与结构化项目契约，任一业务说明文字变化都会使全部 TASK 契约失效。
+     * requirement 集合、平台矩阵与 task-set 身份随契约内容确定性重算，全部按 TASK 数字线性顺序排列。
+     */
+    const specificationContractHash = createSpecContractHash(
+      {
+        body: specificationDocument.content,
+        requirements: specificationContracts.requirements,
+        supportedPlatformMatrix: specificationContracts.supportedPlatformMatrix,
+        integrationCriteria: specificationContracts.integrationCriteria,
+      },
+      this.canonicalHash,
+    );
     const taskContractHashes = new Map(tasks.map((task) => {
-      const entry = entriesByTaskId.get(task.id);
-      if (entry === undefined) {
-        throw new ConfigurationError(`缺少任务文档：${task.id}`);
-      }
+      const entry = this.requireTaskEntry(entriesByTaskId, task.id);
       return [
         task.id,
         createTaskContractHash(
           {
             task,
             body: entry.body,
+            acceptanceCriteria: entry.acceptanceCriteria,
             specContractHash: specificationContractHash,
           },
           this.canonicalHash,
@@ -104,10 +165,7 @@ export class FileProjectRepository implements ProjectRepository {
           sourceHash: specificationDocument.sourceHash,
         },
         tasks: tasks.map((task) => {
-          const entry = entriesByTaskId.get(task.id);
-          if (entry === undefined) {
-            throw new ConfigurationError(`缺少任务文档：${task.id}`);
-          }
+          const entry = this.requireTaskEntry(entriesByTaskId, task.id);
           return {
             path: entry.document.path,
             sourceHash: entry.document.sourceHash,
@@ -125,7 +183,79 @@ export class FileProjectRepository implements ProjectRepository {
       taskContractHashes,
       specificationDocument,
       specificationContractHash,
+      requirements: specificationContracts.requirements,
+      supportedPlatformMatrix: specificationContracts.supportedPlatformMatrix,
+      integrationCriteria,
+      taskAcceptanceCriteria,
+      requirementSetHash: createRequirementSetHash(
+        specificationContracts.requirements,
+        this.canonicalHash,
+      ),
+      platformMatrixHash: createPlatformMatrixHash(
+        specificationContracts.supportedPlatformMatrix,
+        this.canonicalHash,
+      ),
+      taskSetHash: createTaskSetHash(
+        tasks.map((task) => ({
+          id: task.id,
+          contractHash: this.requireTaskContractHash(taskContractHashes, task.id),
+        })),
+        this.canonicalHash,
+      ),
     };
+  }
+
+  /*
+   * SPEC 的三个固定章节与 TASK 验收契约共用同一条 Markdown 分节 → YAML 解析 → 领域 strict 校验管道。
+   */
+  private parseSpecificationContracts(
+    document: TextDocument,
+  ): SpecificationContracts {
+    return {
+      requirements: parseRequirementsDocument(
+        this.parseYamlContract(
+          document.path,
+          extractContractYamlSection({
+            label: document.path,
+            text: document.content,
+            heading: CONTRACT_SECTIONS.requirements,
+          }),
+        ),
+        document.path,
+      ),
+      supportedPlatformMatrix: parseSupportedPlatformMatrixDocument(
+        this.parseYamlContract(
+          document.path,
+          extractContractYamlSection({
+            label: document.path,
+            text: document.content,
+            heading: CONTRACT_SECTIONS.supportedPlatformMatrix,
+          }),
+        ),
+        document.path,
+      ),
+      integrationCriteria: parseAcceptanceCriteriaDocument(
+        this.parseYamlContract(
+          document.path,
+          extractContractYamlSection({
+            label: document.path,
+            text: document.content,
+            heading: CONTRACT_SECTIONS.integrationCriteria,
+          }),
+        ),
+        document.path,
+      ),
+    };
+  }
+
+  private parseYamlContract(label: string, yamlText: string): unknown {
+    try {
+      return parse(yamlText);
+    } catch (error) {
+      throw new ConfigurationError(
+        `${label} 结构化契约 YAML 无法解析（${this.describeError(error)}）`,
+      );
+    }
   }
 
   private async loadTaskDocuments(
@@ -162,10 +292,22 @@ export class FileProjectRepository implements ProjectRepository {
         file: relativePath,
       });
       const body = this.validateTaskBody(task, content);
+      const acceptanceCriteria = parseAcceptanceCriteriaDocument(
+        this.parseYamlContract(
+          relativePath,
+          extractContractYamlSection({
+            label: relativePath,
+            text: body,
+            heading: CONTRACT_SECTIONS.taskAcceptanceCriteria,
+          }),
+        ),
+        relativePath,
+      );
       return {
         task,
         document: { path: relativePath, content, sourceHash: this.hashText(content) },
         body,
+        acceptanceCriteria,
       };
     }));
   }
@@ -191,7 +333,7 @@ export class FileProjectRepository implements ProjectRepository {
     const parsed = taskDocumentMetadataSchema.safeParse(parsedYaml);
     if (!parsed.success) {
       throw new ConfigurationError(
-        `TASK 前置元数据不符合契约：${path}（${this.describeIssues(parsed.error.issues)}）`,
+        `TASK 前置元数据不符合契约：${path}（${describeContractIssues(parsed.error.issues)}）`,
       );
     }
     return parsed.data;
@@ -248,6 +390,28 @@ export class FileProjectRepository implements ProjectRepository {
     return this.canonicalHash.digestBytes(encodeCanonicalUtf8(normalizedText));
   }
 
+  private requireTaskEntry(
+    entriesByTaskId: ReadonlyMap<string, LoadedTaskDocument>,
+    taskId: string,
+  ): LoadedTaskDocument {
+    const entry = entriesByTaskId.get(taskId);
+    if (entry === undefined) {
+      throw new ConfigurationError(`缺少任务文档：${taskId}`);
+    }
+    return entry;
+  }
+
+  private requireTaskContractHash(
+    taskContractHashes: ReadonlyMap<string, string>,
+    taskId: string,
+  ): string {
+    const contractHash = taskContractHashes.get(taskId);
+    if (contractHash === undefined) {
+      throw new ConfigurationError(`缺少任务契约指纹：${taskId}`);
+    }
+    return contractHash;
+  }
+
   private async assertDirectory(path: string): Promise<void> {
     try {
       const result = await stat(path);
@@ -262,14 +426,6 @@ export class FileProjectRepository implements ProjectRepository {
         `目录无法访问：${path}（${this.describeError(error)}）`,
       );
     }
-  }
-
-  private describeIssues(
-    issues: readonly { readonly path: PropertyKey[]; readonly message: string }[],
-  ): string {
-    return issues
-      .map((issue) => `${issue.path.join(".") || "root"}: ${issue.message}`)
-      .join("；");
   }
 
   private describeError(error: unknown): string {

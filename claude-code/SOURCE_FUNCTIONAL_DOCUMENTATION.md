@@ -29,6 +29,7 @@
 - `domain/run-state-invariants.ts`：TASK 集合、线性前缀、尝试时间线、候选与审核的跨字段语义校验。
 - `domain/task-completion.ts`：直接前驱完成指纹的规范投影。
 - `domain/project-contract.ts`：SPEC/TASK 契约投影与项目源集合投影，全部经唯一规范哈希入口计算。
+- `domain/acceptance-contract.ts`：requirements、evidence policy、支持平台矩阵与四类验收 criterion 的 strict 领域契约；规范 criterion key、执行描述安全形状与悬空稳定 ID 都在这里 fail closed。
 - `domain/canonical-json.ts`、`domain/canonical-schema.ts`、`domain/canonical-text.ts`、`domain/canonical-paths.ts`：JCS 规范编码、版本化 strict Schema、源文本 LF 归一化与 Git 路径校验。
 - `domain/attachment-digest.ts`：附件原始字节摘要契约。
 - `domain/agent-result.ts`：Worker、Reviewer、验证证据和 Agent 遥测的结构化协议。
@@ -80,7 +81,8 @@
 - `git-task-completion-ledger.ts`：精确 trailer 完成历史。
 - `git-candidate-quarantine.ts`：终态候选的可重入归档。
 - `git-workspace.ts`：以上 Git 组件的薄门面。
-- `file-project-repository.ts`：唯一规格与 TASK Markdown 编译。
+- `file-project-repository.ts`：唯一规格与 TASK Markdown 编译，SPEC 固定章节与 TASK 验收契约的 YAML 解析和合同身份接线。
+- `markdown-contract-section.ts`：Markdown 固定章节提取边界，只识别围栏外精确标题行与唯一 yaml 代码块。
 - `node-canonical-hash-service.ts`：唯一规范哈希实现（strict Schema + JCS + SHA-256）。
 - `file-project-context-provider.ts`：有界、稳定排序的项目文件树和 package scripts 编译。
 - `persistence/*`、`logging/*`：原子状态库、锁和事件日志。
@@ -99,7 +101,7 @@
       <task-id>.md
 ```
 
-`SPEC.md` 是唯一用户维护的项目级执行契约。系统不读取额外项目级 YAML/JSON 配置，也不允许 TASK、项目配置或 CLI 覆盖模型、资源和 Git 策略；模型只来自 Claude 用户配置这一运行时事实源。
+`SPEC.md` 是唯一用户维护的项目级执行契约。系统不读取额外项目级 YAML/JSON 配置，也不允许 TASK、项目配置或 CLI 覆盖模型、资源和 Git 策略；模型只来自 Claude 用户配置这一运行时事实源。除自由正文外，`SPEC.md` 必须包含三个固定章节，每个章节只携带一个 ```yaml 代码块：`## 需求契约`（requirements 及各自最低证据强度 evidencePolicy）、`## 支持平台矩阵`（supportedPlatformMatrix，声明稳定 platformId、OS、架构、runtime/toolchain、包管理器和换行策略，允许显式空数组）和 `## 集成验收契约`（与 TASK 验收契约同构的 integration criteria）。
 
 固定策略：
 
@@ -126,6 +128,8 @@ title: 实现用户列表
 ```
 
 前置元数据只允许 `id` 和 `title`。`dependsOn`、资源限制、状态、路径范围、外部门禁及其他未知字段都会被严格拒绝。目录中的全部 Markdown 都会加载并按数字值排序，不存在配置索引与目录内容漂移。
+
+正文必须在固定章节 `### 验收契约` 中携带唯一的 ```yaml 代码块，声明非空 `criteria` 数组。criterion 只允许 `command`、`static`、`human`、`external` 四类：command 使用结构化的 `package_script`/`argv` 执行描述（不接受 raw shell，参数逐项传递且不得包含 shell 拼接语义，引用的 package manager、executable、env/dependency profile 和 platform 只是宿主稳定 ID）；human/external 必须包含 procedure、结构化 expected、非空 requiredEvidence 和版本化 responseSchema。每条 criterion 通过 `requirementRefs` 引用存在的 SPEC requirement，规范键为 `task:<TASK-ID>/<criterion-id>` 或 `integration/<criterion-id>`。缺少验收章节、未知 kind、未知字段、重复规范键、空描述、非法执行描述或悬空稳定 ID 都会在 Agent 启动前拒绝整个项目，不存在旧正文推测、自动补全或宽松 fallback。
 
 源文本先经 UTF-8、BOM 与 NUL 校验，再统一做 CRLF/CR → LF 归一化；其他正文字符逐字节保留。全部项目与契约摘要都由唯一 `CanonicalHashService` 计算：版本化 strict Schema + JCS + SHA-256，不存在第二套算法或旧算法 fallback。Git 路径在加载时校验 NFC、规范化/大小写折叠碰撞和平台可表示性。详见 `docs/CanonicalHashing.md`。
 
@@ -278,7 +282,7 @@ Git 基础设施分为：
 
 `--fresh` 只禁止本次复用，不删除历史。
 
-完成契约以规范投影（`schemaVersion: 1`）经唯一规范哈希入口计算；旧执行模型产生的契约哈希不会被当前系统复用，也没有迁移或降级分支。
+完成契约以版本化规范投影经唯一规范哈希入口计算（TASK/SPEC 契约投影当前为 `schemaVersion: 2`，绑定完整规范化正文与解析后的结构化验收契约）；旧执行模型产生的契约哈希不会被当前系统复用，也没有迁移或降级分支。
 
 恢复前统一核验项目哈希、项目根、RunState 语义、仓库根、分支与 HEAD。Worker init 已落盘时使用 SDK resume；未 init 时替换 sessionId 并复用同一 attempt，基础设施启动故障不会制造 repair 历史；Reviewer 崩溃后结束旧尝试并创建全新只读会话。HEAD 变化只接受两条可推导路径：精确 trailer 证明的“任务提交成功、状态未落盘”，或旧 HEAD 为当前 HEAD 祖先且当前项目端点树完全一致的项目外快进；后者必须先更新 checkpoint 才能继续。
 

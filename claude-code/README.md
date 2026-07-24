@@ -131,13 +131,19 @@ orchestration/
 - 项目统一的验证命令或验收标准；
 - 明确禁止 Agent 自行扩展的范围。
 
-SPEC 应描述“最终必须满足什么”，不必提前指定每个函数、类名或待修改文件。Worker 会在执行 TASK 时读取当前代码，自行选择合理的实现位置。
+除自由正文外，`SPEC.md` 还必须包含三个固定章节，每个章节只携带一个 ```yaml 代码块，缺失或形状非法会在 Agent 启动前拒绝整个项目：
+
+- `## 需求契约`：非空 `requirements` 数组，每条声明稳定 ID（`REQ-大写片段-数字`）、`mandatory` 和最低证据强度 `evidencePolicy`；
+- `## 支持平台矩阵`：`supportedPlatformMatrix` 数组，为每个目标平台声明稳定 platformId、OS、架构、runtime/toolchain、包管理器和换行策略，没有目标平台时使用 `supportedPlatformMatrix: []`；
+- `## 集成验收契约`：与 TASK 验收契约同构的 `criteria` 数组，覆盖完整 lint、typecheck、test、build 门禁和项目要求的其他集成验收。
+
+SPEC 应描述“最终必须满足什么”，不必提前指定每个函数、类名或待修改文件。Worker 会在执行 TASK 时读取当前代码，自行选择合理的实现位置。完整格式见 `docs/Spec.md`。
 
 ### 5. 编写 TASK
 
 每个 TASK 都是 `orchestration/tasks` 下的一个 Markdown 文件，格式必须严格如下：
 
-```markdown
+````markdown
 ---
 id: TASK-001
 title: 实现用户列表查询
@@ -153,7 +159,29 @@ title: 实现用户列表查询
 - 返回结果保持稳定排序；
 - 未认证请求沿用现有鉴权错误格式；
 - 补充适用的自动化测试，并运行项目现有全量检查。
+
+### 验收契约
+
+```yaml
+criteria:
+  - id: AC-001
+    requirementRefs: [REQ-BUILD-001]
+    kind: command
+    scope: full
+    execution:
+      kind: package_script
+      packageManager: pnpm
+      script: test
+      args: []
+      cwdRelative: .
+      timeoutMs: 900000
+      envProfile: project_test
+      dependencyProfile: pnpm_frozen
+    success: exit_code_zero
+    allowNotApplicable: false
+    description: 全量测试通过
 ```
+````
 
 TASK 的规则：
 
@@ -162,13 +190,17 @@ TASK 的规则：
 - TASK 按数字值排序，不要求编号连续；
 - YAML 前置元数据只允许 `id` 和 `title`；
 - 正文必须以 `## 任务描述` 开始，并且不能为空；
+- 正文必须有且仅有一个 `### 验收契约` 章节，章节内只允许一个 ```yaml 代码块，`criteria` 非空；criterion 只允许 `command` / `static` / `human` / `external` 四类，每条必须通过 `requirementRefs` 引用 SPEC 中存在的 requirement；
+- `command` 只接受结构化的 `package_script` / `argv` 执行描述，不接受 raw shell，参数不得包含 shell 拼接语义，引用的 package manager、executable、env/dependency profile 和 platform 只是宿主稳定 ID；
+- `human` / `external` 必须包含非空 `procedure`、结构化 `expected`、非空 `requiredEvidence` 和版本化 `responseSchema`；浏览器、视觉等人工验收用 `human` criterion 声明，不要求 Worker 伪造人工记录；
 - 目录中的所有 `.md` 文件都会被加载；任意一个文档无效都会阻止运行，不存在额外任务索引；
 - 不要添加 `status`、`dependsOn`、`scope`、`gates`、`verification`、`maxAttempts`、`timeoutMinutes` 或其他字段；
 - 前驱关系由数字顺序自动确定，不需要维护额外任务索引；
 - 任务中可以写任务特有的验收事实，但不能覆盖 Apex 的模型、预算、审核或 Git 策略。
 - 不得声明“当前 TASK 阻塞但部分后续 TASK 仍可继续”或其他并行/局部阻塞语义；Apex 的严格线性队列只会在当前 TASK 完成并提交后开放下一个；
-- 依赖项目外数据、凭据、真实人工核对或不可逆决策的核心交付物，必须在生成 TASK 前补齐或先列为待确认问题，不能把必然阻塞的工作放入可执行队列；
-- 浏览器、视觉和发布人工验收属于代码候选完成后的清单，不应要求 Worker 伪造人工记录才能创建 TASK checkpoint。
+- 依赖项目外数据、凭据、真实人工核对或不可逆决策的核心交付物，必须在生成 TASK 前补齐或先列为待确认问题，不能把必然阻塞的工作放入可执行队列。
+
+完整的验收契约格式见 `docs/Task.md`。
 
 需要更多任务时，直接新增文件即可：
 

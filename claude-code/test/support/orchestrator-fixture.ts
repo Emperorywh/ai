@@ -3,6 +3,12 @@
  * 所有可观察副作用都记录为显式字段，使测试能够推导执行顺序、并发度、提交与恢复参数。
  */
 import type { AgentRunOutcome } from "../../src/domain/agent-result.js";
+import {
+  attachCriterionKeys,
+  parseAcceptanceCriteriaDocument,
+  parseRequirementsDocument,
+  parseSupportedPlatformMatrixDocument,
+} from "../../src/domain/acceptance-contract.js";
 import { encodeCanonicalUtf8 } from "../../src/domain/canonical-json.js";
 import {
   PROJECT_STRUCTURE,
@@ -12,8 +18,11 @@ import {
   type TextDocument,
 } from "../../src/domain/project.js";
 import {
+  createPlatformMatrixHash,
+  createRequirementSetHash,
   createSpecContractHash,
   createTaskContractHash,
+  createTaskSetHash,
   splitTaskDocument,
 } from "../../src/domain/project-contract.js";
 import type { RunState } from "../../src/domain/run-state.js";
@@ -378,17 +387,69 @@ export function createLoadedProject(
   /*
    * 应用层夹具同样提供唯一规格文档，避免测试通过空上下文绕过生产不变量。
    * 所有任务契约共享该规格，contractRevision 仍只用于控制单个 TASK 的局部变化。
+   * 结构化契约与生产仓储走同一解析入口，夹具不会绕过 strict Schema 组装假契约。
    */
   const canonicalHash = new NodeCanonicalHashService();
   const hashText = (text: string): string =>
     canonicalHash.digestBytes(encodeCanonicalUtf8(text));
+  const requirements = parseRequirementsDocument(
+    {
+      requirements: [{
+        id: "REQ-TEST-001",
+        mandatory: true,
+        evidencePolicy: {
+          allowedCriterionKinds: ["command"],
+          requiredPlatformIds: [],
+          requiredResponseSchemas: [],
+          requiredEvidence: [],
+          finalCandidateRequired: false,
+        },
+      }],
+    },
+    "fixture SPEC",
+  );
+  const supportedPlatformMatrix = parseSupportedPlatformMatrixDocument(
+    { supportedPlatformMatrix: [] },
+    "fixture SPEC",
+  );
+  const createCriteria = (label: string) =>
+    parseAcceptanceCriteriaDocument(
+      {
+        criteria: [{
+          id: "AC-001",
+          requirementRefs: ["REQ-TEST-001"],
+          kind: "command",
+          scope: "full",
+          execution: {
+            kind: "package_script",
+            packageManager: "pnpm",
+            script: "test",
+            args: [],
+            cwdRelative: ".",
+            timeoutMs: 900000,
+            envProfile: "project_test",
+            dependencyProfile: "pnpm_frozen",
+          },
+          success: "exit_code_zero",
+          allowNotApplicable: false,
+          description: `${label}全量验证通过`,
+        }],
+      },
+      label,
+    );
   const specificationDocument: TextDocument = {
     path: PROJECT_STRUCTURE.specification,
     content: "# 规格说明\n\n测试项目规格。\n",
     sourceHash: hashText("# 规格说明\n\n测试项目规格。\n"),
   };
+  const integrationCriteriaRaw = createCriteria("fixture 集成");
   const specificationContractHash = createSpecContractHash(
-    specificationDocument.content,
+    {
+      body: specificationDocument.content,
+      requirements,
+      supportedPlatformMatrix,
+      integrationCriteria: integrationCriteriaRaw,
+    },
     canonicalHash,
   );
   const tasks = createLinearTaskSequence(taskInputs.map((input) => taskDefinitionSchema.parse({
@@ -405,13 +466,18 @@ export function createLoadedProject(
       ] as const;
     }),
   );
+  const taskCriteria = new Map(tasks.map((task) => [
+    task.id,
+    createCriteria(`fixture ${task.id}`),
+  ] as const));
   /*
    * 测试夹具使用与生产仓储相同的契约哈希函数，跨 Run 复用测试不会依赖手写假哈希。
    * contractRevision 只改变指定 TASK 正文，便于验证局部失效和线性后继传播。
    */
   const taskContractHashes = new Map(tasks.map((task) => {
     const taskDocument = taskDocuments.get(task.id);
-    if (taskDocument === undefined) {
+    const acceptanceCriteria = taskCriteria.get(task.id);
+    if (taskDocument === undefined || acceptanceCriteria === undefined) {
       throw new Error(`测试任务缺少文档：${task.id}`);
     }
     return [
@@ -420,10 +486,21 @@ export function createLoadedProject(
         {
           task,
           body: splitTaskDocument(taskDocument.content)?.body ?? "",
+          acceptanceCriteria,
           specContractHash: specificationContractHash,
         },
         canonicalHash,
       ),
+    ] as const;
+  }));
+  const taskAcceptanceCriteria = new Map(tasks.map((task) => {
+    const acceptanceCriteria = taskCriteria.get(task.id);
+    if (acceptanceCriteria === undefined) {
+      throw new Error(`测试任务缺少验收契约：${task.id}`);
+    }
+    return [
+      task.id,
+      attachCriterionKeys(acceptanceCriteria, { kind: "task", taskId: task.id }),
     ] as const;
   }));
 
@@ -435,6 +512,27 @@ export function createLoadedProject(
     taskContractHashes,
     specificationDocument,
     specificationContractHash,
+    requirements,
+    supportedPlatformMatrix,
+    integrationCriteria: attachCriterionKeys(integrationCriteriaRaw, {
+      kind: "integration",
+    }),
+    taskAcceptanceCriteria,
+    requirementSetHash: createRequirementSetHash(requirements, canonicalHash),
+    platformMatrixHash: createPlatformMatrixHash(
+      supportedPlatformMatrix,
+      canonicalHash,
+    ),
+    taskSetHash: createTaskSetHash(
+      tasks.map((task) => {
+        const contractHash = taskContractHashes.get(task.id);
+        if (contractHash === undefined) {
+          throw new Error(`测试任务缺少契约指纹：${task.id}`);
+        }
+        return { id: task.id, contractHash };
+      }),
+      canonicalHash,
+    ),
   };
 }
 

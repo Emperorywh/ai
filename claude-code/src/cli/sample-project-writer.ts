@@ -10,7 +10,11 @@ import { PROJECT_STRUCTURE } from "../domain/project.js";
 /*
  * 初始化器只生成 orchestration/SPEC.md 和首个 TASK，不创建配置、计划或进度文件。
  * 新任务只新增一个 Markdown 文档，运行时会自动扫描目录，从结构上消除登记遗漏。
+ * 模板与运行时严格项目契约保持同一份结构化章节：requirements、支持平台矩阵、
+ * integration criteria 和 TASK 验收契约缺失或形状非法都会导致加载被拒绝。
  */
+const YAML_FENCE = "```";
+
 const SAMPLE_FILES: Readonly<Record<string, string>> = {
   [PROJECT_STRUCTURE.specification]: `# 规格说明
 
@@ -19,6 +23,50 @@ const SAMPLE_FILES: Readonly<Record<string, string>> = {
 ## 架构与执行约束
 
 请记录模块边界、数据流、状态流，以及所有 Worker 必须遵守的编码和测试约束。
+
+## 需求契约
+
+${YAML_FENCE}yaml
+requirements:
+  - id: REQ-FOUNDATION-001
+    mandatory: true
+    evidencePolicy:
+      allowedCriterionKinds: [command]
+      requiredPlatformIds: []
+      requiredResponseSchemas: []
+      requiredEvidence: []
+      finalCandidateRequired: false
+${YAML_FENCE}
+
+## 支持平台矩阵
+
+${YAML_FENCE}yaml
+# 每个目标平台声明稳定 platformId、OS、架构、runtime/toolchain、包管理器和换行策略；
+# 没有目标平台的项目保持空数组，但任何 platformId 引用都必须指向这里的真实条目。
+supportedPlatformMatrix: []
+${YAML_FENCE}
+
+## 集成验收契约
+
+${YAML_FENCE}yaml
+criteria:
+  - id: AC-001
+    requirementRefs: [REQ-FOUNDATION-001]
+    kind: command
+    scope: full
+    execution:
+      kind: package_script
+      packageManager: pnpm
+      script: build
+      args: []
+      cwdRelative: .
+      timeoutMs: 900000
+      envProfile: project_default
+      dependencyProfile: pnpm_frozen
+    success: exit_code_zero
+    allowNotApplicable: false
+    description: 项目完整构建通过
+${YAML_FENCE}
 `,
   [`${PROJECT_STRUCTURE.taskDirectory}/TASK-001.md`]: `---
 id: TASK-001
@@ -29,6 +77,28 @@ title: 实现第一个任务
 
 请直接描述希望 AI 完成的任务、期望效果和必要背景。
 AI 将自行阅读项目、分析架构、设计方案并完成实现；当前 TASK 完成后才会开启下一个 TASK。
+
+### 验收契约
+
+${YAML_FENCE}yaml
+criteria:
+  - id: AC-001
+    requirementRefs: [REQ-FOUNDATION-001]
+    kind: command
+    scope: full
+    execution:
+      kind: package_script
+      packageManager: pnpm
+      script: test
+      args: []
+      cwdRelative: .
+      timeoutMs: 900000
+      envProfile: project_test
+      dependencyProfile: pnpm_frozen
+    success: exit_code_zero
+    allowNotApplicable: false
+    description: 全量测试通过
+${YAML_FENCE}
 `,
 };
 

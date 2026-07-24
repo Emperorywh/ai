@@ -1,6 +1,8 @@
 /*
- * 项目仓储测试在独立临时目录中验证唯一规格、TASK 前置元数据和内容指纹。
+ * 项目仓储测试在独立临时目录中验证唯一规格、TASK 前置元数据、结构化验收契约和内容指纹。
  * 用例同时证明旧根目录文件与配置文件不会参与加载，项目结构只有程序内一套事实源。
+ * requirements、平台矩阵、integration criteria 与 TASK 验收契约都在 Agent 启动前 strict 解析，
+ * 格式错误或悬空稳定 ID 会被拒绝，项目文档不能内嵌路径、命令或凭据扩大宿主执行能力。
  */
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -16,6 +18,86 @@ function createRepository(): FileProjectRepository {
 
 const temporaryRoots: string[] = [];
 
+const DEFAULT_SPEC = `# SPEC
+
+完整规格与架构约束。
+
+## 需求契约
+
+\`\`\`yaml
+requirements:
+  - id: REQ-BUILD-001
+    mandatory: true
+    evidencePolicy:
+      allowedCriterionKinds: [command, static]
+      requiredPlatformIds: []
+      requiredResponseSchemas: []
+      requiredEvidence: []
+      finalCandidateRequired: false
+  - id: REQ-UX-4K-001
+    mandatory: true
+    evidencePolicy:
+      allowedCriterionKinds: [human]
+      requiredPlatformIds: [windows-4k]
+      requiredResponseSchemas: [performance_acceptance_v1]
+      requiredEvidence: [environment_manifest, metric_samples]
+      finalCandidateRequired: true
+\`\`\`
+
+## 支持平台矩阵
+
+\`\`\`yaml
+supportedPlatformMatrix:
+  - platformId: windows-4k
+    os: windows
+    arch: x64
+    runtime: node-22
+    toolchain: pnpm-11
+    packageManager: pnpm
+    lineEndingPolicy: crlf
+\`\`\`
+
+## 集成验收契约
+
+\`\`\`yaml
+criteria:
+  - id: AC-001
+    requirementRefs: [REQ-BUILD-001]
+    kind: command
+    scope: full
+    execution:
+      kind: package_script
+      packageManager: pnpm
+      script: test
+      args: []
+      cwdRelative: .
+      timeoutMs: 900000
+      envProfile: project_test
+      dependencyProfile: pnpm_frozen
+    success: exit_code_zero
+    allowNotApplicable: false
+    description: 集成全量测试通过
+\`\`\`
+`;
+
+const DEFAULT_TASK_CONTRACT = `criteria:
+  - id: AC-001
+    requirementRefs: [REQ-BUILD-001]
+    kind: command
+    scope: full
+    execution:
+      kind: package_script
+      packageManager: pnpm
+      script: test
+      args: []
+      cwdRelative: .
+      timeoutMs: 900000
+      envProfile: project_test
+      dependencyProfile: pnpm_frozen
+    success: exit_code_zero
+    allowNotApplicable: false
+    description: 全量测试通过`;
+
 interface ProjectFixture {
   readonly root: string;
 }
@@ -26,11 +108,7 @@ async function createProjectFixture(): Promise<ProjectFixture> {
   await mkdir(join(root, "orchestration", "tasks"), { recursive: true });
 
   await Promise.all([
-    writeFile(
-      join(root, "orchestration", "SPEC.md"),
-      "# SPEC\n\n完整规格与架构约束。\n",
-      "utf8",
-    ),
+    writeFile(join(root, "orchestration", "SPEC.md"), DEFAULT_SPEC, "utf8"),
     writeFile(
       join(root, "orchestration", "tasks", "TASK-001.md"),
       createTaskDocument({
@@ -45,20 +123,24 @@ async function createProjectFixture(): Promise<ProjectFixture> {
 }
 
 /*
- * 测试任务文档使用与生产一致的严格前置元数据，不通过辅助 Schema 绕过解析器。
+ * 测试任务文档使用与生产一致的严格前置元数据与固定验收章节，不通过辅助 Schema 绕过解析器。
  * 参数只暴露每个用例需要改变的事实，避免复制大段 YAML 形成测试漂移。
  */
 function createTaskDocument(input: {
   readonly id: string;
   readonly title: string;
   readonly extraMetadata?: Readonly<Record<string, unknown>>;
+  readonly contractYaml?: string;
+  readonly quoteMetadata?: boolean;
 }): string {
-  const metadata = stringify({
-    id: input.id,
-    title: input.title,
-    ...input.extraMetadata,
-  }).trimEnd();
-  return `---\n${metadata}\n---\n\n## 任务描述\n\n任务正文。\n`;
+  const metadata = input.quoteMetadata === true
+    ? `id: "${input.id}"\ntitle: "${input.title}"`
+    : stringify({
+      id: input.id,
+      title: input.title,
+      ...input.extraMetadata,
+    }).trimEnd();
+  return `---\n${metadata}\n---\n\n## 任务描述\n\n任务正文。\n\n### 验收契约\n\n\`\`\`yaml\n${input.contractYaml ?? DEFAULT_TASK_CONTRACT}\n\`\`\`\n`;
 }
 
 afterEach(async () => {
@@ -69,7 +151,7 @@ afterEach(async () => {
 });
 
 describe("FileProjectRepository", () => {
-  it("按集中式项目结构加载唯一规格和完整 TASK 目录", async () => {
+  it("按集中式项目结构加载唯一规格、完整 TASK 目录和结构化项目契约", async () => {
     const fixture = await createProjectFixture();
     const loaded = await createRepository().load(fixture.root);
 
@@ -85,6 +167,138 @@ describe("FileProjectRepository", () => {
     expect(loaded.taskContractHashes.get("TASK-001")).toMatch(
       /^[a-f0-9]{64}$/u,
     );
+    /*
+     * requirements、平台矩阵、integration 与 TASK 验收契约都以规范键冻结，
+     * 四类合同身份随同一规范哈希入口重算。
+     */
+    expect(loaded.requirements.map((requirement) => requirement.id)).toEqual([
+      "REQ-BUILD-001",
+      "REQ-UX-4K-001",
+    ]);
+    expect(loaded.supportedPlatformMatrix.map((platform) => platform.platformId))
+      .toEqual(["windows-4k"]);
+    expect(loaded.integrationCriteria.map((criterion) => criterion.key))
+      .toEqual(["integration/AC-001"]);
+    const taskCriteria = loaded.taskAcceptanceCriteria.get("TASK-001");
+    expect(taskCriteria?.map((criterion) => criterion.key)).toEqual([
+      "task:TASK-001/AC-001",
+    ]);
+    for (const hash of [
+      loaded.requirementSetHash,
+      loaded.platformMatrixHash,
+      loaded.taskSetHash,
+      loaded.specificationContractHash,
+    ]) {
+      expect(hash).toMatch(/^[a-f0-9]{64}$/u);
+    }
+  });
+
+  it("同一项目重复加载得到完全相同的规范键与合同身份", async () => {
+    const fixture = await createProjectFixture();
+    const repository = createRepository();
+    const first = await repository.load(fixture.root);
+    const second = await repository.load(fixture.root);
+
+    expect(second.projectHash).toBe(first.projectHash);
+    expect(second.specificationContractHash).toBe(first.specificationContractHash);
+    expect(second.requirementSetHash).toBe(first.requirementSetHash);
+    expect(second.platformMatrixHash).toBe(first.platformMatrixHash);
+    expect(second.taskSetHash).toBe(first.taskSetHash);
+    expect(second.taskContractHashes.get("TASK-001")).toBe(
+      first.taskContractHashes.get("TASK-001"),
+    );
+    expect(second.integrationCriteria.map((criterion) => criterion.key))
+      .toEqual(first.integrationCriteria.map((criterion) => criterion.key));
+  });
+
+  it("加载包含四类 criterion 的完整项目并形成规范键", async () => {
+    const fixture = await createProjectFixture();
+    await writeFile(
+      join(fixture.root, "orchestration", "tasks", "TASK-001.md"),
+      createTaskDocument({
+        id: "TASK-001",
+        title: "实现任务目录",
+        contractYaml: `criteria:
+  - id: AC-001
+    requirementRefs: [REQ-BUILD-001]
+    kind: command
+    scope: clean_platform
+    platformId: windows-4k
+    execution:
+      kind: package_script
+      packageManager: pnpm
+      script: test
+      args: []
+      cwdRelative: .
+      timeoutMs: 900000
+      envProfile: project_test
+      dependencyProfile: pnpm_frozen
+    success: exit_code_zero
+    allowNotApplicable: false
+    description: 目标平台干净环境全量测试通过
+  - id: AC-002
+    requirementRefs: [REQ-BUILD-001]
+    kind: static
+    allowNotApplicable: false
+    description: 新模块不能反向依赖基础设施层
+  - id: AC-003
+    requirementRefs: [REQ-UX-4K-001]
+    kind: human
+    description: 人工检查 4K 页面视觉结果和交互流畅度
+    procedure:
+      - 在目标设备以 3840x2160 打开规定页面
+      - 按场景清单执行交互并采集帧时间
+    expected:
+      metric: frame_time_p95_ms
+      operator: less_than_or_equal
+      value: 16.7
+    requiredEvidence:
+      - environment_manifest
+      - scenario_checklist
+      - metric_samples
+    responseSchema: performance_acceptance_v1
+    allowNotApplicable: false
+  - id: AC-004
+    requirementRefs: [REQ-UX-4K-001]
+    kind: external
+    description: 外部合规结论签收
+    procedure:
+      - 向合规方索取正式结论并归档
+    expected:
+      metric: compliance_granted
+      operator: equal
+      value: true
+    requiredEvidence:
+      - compliance_statement
+    responseSchema: compliance_acceptance_v1
+    allowNotApplicable: false`,
+      }),
+      "utf8",
+    );
+
+    const loaded = await createRepository().load(fixture.root);
+    const criteria = loaded.taskAcceptanceCriteria.get("TASK-001");
+
+    expect(criteria?.map((criterion) => criterion.kind)).toEqual([
+      "command",
+      "static",
+      "human",
+      "external",
+    ]);
+    expect(criteria?.map((criterion) => criterion.key)).toEqual([
+      "task:TASK-001/AC-001",
+      "task:TASK-001/AC-002",
+      "task:TASK-001/AC-003",
+      "task:TASK-001/AC-004",
+    ]);
+    expect(criteria?.[2]).toMatchObject({
+      responseSchema: "performance_acceptance_v1",
+      requiredEvidence: [
+        "environment_manifest",
+        "scenario_checklist",
+        "metric_samples",
+      ],
+    });
   });
 
   it("新增 TASK 文档后按数字而非文件名字符串排序，无需同步维护索引", async () => {
@@ -116,6 +330,28 @@ describe("FileProjectRepository", () => {
       "TASK-010",
     ]);
     expect(loaded.taskDocuments.size).toBe(3);
+  });
+
+  it("跨 TASK 的裸 criterion id 冲突不会碰撞规范键", async () => {
+    const fixture = await createProjectFixture();
+    await writeFile(
+      join(fixture.root, "orchestration", "tasks", "TASK-002.md"),
+      createTaskDocument({
+        id: "TASK-002",
+        title: "实现第二个任务",
+      }),
+      "utf8",
+    );
+
+    const loaded = await createRepository().load(fixture.root);
+    const firstKeys = loaded.taskAcceptanceCriteria.get("TASK-001")
+      ?.map((criterion) => criterion.key);
+    const secondKeys = loaded.taskAcceptanceCriteria.get("TASK-002")
+      ?.map((criterion) => criterion.key);
+
+    expect(firstKeys).toEqual(["task:TASK-001/AC-001"]);
+    expect(secondKeys).toEqual(["task:TASK-002/AC-001"]);
+    expect(firstKeys?.[0]).not.toBe(secondKeys?.[0]);
   });
 
   it("拒绝旧重复标题、缺失任务描述和空正文", async () => {
@@ -212,7 +448,14 @@ describe("FileProjectRepository", () => {
       "TASK-001.md",
     );
     const current = await readFile(taskPath, "utf8");
-    await writeFile(taskPath, `${current}\n补充验收事实。\n`, "utf8");
+    /*
+     * 正文散文属于任务契约；验收章节保持原样时，正文变化仍必须改变契约身份。
+     */
+    await writeFile(
+      taskPath,
+      current.replace("任务正文。", "任务正文，补充验收事实。"),
+      "utf8",
+    );
 
     const changed = await repository.load(fixture.root);
 
@@ -220,6 +463,73 @@ describe("FileProjectRepository", () => {
     expect(changed.taskContractHashes.get("TASK-001")).not.toBe(
       initial.taskContractHashes.get("TASK-001"),
     );
+    expect(changed.taskSetHash).not.toBe(initial.taskSetHash);
+    expect(changed.specificationContractHash).toBe(
+      initial.specificationContractHash,
+    );
+  });
+
+  it("TASK 验收契约变化会改变任务契约与 task-set 身份", async () => {
+    const fixture = await createProjectFixture();
+    const repository = createRepository();
+    const initial = await repository.load(fixture.root);
+    await writeFile(
+      join(fixture.root, "orchestration", "tasks", "TASK-001.md"),
+      createTaskDocument({
+        id: "TASK-001",
+        title: "实现任务目录",
+        contractYaml: DEFAULT_TASK_CONTRACT.replace(
+          "scope: full",
+          "scope: targeted",
+        ),
+      }),
+      "utf8",
+    );
+
+    const changed = await repository.load(fixture.root);
+
+    expect(changed.taskContractHashes.get("TASK-001")).not.toBe(
+      initial.taskContractHashes.get("TASK-001"),
+    );
+    expect(changed.taskSetHash).not.toBe(initial.taskSetHash);
+    expect(changed.requirementSetHash).toBe(initial.requirementSetHash);
+  });
+
+  it("requirements 与平台矩阵变化会改变对应合同身份并使 TASK 契约失效", async () => {
+    const fixture = await createProjectFixture();
+    const repository = createRepository();
+    const initial = await repository.load(fixture.root);
+    const requirementsChanged = await createProjectFixture();
+    await writeFile(
+      join(requirementsChanged.root, "orchestration", "SPEC.md"),
+      DEFAULT_SPEC.replace("finalCandidateRequired: false", "finalCandidateRequired: true"),
+      "utf8",
+    );
+    const platformChanged = await createProjectFixture();
+    await writeFile(
+      join(platformChanged.root, "orchestration", "SPEC.md"),
+      DEFAULT_SPEC.replace("lineEndingPolicy: crlf", "lineEndingPolicy: lf"),
+      "utf8",
+    );
+
+    const requirementsLoaded = await repository.load(requirementsChanged.root);
+    const platformLoaded = await repository.load(platformChanged.root);
+
+    expect(requirementsLoaded.requirementSetHash).not.toBe(
+      initial.requirementSetHash,
+    );
+    expect(requirementsLoaded.specificationContractHash).not.toBe(
+      initial.specificationContractHash,
+    );
+    expect(requirementsLoaded.taskContractHashes.get("TASK-001")).not.toBe(
+      initial.taskContractHashes.get("TASK-001"),
+    );
+    expect(requirementsLoaded.platformMatrixHash).toBe(initial.platformMatrixHash);
+    expect(platformLoaded.platformMatrixHash).not.toBe(initial.platformMatrixHash);
+    expect(platformLoaded.specificationContractHash).not.toBe(
+      initial.specificationContractHash,
+    );
+    expect(platformLoaded.requirementSetHash).toBe(initial.requirementSetHash);
   });
 
   it("唯一规格变化会使全部 TASK 完成契约失效", async () => {
@@ -241,7 +551,7 @@ describe("FileProjectRepository", () => {
      */
     await writeFile(
       join(fixture.root, "orchestration", "SPEC.md"),
-      "# SPEC\n\n变更后的完整规格与架构约束。\n",
+      DEFAULT_SPEC.replace("完整规格与架构约束", "变更后的完整规格与架构约束"),
       "utf8",
     );
     const changed = await repository.load(fixture.root);
@@ -252,6 +562,224 @@ describe("FileProjectRepository", () => {
         initial.taskContractHashes.get(taskId),
       );
     }
+  });
+
+  it("拒绝缺失验收契约、重复章节与章节散文", async () => {
+    const missingFixture = await createProjectFixture();
+    const duplicateFixture = await createProjectFixture();
+    const proseFixture = await createProjectFixture();
+    const missingDocument = "---\nid: TASK-001\ntitle: 实现任务目录\n---\n\n## 任务描述\n\n任务正文。\n";
+    await writeFile(
+      join(missingFixture.root, "orchestration", "tasks", "TASK-001.md"),
+      missingDocument,
+      "utf8",
+    );
+    const duplicateDocument = createTaskDocument({
+      id: "TASK-001",
+      title: "实现任务目录",
+    }).replace(
+      "全量测试通过",
+      `全量测试通过\n\`\`\`\n\n### 验收契约\n\n\`\`\`yaml\n${DEFAULT_TASK_CONTRACT}`,
+    );
+    await writeFile(
+      join(duplicateFixture.root, "orchestration", "tasks", "TASK-001.md"),
+      duplicateDocument,
+      "utf8",
+    );
+    await writeFile(
+      join(proseFixture.root, "orchestration", "tasks", "TASK-001.md"),
+      createTaskDocument({
+        id: "TASK-001",
+        title: "实现任务目录",
+      }).replace("### 验收契约\n", "### 验收契约\n\n请先阅读这段说明。\n"),
+      "utf8",
+    );
+
+    await expect(createRepository().load(missingFixture.root)).rejects.toThrow(
+      "缺少固定章节",
+    );
+    await expect(createRepository().load(duplicateFixture.root)).rejects.toThrow(
+      "重复固定章节",
+    );
+    await expect(createRepository().load(proseFixture.root)).rejects.toThrow(
+      "必须只包含一个",
+    );
+  });
+
+  it("拒绝缺失 SPEC 固定章节", async () => {
+    const fixture = await createProjectFixture();
+    await writeFile(
+      join(fixture.root, "orchestration", "SPEC.md"),
+      DEFAULT_SPEC.replace("## 需求契约", "## 需求说明"),
+      "utf8",
+    );
+
+    await expect(createRepository().load(fixture.root)).rejects.toThrow(
+      "缺少固定章节：## 需求契约",
+    );
+  });
+
+  it("拒绝未知 kind、raw shell 与缺失 human 必填字段", async () => {
+    const unknownKindFixture = await createProjectFixture();
+    const rawShellFixture = await createProjectFixture();
+    const humanFixture = await createProjectFixture();
+    await writeFile(
+      join(unknownKindFixture.root, "orchestration", "tasks", "TASK-001.md"),
+      createTaskDocument({
+        id: "TASK-001",
+        title: "实现任务目录",
+        contractYaml: `criteria:
+  - id: AC-001
+    requirementRefs: [REQ-BUILD-001]
+    kind: shell
+    description: 非法执行方式`,
+      }),
+      "utf8",
+    );
+    await writeFile(
+      join(rawShellFixture.root, "orchestration", "tasks", "TASK-001.md"),
+      createTaskDocument({
+        id: "TASK-001",
+        title: "实现任务目录",
+        contractYaml: `criteria:
+  - id: AC-001
+    requirementRefs: [REQ-BUILD-001]
+    kind: command
+    scope: full
+    execution: pnpm test && pnpm build
+    success: exit_code_zero
+    description: raw shell 不允许`,
+      }),
+      "utf8",
+    );
+    await writeFile(
+      join(humanFixture.root, "orchestration", "tasks", "TASK-001.md"),
+      createTaskDocument({
+        id: "TASK-001",
+        title: "实现任务目录",
+        contractYaml: `criteria:
+  - id: AC-001
+    requirementRefs: [REQ-UX-4K-001]
+    kind: human
+    description: 缺少 procedure 与 evidence 的人工条款`,
+      }),
+      "utf8",
+    );
+
+    await expect(createRepository().load(unknownKindFixture.root))
+      .rejects.toThrow("验收契约不符合契约");
+    await expect(createRepository().load(rawShellFixture.root))
+      .rejects.toThrow("验收契约不符合契约");
+    await expect(createRepository().load(humanFixture.root))
+      .rejects.toThrow("验收契约不符合契约");
+  });
+
+  it("拒绝重复 criterion id 与悬空 requirementRef/platformId", async () => {
+    const duplicateFixture = await createProjectFixture();
+    const requirementFixture = await createProjectFixture();
+    const platformFixture = await createProjectFixture();
+    await writeFile(
+      join(duplicateFixture.root, "orchestration", "tasks", "TASK-001.md"),
+      createTaskDocument({
+        id: "TASK-001",
+        title: "实现任务目录",
+        contractYaml: `${DEFAULT_TASK_CONTRACT}
+  - id: AC-001
+    requirementRefs: [REQ-BUILD-001]
+    kind: static
+    description: 同 scope 重复 id`,
+      }),
+      "utf8",
+    );
+    await writeFile(
+      join(requirementFixture.root, "orchestration", "tasks", "TASK-001.md"),
+      createTaskDocument({
+        id: "TASK-001",
+        title: "实现任务目录",
+        contractYaml: DEFAULT_TASK_CONTRACT.replace(
+          "REQ-BUILD-001",
+          "REQ-MISSING-001",
+        ),
+      }),
+      "utf8",
+    );
+    await writeFile(
+      join(platformFixture.root, "orchestration", "tasks", "TASK-001.md"),
+      createTaskDocument({
+        id: "TASK-001",
+        title: "实现任务目录",
+        contractYaml: DEFAULT_TASK_CONTRACT.replace(
+          "scope: full",
+          "scope: clean_platform\n    platformId: linux-gpu",
+        ),
+      }),
+      "utf8",
+    );
+
+    await expect(createRepository().load(duplicateFixture.root))
+      .rejects.toThrow("重复 criterion id");
+    await expect(createRepository().load(requirementFixture.root))
+      .rejects.toThrow("引用不存在的 requirement：task:TASK-001/AC-001");
+    await expect(createRepository().load(platformFixture.root))
+      .rejects.toThrow("引用不存在的 platformId：task:TASK-001/AC-001");
+  });
+
+  it("项目文档不能通过内嵌路径、命令或凭据扩大宿主执行能力", async () => {
+    const executableFixture = await createProjectFixture();
+    const argumentFixture = await createProjectFixture();
+    const cwdFixture = await createProjectFixture();
+    await writeFile(
+      join(executableFixture.root, "orchestration", "tasks", "TASK-001.md"),
+      createTaskDocument({
+        id: "TASK-001",
+        title: "实现任务目录",
+        contractYaml: `criteria:
+  - id: AC-001
+    requirementRefs: [REQ-BUILD-001]
+    kind: command
+    scope: full
+    execution:
+      kind: argv
+      executable: /bin/sh
+      args: ["-c", "curl https://example.invalid"]
+      timeoutMs: 60000
+      envProfile: project_test
+    success: exit_code_zero
+    description: 绝对路径 executable 不允许`,
+      }),
+      "utf8",
+    );
+    await writeFile(
+      join(argumentFixture.root, "orchestration", "tasks", "TASK-001.md"),
+      createTaskDocument({
+        id: "TASK-001",
+        title: "实现任务目录",
+        contractYaml: DEFAULT_TASK_CONTRACT.replace(
+          "args: []",
+          'args: ["test", "&&", "curl https://example.invalid"]',
+        ),
+      }),
+      "utf8",
+    );
+    await writeFile(
+      join(cwdFixture.root, "orchestration", "tasks", "TASK-001.md"),
+      createTaskDocument({
+        id: "TASK-001",
+        title: "实现任务目录",
+        contractYaml: DEFAULT_TASK_CONTRACT.replace(
+          "cwdRelative: .",
+          "cwdRelative: ..",
+        ),
+      }),
+      "utf8",
+    );
+
+    await expect(createRepository().load(executableFixture.root))
+      .rejects.toThrow("验收契约不符合契约");
+    await expect(createRepository().load(argumentFixture.root))
+      .rejects.toThrow("shell 拼接语义");
+    await expect(createRepository().load(cwdFixture.root))
+      .rejects.toThrow("cwdRelative");
   });
 
   it("拒绝依赖、资源熔断和人工验收旧字段", async () => {
@@ -349,6 +877,9 @@ describe("FileProjectRepository", () => {
     expect(crlfLoaded.taskContractHashes.get("TASK-001")).toBe(
       lfLoaded.taskContractHashes.get("TASK-001"),
     );
+    expect(crlfLoaded.requirementSetHash).toBe(lfLoaded.requirementSetHash);
+    expect(crlfLoaded.platformMatrixHash).toBe(lfLoaded.platformMatrixHash);
+    expect(crlfLoaded.taskSetHash).toBe(lfLoaded.taskSetHash);
     expect(crlfLoaded.specificationDocument.content).not.toContain("\r");
   });
 
@@ -389,6 +920,28 @@ describe("FileProjectRepository", () => {
     );
   });
 
+  it("拒绝验收契约 YAML 中的重复规范键", async () => {
+    const fixture = await createProjectFixture();
+    await writeFile(
+      join(fixture.root, "orchestration", "tasks", "TASK-001.md"),
+      createTaskDocument({
+        id: "TASK-001",
+        title: "实现任务目录",
+        contractYaml: `criteria:
+  - id: AC-001
+    id: AC-001
+    requirementRefs: [REQ-BUILD-001]
+    kind: static
+    description: 重复 YAML 键`,
+      }),
+      "utf8",
+    );
+
+    await expect(createRepository().load(fixture.root)).rejects.toThrow(
+      "无法解析",
+    );
+  });
+
   it("前置元数据格式变化不改变契约哈希，但改变 source hash", async () => {
     const fixture = await createProjectFixture();
     const repository = createRepository();
@@ -399,7 +952,11 @@ describe("FileProjectRepository", () => {
      */
     await writeFile(
       join(fixture.root, "orchestration", "tasks", "TASK-001.md"),
-      "---\nid: \"TASK-001\"\ntitle: \"实现任务目录\"\n---\n\n## 任务描述\n\n任务正文。\n",
+      createTaskDocument({
+        id: "TASK-001",
+        title: "实现任务目录",
+        quoteMetadata: true,
+      }),
       "utf8",
     );
     const changed = await repository.load(fixture.root);

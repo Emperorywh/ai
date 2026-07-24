@@ -1,10 +1,19 @@
 /*
  * 项目契约投影是 SPEC/TASK 进入证据链的唯一规范形态。
- * 投影包含完整规范化正文：任何业务说明文字变化都会改变 contract hash，不能只哈希结构化块。
+ * 投影包含完整规范化正文与解析后的结构化契约：任何业务说明文字、requirements、
+ * 平台矩阵、验收条款变化都会改变对应 contract hash，不能只哈希结构化块或 YAML 验收块。
  * 等价 LF/CRLF 源文本得到相同 contract hash，路径与结构化字段变化同样改变对应摘要。
  */
 import { z } from "zod";
 import type { CanonicalHashService } from "../ports/canonical-hash.js";
+import {
+  acceptanceCriterionSchema,
+  platformDefinitionSchema,
+  requirementDefinitionSchema,
+  type AcceptanceCriterion,
+  type PlatformDefinition,
+  type RequirementDefinition,
+} from "./acceptance-contract.js";
 import {
   canonicalSha256DigestSchema,
   defineCanonicalSchema,
@@ -22,21 +31,29 @@ const sourceFileProjectionSchema = z.strictObject({
   sourceHash: canonicalSha256DigestSchema,
 });
 
-export const specContractProjectionSchema = defineCanonicalSchema(1, {
+/*
+ * schemaVersion 2 起 SPEC 契约同时绑定完整规范化正文、requirements、支持平台矩阵和
+ * 同构 integrationCriteria；任一结构化契约或业务说明文字变化都会使全部 TASK 契约失效。
+ */
+export const specContractProjectionSchema = defineCanonicalSchema(2, {
   body: z.string(),
+  requirements: z.array(requirementDefinitionSchema),
+  supportedPlatformMatrix: z.array(platformDefinitionSchema),
+  integrationCriteria: z.array(acceptanceCriterionSchema),
 });
 export type SpecContractProjection = CanonicalValue<
   typeof specContractProjectionSchema
 >;
 
 /*
- * 验收契约的结构化解析由后续任务扩展并显式升级 schemaVersion。
- * 当前版本已经绑定完整规范化正文与 SPEC 契约，正文身份不存在第二套算法。
+ * schemaVersion 2 起 TASK 契约同时绑定完整规范化正文与解析后的验收契约。
+ * 规范 criterion key 由正文身份与 criterion id 推导，不作为投影字段重复参与哈希。
  */
-export const taskContractProjectionSchema = defineCanonicalSchema(1, {
+export const taskContractProjectionSchema = defineCanonicalSchema(2, {
   id: z.string().regex(TASK_ID_PATTERN),
   title: nonEmptyString,
   body: z.string(),
+  acceptanceCriteria: z.array(acceptanceCriterionSchema),
   specContractHash: canonicalSha256DigestSchema,
 });
 export type TaskContractProjection = CanonicalValue<
@@ -56,6 +73,36 @@ export type ProjectSourceProjection = CanonicalValue<
 >;
 
 /*
+ * requirement 集合与平台矩阵拥有独立的稳定合同身份，Run 契约可直接引用，
+ * 不必重算整个 SPEC 契约即可证明需求或平台语义是否变化。
+ */
+export const requirementSetProjectionSchema = defineCanonicalSchema(1, {
+  requirements: z.array(requirementDefinitionSchema),
+});
+export type RequirementSetProjection = CanonicalValue<
+  typeof requirementSetProjectionSchema
+>;
+
+export const platformMatrixProjectionSchema = defineCanonicalSchema(1, {
+  platforms: z.array(platformDefinitionSchema),
+});
+export type PlatformMatrixProjection = CanonicalValue<
+  typeof platformMatrixProjectionSchema
+>;
+
+/*
+ * task-set 身份绑定按数字线性顺序排列的全部 TASK 契约指纹，
+ * 任一 TASK 契约或集合顺序变化都会改变该身份。
+ */
+export const taskSetProjectionSchema = defineCanonicalSchema(1, {
+  tasks: z.array(z.strictObject({
+    id: z.string().regex(TASK_ID_PATTERN),
+    contractHash: canonicalSha256DigestSchema,
+  })),
+});
+export type TaskSetProjection = CanonicalValue<typeof taskSetProjectionSchema>;
+
+/*
  * 前置元数据与正文只有一个拆分入口，仓储解析与契约投影共享同一事实源。
  * 输入必须已经完成 LF 归一化，正文中的 YAML 示例不会被误解析。
  */
@@ -70,12 +117,20 @@ export function splitTaskDocument(
 }
 
 export function createSpecContractHash(
-  normalizedSpecBody: string,
+  input: {
+    readonly body: string;
+    readonly requirements: readonly RequirementDefinition[];
+    readonly supportedPlatformMatrix: readonly PlatformDefinition[];
+    readonly integrationCriteria: readonly AcceptanceCriterion[];
+  },
   canonicalHash: CanonicalHashService,
 ): string {
   return canonicalHash.digestStructured(specContractProjectionSchema, {
     schemaVersion: specContractProjectionSchema.schemaVersion,
-    body: normalizedSpecBody,
+    body: input.body,
+    requirements: [...input.requirements],
+    supportedPlatformMatrix: [...input.supportedPlatformMatrix],
+    integrationCriteria: [...input.integrationCriteria],
   });
 }
 
@@ -83,6 +138,7 @@ export function createTaskContractHash(
   input: {
     readonly task: TaskDefinition;
     readonly body: string;
+    readonly acceptanceCriteria: readonly AcceptanceCriterion[];
     readonly specContractHash: string;
   },
   canonicalHash: CanonicalHashService,
@@ -92,6 +148,7 @@ export function createTaskContractHash(
     id: input.task.id,
     title: input.task.title,
     body: input.body,
+    acceptanceCriteria: [...input.acceptanceCriteria],
     specContractHash: input.specContractHash,
   });
 }
@@ -107,5 +164,35 @@ export function createProjectHash(
     schemaVersion: projectSourceProjectionSchema.schemaVersion,
     specification: input.specification,
     tasks: [...input.tasks],
+  });
+}
+
+export function createRequirementSetHash(
+  requirements: readonly RequirementDefinition[],
+  canonicalHash: CanonicalHashService,
+): string {
+  return canonicalHash.digestStructured(requirementSetProjectionSchema, {
+    schemaVersion: requirementSetProjectionSchema.schemaVersion,
+    requirements: [...requirements],
+  });
+}
+
+export function createPlatformMatrixHash(
+  platforms: readonly PlatformDefinition[],
+  canonicalHash: CanonicalHashService,
+): string {
+  return canonicalHash.digestStructured(platformMatrixProjectionSchema, {
+    schemaVersion: platformMatrixProjectionSchema.schemaVersion,
+    platforms: [...platforms],
+  });
+}
+
+export function createTaskSetHash(
+  tasks: readonly { readonly id: string; readonly contractHash: string }[],
+  canonicalHash: CanonicalHashService,
+): string {
+  return canonicalHash.digestStructured(taskSetProjectionSchema, {
+    schemaVersion: taskSetProjectionSchema.schemaVersion,
+    tasks: tasks.map((task) => ({ ...task })),
   });
 }
