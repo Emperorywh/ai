@@ -1,0 +1,4 @@
+interface:
+  display_name: "原型图驱动三维场景制作"
+  short_description: "从需求与原型图建立对照机位，制作并验证可交互三维场景的视觉还原"
+  default_prompt: "使用 $reference-scene-builder，依据我提供的需求文档和原型图制作三维场景，先校准机位与关键形体，再扩展并验证目标运行效果。"
